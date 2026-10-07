@@ -205,3 +205,12 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Heartless runtime
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+logs/
+.venv/

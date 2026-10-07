@@ -1,0 +1,17 @@
+[Unit]
+Description=Heartless trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=heartless
+WorkingDirectory=/opt/heartless
+EnvironmentFile=/opt/heartless/.env
+ExecStart=/opt/heartless/.venv/bin/heartless run
+Restart=always
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

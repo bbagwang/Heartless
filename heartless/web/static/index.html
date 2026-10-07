@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Heartless Dashboard</title>
+<style>
+:root{
+  --page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;
+  --s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#4a3aa7;--s8:#e34948;
+  --good:#006300;--bad:#d03b3b;--warn:#fab219;--btn:#2a78d6;--btn-ink:#fff;--danger:#d03b3b;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --page:#0d0d0d;--surface:#1a1a19;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;
+    --s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;
+    --good:#0ca30c;--bad:#e66767;--warn:#fab219;--btn:#3987e5;
+  }
+}
+:root[data-theme="dark"]{
+  --page:#0d0d0d;--surface:#1a1a19;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;
+  --s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;
+  --good:#0ca30c;--bad:#e66767;--warn:#fab219;--btn:#3987e5;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans KR",sans-serif;padding:16px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}
+h1{font-size:20px;margin:0;letter-spacing:.3px}
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-weight:600;font-size:12px;border:1px solid var(--axis);color:var(--ink2)}
+.badge.live{border-color:var(--bad);color:var(--bad)}.badge.paper{border-color:var(--good);color:var(--good)}.badge.paused{border-color:var(--warn);color:var(--warn)}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.card{background:var(--surface);border:1px solid var(--grid);border-radius:12px;padding:14px 16px;min-width:0}
+.card h2{font-size:13px;margin:0 0 10px;color:var(--ink2);font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
+.tile .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}.tile .l{color:var(--muted);font-size:12px}
+.pos{color:var(--good)}.neg{color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;padding:6px 6px;border-bottom:1px solid var(--grid)}
+td{padding:7px 6px;border-bottom:1px solid var(--grid);vertical-align:top}
+tr:last-child td{border-bottom:0}
+.wrap{overflow-x:auto}
+button{background:var(--btn);color:var(--btn-ink);border:0;border-radius:8px;padding:7px 12px;font-weight:600;cursor:pointer;font-size:13px}
+button.ghost{background:transparent;color:var(--ink2);border:1px solid var(--axis)}
+button.danger{background:var(--danger)}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.muted{color:var(--muted)}.small{font-size:12px}
+svg text{fill:var(--ink2);font-size:11px}
+.tip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--axis);border-radius:8px;padding:6px 10px;font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,.25);display:none;z-index:10}
+.chart{position:relative}
+code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--ink2)}
+.reason{max-width:420px;white-space:normal;color:var(--ink2);font-size:12px}
+.span2{grid-column:span 2}
+@media (max-width:720px){.span2{grid-column:span 1}}
+.log div{padding:4px 0;border-bottom:1px solid var(--grid);font-size:12px}
+.sel{background:var(--surface);color:var(--ink);border:1px solid var(--axis);border-radius:8px;padding:6px 8px}
+</style>
+</head>
+<body>
+<header>
+  <div class="row"><h1>Heartless</h1><span id="mode" class="badge">…</span><span id="paused" class="badge paused" style="display:none">일시정지</span><span id="stream" class="badge">stream</span></div>
+  <div class="row">
+    <button id="btnPause" class="ghost">⏸ 진입 중지</button>
+    <button id="btnResume" class="ghost">▶ 재개</button>
+    <button id="btnResearch" class="ghost">🔬 리서치 실행</button>
+    <button id="btnMode" class="ghost">모드 전환</button>
+    <button id="btnCloseAll" class="danger">전량 청산</button>
+  </div>
+</header>
+
+<div class="card" style="margin-bottom:12px">
+  <div class="tiles">
+    <div class="tile"><div class="v" id="equity">–</div><div class="l">자산 (USDT)</div></div>
+    <div class="tile"><div class="v" id="today">–</div><div class="l">오늘 실현손익</div></div>
+    <div class="tile"><div class="v" id="unreal">–</div><div class="l">미실현</div></div>
+    <div class="tile"><div class="v" id="ntrades">–</div><div class="l">오늘 거래 / 승률</div></div>
+    <div class="tile"><div class="v" id="pf">–</div><div class="l">PF (7일) / 평균 R</div></div>
+    <div class="tile"><div class="v" id="npos">–</div><div class="l">열린 포지션</div></div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card span2">
+    <div class="row" style="justify-content:space-between"><h2>자산 곡선</h2>
+      <select id="eqRange" class="sel"><option value="1">1일</option><option value="7" selected>7일</option><option value="30">30일</option></select></div>
+    <div class="chart"><svg id="eqChart" width="100%" height="220"></svg><div class="tip" id="eqTip"></div></div>
+  </div>
+  <div class="card">
+    <h2>알파 신뢰도 (Thompson)</h2>
+    <div class="chart"><svg id="alphaChart" width="100%" height="220"></svg><div class="tip" id="alphaTip"></div></div>
+  </div>
+</div>
+
+<div class="grid" style="margin-top:12px">
+  <div class="card span2">
+    <h2>열린 포지션</h2>
+    <div class="wrap"><table id="positions"><thead><tr><th>심볼</th><th>방향</th><th>알파</th><th>진입</th><th>현재</th><th>손절</th><th>목표</th><th>손익</th><th>R</th><th>근거</th><th></th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div class="card">
+    <h2>리서치 / 챌린저</h2>
+    <div id="research" class="small"></div>
+  </div>
+</div>
+
+<div class="grid" style="margin-top:12px">
+  <div class="card span2">
+    <h2>최근 거래</h2>
+    <div class="wrap"><table id="trades"><thead><tr><th>시각</th><th>심볼</th><th>방향</th><th>알파</th><th>진입→청산</th><th>손익</th><th>R</th><th>사유</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div class="card">
+    <h2>엔진 비교</h2>
+    <div class="wrap"><table id="engines"><thead><tr><th>엔진</th><th>버전</th><th>자산</th><th>오늘</th><th>포지션</th></tr></thead><tbody></tbody></table></div>
+    <h2 style="margin-top:14px">이벤트</h2>
+    <div id="events" class="log"></div>
+  </div>
+</div>
+
+<script>
+const SERIES=['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'];
+const ALPHA_ORDER=['trend_pullback','squeeze_breakout','mean_reversion','momentum_burst','funding_fade','sweep_reversal'];
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmt=(v,d=2)=>v==null?'–':Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+const sgn=v=>(v>0?'+':'')+fmt(v);
+const cls=v=>v>0?'pos':v<0?'neg':'';
+const ts=(ms,withDate=true)=>{const d=new Date(ms);return (withDate?d.toLocaleDateString(undefined,{month:'2-digit',day:'2-digit'})+' ':'')+d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})};
+const px=(p)=>p==null?'–':(p>=1000?fmt(p,2):p>=1?fmt(p,4):fmt(p,6));
+async function api(path,opt){const r=await fetch(path,Object.assign({headers:{'content-type':'application/json'}},opt||{}));if(r.status===401){location.href='/';return null}return r.json()}
+async function post(path,body){return api(path,{method:'POST',body:JSON.stringify(body||{})})}
+
+let status=null;
+async function refresh(){
+  status=await api('/api/status'); if(!status) return;
+  const prim=status.engines[status.primary]||{};
+  const m=document.getElementById('mode'); m.textContent=status.mode==='live'?'🔴 LIVE':'🟢 PAPER'; m.className='badge '+status.mode;
+  document.getElementById('paused').style.display=status.paused?'inline-block':'none';
+  const st=document.getElementById('stream'); st.textContent=status.health.market_stream?'stream OK':'stream 끊김'; st.className='badge '+(status.health.market_stream?'paper':'live');
+  document.getElementById('equity').textContent=fmt(prim.equity);
+  const t=status.today||{}; const e=document.getElementById('today'); e.textContent=sgn(t.net||0); e.className='v '+cls(t.net||0);
+  const unreal=(prim.positions||[]).reduce((a,p)=>a+(p.unrealized||0),0); const u=document.getElementById('unreal'); u.textContent=sgn(unreal); u.className='v '+cls(unreal);
+  document.getElementById('ntrades').textContent=`${t.n||0} / ${fmt(t.win_rate||0,0)}%`;
+  document.getElementById('npos').textContent=(prim.positions||[]).length;
+  renderPositions(prim.positions||[], status.primary);
+  renderEngines(status.engines);
+  renderResearch(status);
+  renderAlphaChart(status.alphas||[]);
+  document.getElementById('btnMode').textContent=status.mode==='live'?'→ PAPER 전환':'→ LIVE 전환';
+  document.getElementById('btnMode').disabled=status.mode!=='live'&&!status.live_capable;
+}
+function renderPositions(rows,engine){
+  const tb=document.querySelector('#positions tbody'); tb.innerHTML='';
+  if(!rows.length){tb.innerHTML='<tr><td colspan="11" class="muted">열린 포지션 없음</td></tr>';return}
+  for(const p of rows){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><b>${p.symbol}</b><div class="small muted">${p.status} · ${p.regime}</div></td><td class="${p.side==='LONG'?'pos':'neg'}">${p.side}</td>
+      <td><code>${p.alpha}</code>${p.alphas&&p.alphas.length>1?'<div class="small muted">+'+p.alphas.slice(1).join(', ')+'</div>':''}</td>
+      <td>${px(p.entry)}</td><td>${px(p.mark)}</td><td>${px(p.stop)}</td><td>${p.tp?px(p.tp):'trail'}${p.tp1_done?'<div class="small muted">1차익절✓</div>':''}</td>
+      <td class="${cls(p.unrealized)}">${sgn(p.unrealized)}<div class="small">${sgn(p.pnl_pct)}%</div></td><td class="${cls(p.r)}">${fmt(p.r,2)}</td>
+      <td class="reason">${p.reason}</td><td><button class="ghost" data-sym="${p.symbol}">청산</button></td>`;
+    tr.querySelector('button').onclick=async ev=>{if(confirm(p.symbol+' 포지션을 청산할까요?')){await post('/api/close',{symbol:p.symbol,engine});refresh()}};
+    tb.appendChild(tr);
+  }
+}
+function renderEngines(engines){
+  const tb=document.querySelector('#engines tbody'); tb.innerHTML='';
+  for(const [name,e] of Object.entries(engines)){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${name==='live'?'🔴':'🧪'} ${name}</td><td><code>${e.params_version}</code></td><td>${fmt(e.equity)}</td><td class="${cls(e.realized_today)}">${sgn(e.realized_today)}</td><td>${e.positions.length}</td>`;
+    tb.appendChild(tr);
+  }
+}
+function renderResearch(s){
+  const r=s.research||{}; const g=s.graduation; let h='';
+  h+=`<div>챔피언 <code>${s.params_version}</code></div>`;
+  h+=`<div>마지막 리서치: ${r.last_cycle?ts(r.last_cycle):'–'} ${r.running?'<span class="badge">진행 중</span>':''}</div>`;
+  h+=`<div>다음 예정: ${r.next_due?ts(r.next_due):'–'}</div>`;
+  if(s.challengers&&s.challengers.length){h+='<div style="margin-top:8px"><b>챌린저</b></div>';for(const c of s.challengers){h+=`<div>• ${c.name} <code>${c.version}</code> (${c.source}) ${ts(c.started)}~</div>`}}
+  else h+='<div class="muted" style="margin-top:8px">활성 챌린저 없음</div>';
+  if(g){h+=`<div style="margin-top:8px"><b>졸업 조건</b> ${g.ok?'✅':'⏳'}<br>거래 ${g.n}/${g.need.trades} · PF ${fmt(g.profit_factor)}/${g.need.profit_factor} · MDD ${fmt(g.max_dd_pct,1)}%/${g.need.max_dd_pct}% · 순익 ${sgn(g.net)}</div>`}
+  document.getElementById('research').innerHTML=h;
+}
+/* ---- equity line chart: single series, crosshair + tooltip ---- */
+let eqData=[];
+async function loadEquity(){const days=document.getElementById('eqRange').value;eqData=await api('/api/equity?days='+days)||[];drawEquity();
+  const pnl=await api('/api/pnl?period=week'); if(pnl&&pnl.stats){const s=pnl.stats;document.getElementById('pf').textContent=`${s.profit_factor==null?'–':fmt(Math.min(s.profit_factor,99))} / ${sgn(s.avg_r)}R`}}
+function drawEquity(){
+  const svg=document.getElementById('eqChart'); const W=svg.clientWidth||600,H=220,L=56,R=12,T=12,B=28; svg.setAttribute('viewBox',`0 0 ${W} ${H}`); svg.innerHTML='';
+  if(eqData.length<2){svg.innerHTML=`<text x="${W/2}" y="${H/2}" text-anchor="middle">데이터 수집 중…</text>`;return}
+  const xs=eqData.map(d=>d[0]),ys=eqData.map(d=>d[2]); const x0=xs[0],x1=xs[xs.length-1]; let y0=Math.min(...ys),y1=Math.max(...ys); if(y1-y0<1e-9){y0-=1;y1+=1} const pad=(y1-y0)*0.08;y0-=pad;y1+=pad;
+  const X=v=>L+(v-x0)/(x1-x0)*(W-L-R),Y=v=>T+(1-(v-y0)/(y1-y0))*(H-T-B);
+  let g='';
+  for(let i=0;i<=4;i++){const v=y0+(y1-y0)*i/4;g+=`<line x1="${L}" x2="${W-R}" y1="${Y(v)}" y2="${Y(v)}" stroke="${css('--grid')}" stroke-width="1"/><text x="${L-6}" y="${Y(v)+4}" text-anchor="end">${fmt(v,0)}</text>`}
+  for(let i=0;i<=4;i++){const v=x0+(x1-x0)*i/4;g+=`<text x="${X(v)}" y="${H-8}" text-anchor="middle">${ts(v,i===0||i===4)}</text>`}
+  g+=`<line x1="${L}" x2="${W-R}" y1="${Y(y0)}" y2="${Y(y0)}" stroke="${css('--axis')}" stroke-width="1"/>`;
+  const start=ys[0]; const path=eqData.map((d,i)=>(i?'L':'M')+X(d[0]).toFixed(1)+' '+Y(d[2]).toFixed(1)).join(' ');
+  g+=`<path d="${path}" fill="none" stroke="${css('--s1')}" stroke-width="2" stroke-linejoin="round"/>`;
+  g+=`<line x1="${L}" x2="${W-R}" y1="${Y(start)}" y2="${Y(start)}" stroke="${css('--muted')}" stroke-dasharray="3 4" stroke-width="1"/>`;
+  const last=eqData[eqData.length-1]; g+=`<circle cx="${X(last[0])}" cy="${Y(last[2])}" r="4" fill="${css('--s1')}" stroke="${css('--surface')}" stroke-width="2"/>`;
+  g+=`<text x="${X(last[0])-6}" y="${Y(last[2])-8}" text-anchor="end">${fmt(last[2])}</text>`;
+  g+=`<line id="eqCross" x1="0" x2="0" y1="${T}" y2="${H-B}" stroke="${css('--axis')}" stroke-width="1" style="display:none"/><circle id="eqDot" r="4" fill="${css('--s1')}" stroke="${css('--surface')}" stroke-width="2" style="display:none"/>`;
+  svg.innerHTML=g;
+  const tip=document.getElementById('eqTip');
+  svg.onmousemove=ev=>{const r=svg.getBoundingClientRect();const mx=(ev.clientX-r.left)*W/r.width;const tv=x0+(mx-L)/(W-L-R)*(x1-x0);let lo=0,hi=xs.length-1;while(lo<hi){const mid=(lo+hi)>>1;if(xs[mid]<tv)lo=mid+1;else hi=mid}const i=Math.max(0,Math.min(xs.length-1,lo));const d=eqData[i];
+    const cx=X(d[0]),cy=Y(d[2]);const c=svg.querySelector('#eqCross');c.setAttribute('x1',cx);c.setAttribute('x2',cx);c.style.display='';const dot=svg.querySelector('#eqDot');dot.setAttribute('cx',cx);dot.setAttribute('cy',cy);dot.style.display='';
+    tip.style.display='block';tip.innerHTML=`<b>${fmt(d[2])}</b> USDT<br><span class="muted">${ts(d[0])}</span><br><span class="${cls(d[2]-start)}">${sgn(d[2]-start)} (${sgn((d[2]/start-1)*100)}%)</span>`;tip.style.left=Math.min(ev.clientX-r.left+12,r.width-150)+'px';tip.style.top=(ev.clientY-r.top-10)+'px'};
+  svg.onmouseleave=()=>{tip.style.display='none';svg.querySelector('#eqCross').style.display='none';svg.querySelector('#eqDot').style.display='none'};
+}
+/* ---- alpha trust: horizontal bars, fixed categorical order, direct labels ---- */
+function renderAlphaChart(rows){
+  const svg=document.getElementById('alphaChart'); const W=svg.clientWidth||320,H=220,L=120,R=44,T=8,B=20; svg.setAttribute('viewBox',`0 0 ${W} ${H}`);
+  const order=ALPHA_ORDER.filter(a=>rows.some(r=>r.alpha===a)).concat(rows.map(r=>r.alpha).filter(a=>!ALPHA_ORDER.includes(a)));
+  const n=order.length||1,bh=Math.min(22,(H-T-B)/n-6); const X=v=>L+v/1.5*(W-L-R); let g='';
+  g+=`<line x1="${X(1)}" x2="${X(1)}" y1="${T}" y2="${H-B}" stroke="${css('--muted')}" stroke-dasharray="3 4"/><text x="${X(1)}" y="${H-6}" text-anchor="middle">1.0 = 중립</text>`;
+  g+=`<line x1="${L}" x2="${L}" y1="${T}" y2="${H-B}" stroke="${css('--axis')}"/>`;
+  order.forEach((a,i)=>{const r=rows.find(x=>x.alpha===a)||{trust:1,n:0,avg_r:0};const y=T+i*((H-T-B)/n)+((H-T-B)/n-bh)/2;const col=css(SERIES[ALPHA_ORDER.indexOf(a)>=0?ALPHA_ORDER.indexOf(a):i%8]);
+    g+=`<text x="${L-8}" y="${y+bh/2+4}" text-anchor="end">${a}</text><rect class="bar" data-i="${i}" x="${L}" y="${y}" width="${Math.max(0,X(r.trust)-L)}" height="${bh}" rx="4" fill="${col}"/><text x="${X(r.trust)+6}" y="${y+bh/2+4}">${fmt(r.trust,2)}</text>`});
+  svg.innerHTML=g;
+  const tip=document.getElementById('alphaTip');
+  svg.querySelectorAll('rect.bar').forEach(el=>{el.onmousemove=ev=>{const r=rows.find(x=>x.alpha===order[+el.dataset.i])||{};const rc=svg.getBoundingClientRect();tip.style.display='block';tip.innerHTML=`<b>${order[+el.dataset.i]}</b><br>trust ${fmt(r.trust,2)} · n=${r.n}<br>avg R ${sgn(r.avg_r)}<br>추세↑ ${r.trend_up?fmt(r.trend_up.mean):'-'} 횡보 ${r.range?fmt(r.range.mean):'-'} 변동 ${r.volatile?fmt(r.volatile.mean):'-'}`;tip.style.left=Math.min(ev.clientX-rc.left+12,rc.width-160)+'px';tip.style.top=(ev.clientY-rc.top-10)+'px'};el.onmouseleave=()=>tip.style.display='none'});
+}
+async function loadTrades(){const rows=await api('/api/trades?limit=40')||[];const tb=document.querySelector('#trades tbody');tb.innerHTML='';
+  if(!rows.length){tb.innerHTML='<tr><td colspan="8" class="muted">거래 없음</td></tr>';return}
+  for(const t of rows){const tr=document.createElement('tr');tr.innerHTML=`<td>${ts(t.exit_time)}</td><td><b>${t.symbol}</b></td><td class="${t.side==='LONG'?'pos':'neg'}">${t.side}</td><td><code>${t.alpha}</code></td><td>${px(t.entry_price)} → ${px(t.exit_price)}</td><td class="${cls(t.pnl)}">${sgn(t.pnl)}</td><td class="${cls(t.r_multiple)}">${fmt(t.r_multiple)}</td><td class="reason">${t.exit_reason}</td>`;tb.appendChild(tr)}}
+async function loadEvents(){const rows=await api('/api/events?limit=30')||[];const el=document.getElementById('events');el.innerHTML=rows.map(e=>`<div><span class="muted">${ts(e.ts)}</span> <b>${e.topic}</b> ${typeof e.message==='object'?(e.message.message||e.message.reason||JSON.stringify(e.message).slice(0,160)):e.message}</div>`).join('')||'<div class="muted">없음</div>'}
+document.getElementById('btnPause').onclick=async()=>{await post('/api/pause');refresh()};
+document.getElementById('btnResume').onclick=async()=>{await post('/api/resume');refresh()};
+document.getElementById('btnResearch').onclick=async()=>{const r=await post('/api/research/run');alert(r&&r.ok?'리서치 사이클을 시작했습니다':'이미 진행 중입니다')};
+document.getElementById('btnCloseAll').onclick=async()=>{if(confirm('모든 포지션을 시장가로 청산할까요?')){await post('/api/close_all');refresh()}};
+document.getElementById('btnMode').onclick=async()=>{const to=status.mode==='live'?'paper':'live';if(confirm(to==='live'?'실제 자금으로 거래를 시작합니다. 계속할까요?':'라이브 포지션을 청산하고 PAPER 로 전환할까요?')){const r=await post('/api/mode',{mode:to});alert(r&&r.message||'ok');refresh()}};
+document.getElementById('eqRange').onchange=loadEquity;
+window.addEventListener('resize',()=>{drawEquity();if(status)renderAlphaChart(status.alphas||[])});
+async function tick(){try{await refresh();await loadTrades();await loadEvents()}catch(e){console.error(e)}}
+tick();loadEquity();setInterval(tick,5000);setInterval(loadEquity,60000);
+</script>
+</body>
+</html>

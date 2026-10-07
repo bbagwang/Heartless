@@ -1,0 +1,17 @@
+services:
+  heartless:
+    build: .
+    container_name: heartless
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - HEARTLESS_DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:8080:8080"   # bind to localhost; put a reverse proxy / VPN in front for remote access
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
