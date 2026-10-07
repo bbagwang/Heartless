@@ -48,7 +48,10 @@ class MeanReversion(Alpha):
         if abs(entry - alt) >= 0.6 * atr and abs(entry - alt) < abs(entry - stop):
             stop = alt
         tp = mid
-        if abs(tp - entry) < 0.6 * abs(entry - stop):  # reward too small
+        # Signed reward: the midline must be on the favourable side of entry (a wick can pierce the band while the
+        # bar closes past the midline) and far enough away; a TP behind entry is rejected live (-2021) and
+        # self-triggers on the next tick in paper/backtest.
+        if (tp - entry) * side.sign < 0.6 * abs(entry - stop):  # reward too small or on the wrong side
             return None
         tp1 = entry + (tp - entry) * 0.5
         conf = 0.5

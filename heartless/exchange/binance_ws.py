@@ -78,7 +78,11 @@ class MarketStream:
                                 continue
                             raw = recv_task.result()
                             self.last_msg_ts = time.time()
-                            await self._dispatch(raw)
+                            try:
+                                await self._dispatch(raw)
+                            except Exception:  # noqa: BLE001
+                                # Handler errors are not socket errors: log and keep the stream alive.
+                                log.exception("market stream callback failed")
                     finally:
                         restart_task.cancel()
             except (ConnectionClosed, OSError, asyncio.TimeoutError) as e:
@@ -160,9 +164,14 @@ class UserStream:
                             if msg.get("e") == "listenKeyExpired":
                                 log.warning("listenKey expired, reconnecting")
                                 break
-                            res = self.on_event(msg)
-                            if asyncio.iscoroutine(res):
-                                await res
+                            try:
+                                res = self.on_event(msg)
+                                if asyncio.iscoroutine(res):
+                                    await res
+                            except Exception:  # noqa: BLE001
+                                # A failing handler must not be mistaken for a socket failure: keep the
+                                # connection (and every subsequent ORDER_TRADE_UPDATE) instead of reconnecting.
+                                log.exception("user stream callback failed (e=%s)", msg.get("e"))
                 except (ConnectionClosed, OSError, asyncio.TimeoutError) as e:
                     log.warning("user stream disconnected: %s", e)
                 except Exception:  # noqa: BLE001

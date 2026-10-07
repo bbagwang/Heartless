@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=Path("data"), alias="HEARTLESS_DATA_DIR")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     timezone: str = Field(default="Asia/Seoul", alias="TIMEZONE")
-    web_host: str = Field(default="0.0.0.0", alias="WEB_HOST")
+    # Loopback by default: the dashboard exposes live-money controls over plain HTTP. Set WEB_HOST=0.0.0.0
+    # only behind a TLS reverse proxy / VPN (docker-compose does this and pins the host side to 127.0.0.1).
+    web_host: str = Field(default="127.0.0.1", alias="WEB_HOST")
     web_port: int = Field(default=8080, alias="WEB_PORT")
     web_enabled: bool = Field(default=True, alias="WEB_ENABLED")
 
@@ -65,6 +67,15 @@ class Settings(BaseSettings):
     graduation_min_profit_factor: float = Field(default=1.25, alias="GRADUATION_MIN_PF")
     graduation_max_drawdown_pct: float = Field(default=8.0, alias="GRADUATION_MAX_DD_PCT")
     daily_report_hour: int = Field(default=9, alias="DAILY_REPORT_HOUR")  # local hour (timezone above)
+
+    @field_validator("telegram_owner_id", mode="before")
+    @classmethod
+    def _blank_owner_id_is_none(cls, v):
+        # `.env.example` ships `TELEGRAM_OWNER_ID=` ("leave empty to use the pairing flow"); pydantic-settings
+        # hands that through as "" which `int | None` rejects, crashing every CLI command at startup.
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @property
     def live_capable(self) -> bool:

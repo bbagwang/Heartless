@@ -59,7 +59,7 @@ def main(argv: list[str] | None = None) -> None:
 def _run(settings) -> None:
     from heartless.app import Heartless
 
-    async def runner() -> None:
+    async def runner() -> BaseException | None:
         app = Heartless(settings)
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
@@ -71,16 +71,22 @@ def _run(settings) -> None:
         main_task = asyncio.create_task(app.run())
         stopper = asyncio.create_task(stop.wait())
         done, _ = await asyncio.wait({main_task, stopper}, return_when=asyncio.FIRST_COMPLETED)
-        if main_task in done and main_task.exception():
-            log.error("fatal: %s", main_task.exception())
-        await app.stop()
+        err = main_task.exception() if (main_task in done and not main_task.cancelled()) else None
+        if err is not None:
+            log.error("fatal: %s", err, exc_info=err)
+        try:
+            await app.stop()
+        except Exception as e:  # noqa: BLE001
+            log.error("stop failed: %s", e)
         main_task.cancel()
         try:
             await main_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
+        return err
 
-    asyncio.run(runner())
+    if asyncio.run(runner()) is not None:
+        sys.exit(1)
 
 
 async def _load_symbols_and_universe(settings, store, download: bool, symbols_arg: str | None):
@@ -115,7 +121,9 @@ async def _ensure_candles(rest, store, universe: list[str], days: int) -> None:
         if start < now - MS_MINUTE:
             print(f"downloading {sym} 1m candles ...", file=sys.stderr)
             rows = await rest.klines_range(sym, start, now, "1m")
-            store.save_candles(sym, rows)
+            rows = [c for c in rows if c.close_time <= now]
+            if rows:
+                store.save_candles(sym, rows)
         f_lo, f_hi = store.funding_range(sym)
         if f_hi is None or f_hi < now - 8 * MS_HOUR:
             fr = await rest.funding_rate_history(sym, start=since, end=now)
@@ -144,7 +152,7 @@ async def _backtest(settings, args) -> None:
     if not bt.candles:
         print("no candles stored. Run with --download or start the bot once.", file=sys.stderr)
         sys.exit(1)
-    res = bt.run(params, only_alpha=args.alpha, initial_balance=settings.paper_initial_balance)
+    res = await bt.arun(params, only_alpha=args.alpha, initial_balance=settings.paper_initial_balance)
     if args.json:
         print(json.dumps({"stats": res.stats, "by_alpha": by_alpha(res.trades), "skipped": res.skipped}, indent=2, default=str))
         return

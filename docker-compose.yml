@@ -6,6 +6,8 @@ services:
     env_file: .env
     environment:
       - HEARTLESS_DATA_DIR=/app/data
+      # bind all interfaces inside the container (config.py defaults to loopback); the ports mapping below keeps it on the host's 127.0.0.1
+      - WEB_HOST=0.0.0.0
     volumes:
       - ./data:/app/data
     ports:

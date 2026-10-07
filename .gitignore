@@ -208,7 +208,7 @@ __marimo__/
 
 # Heartless runtime
 .env
-data/
+/data/
 *.db
 *.db-wal
 *.db-shm

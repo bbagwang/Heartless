@@ -132,7 +132,9 @@ async def test_web_api_with_token(app_env):
         r = await client.get("/api/status", headers={"x-token": app.web_token})
         assert r.status_code == 200 and r.json()["mode"] == "paper"
         r = await client.get("/", params={"token": app.web_token})
-        assert r.status_code == 200 and "Heartless" in r.text and "hl_token" in r.headers.get("set-cookie", "")
+        assert r.status_code == 303 and "hl_token" in r.headers.get("set-cookie", "")
+        r = await client.get("/", cookies={"hl_token": app.web_token})
+        assert r.status_code == 200 and "Heartless" in r.text
         for path in ("/api/pnl?period=week", "/api/trades", "/api/equity", "/api/engines", "/api/alphas", "/api/research",
                      "/api/events", "/api/health"):
             r = await client.get(path, headers={"x-token": app.web_token})

@@ -25,7 +25,7 @@ def test_pairing_binds_first_user_with_code_and_ignores_others():
     sent = []
     bot.send = lambda text, keyboard=None, chat_id=None: sent.append(text)
     code = bot.pairing_code
-    assert code and len(code) == 6
+    assert code and len(code) >= 16  # high-entropy token_urlsafe(12), no longer a 6-digit number
 
     async def run():
         # stranger with wrong code

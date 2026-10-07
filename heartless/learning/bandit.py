@@ -2,7 +2,8 @@
 
 Each (alpha, regime) arm keeps a Beta posterior fed by R-multiples of closed trades (wins add to
 alpha, losses add to beta, both clipped so one outlier cannot dominate). Old evidence decays so the
-bot keeps adapting when an edge fades. Live trades count more than paper trades.
+bot keeps adapting when an edge fades. Live trades count more than paper trades. While a live engine shares the
+bandit with the paper champion (``live_attached``), paper outcomes are dropped so one market event is booked once.
 """
 from __future__ import annotations
 
@@ -58,6 +59,11 @@ class AlphaBandit:
         self.rng = random.Random(seed)
         self.store = store
         self.engine = engine
+        # The paper champion and the live engine trade the same params on the same bars and share this bandit, so a
+        # closed trade would otherwise be booked twice (1.0 paper + 1.5 live = 2.5x evidence from one market event).
+        # The orchestrator sets this while a live engine is attached (paper evidence is then ignored) and clears it
+        # when live stops so the paper champion learns again at weight 1.0.
+        self.live_attached: bool = False
         for a in alphas:
             for r in Regime:
                 self.arms[(a, r.value)] = Arm()
@@ -92,6 +98,8 @@ class AlphaBandit:
         return max(0.5, min(1.3, m))
 
     def update(self, alpha: str, regime: Regime | str, r_multiple: float, live: bool = False) -> None:
+        if self.live_attached and not live:
+            return  # paper duplicate of the live engine's outcome for the same market event
         w = 1.5 if live else 1.0
         if isinstance(regime, str):
             regime = Regime(regime) if regime in Regime.__members__ else Regime.RANGE

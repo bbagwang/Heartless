@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import httpx
+
 from heartless.core.models import AccountState, Fill
 from heartless.exchange.base import Account, OrderResult, PositionSnapshot
 from heartless.exchange.binance_rest import BinanceError, BinanceRest
@@ -11,6 +13,14 @@ from heartless.exchange.binance_ws import UserStream
 from heartless.util.timeutil import now_ms
 
 log = logging.getLogger(__name__)
+
+# Binance codes whose meaning is "the request may or may not have been executed" (docs: -1000/-1001 internal
+# error, -1007 "Send status unknown; execution status unknown"). Together with HTTP 5xx and transport errors
+# on a POST they must never be read as a definitive rejection.
+UNCERTAIN_CODES = (-1000, -1001, -1007)
+ORDER_NOT_FOUND_CODES = (-2013, -2011)
+STABLE_ASSETS = ("USDT", "USDC", "FDUSD", "BUSD")
+UNKNOWN_RECHECK_DELAY = 1.0  # seconds between the two "does the order exist?" lookups after an uncertain send
 
 
 class LiveAccount(Account):
@@ -28,6 +38,7 @@ class LiveAccount(Account):
         self._prepared: dict[str, int] = {}
         self.hedge_mode = False
         self.events: int = 0
+        self._funding_seen: set[str] = set()
 
     async def start(self) -> None:
         await self.rest.sync_time()
@@ -36,11 +47,16 @@ class LiveAccount(Account):
             if self.hedge_mode:
                 positions = await self.get_positions()
                 if not positions:
-                    await self.rest.set_position_mode(False)
-                    self.hedge_mode = False
-                    log.info("switched account to one-way position mode")
-                else:
-                    log.warning("account is in hedge mode with open positions; Heartless will use positionSide")
+                    try:
+                        await self.rest.set_position_mode(False)
+                        self.hedge_mode = False
+                        log.info("switched account to one-way position mode")
+                    except BinanceError as e:  # e.g. -4068 open orders: re-read so hedge_mode mirrors the exchange
+                        log.warning("could not switch to one-way position mode: %s", e)
+                        self.hedge_mode = await self.rest.get_position_mode()
+                if self.hedge_mode:
+                    log.warning("account is in hedge mode (open positions/orders); Heartless will send positionSide "
+                                "and omit reduceOnly on every order")
         except BinanceError as e:
             log.warning("could not read position mode: %s", e)
         await self.get_state()
@@ -119,46 +135,96 @@ class LiveAccount(Account):
                            status=d.get("status", "NEW"), filled_qty=float(d.get("executedQty", 0.0) or 0.0),
                            avg_price=float(d.get("avgPrice", 0.0) or 0.0), raw=d)
 
+    @staticmethod
+    def _outcome_uncertain(e: Exception) -> bool:
+        """True when Binance may have executed the order even though the call failed."""
+        if isinstance(e, BinanceError):
+            return e.status >= 500 or e.code in UNCERTAIN_CODES
+        if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return False  # no connection was established: the request never reached Binance
+        return True  # read/write timeout, reset, protocol error: the request was sent but not answered
+
+    async def _order_error_result(self, symbol: str, client_id: str, e: Exception) -> OrderResult:
+        """Translate a failed new-order call into an OrderResult without ever losing track of an order.
+
+        4xx application errors are definitive rejections. For everything else (HTTP 5xx, -1000/-1001/-1007,
+        transport errors) the order may have been executed, so it is looked up by its client id: a found order
+        is returned as-is, an order that still does not exist after a second look was never accepted
+        (REJECTED), and when the lookup itself fails the honest answer is status "UNKNOWN", never "REJECTED".
+        """
+        raw = {"code": getattr(e, "code", -1), "msg": getattr(e, "msg", None) or str(e)}
+        if not self._outcome_uncertain(e):
+            return OrderResult(client_id=client_id, status="REJECTED", raw=raw)
+        raw["uncertain"] = True
+        if client_id:
+            for attempt in range(2):
+                try:
+                    d = await self.rest.query_order(symbol, None, client_id)
+                except BinanceError as qe:
+                    if qe.code not in ORDER_NOT_FOUND_CODES:
+                        break
+                    if attempt == 0:
+                        await asyncio.sleep(UNKNOWN_RECHECK_DELAY)
+                        continue
+                    log.warning("order %s %s never reached the exchange (%s); treating as rejected", symbol, client_id, e)
+                    return OrderResult(client_id=client_id, status="REJECTED", raw=raw)
+                except httpx.HTTPError:
+                    break
+                log.warning("order %s %s resolved by lookup after uncertain send (%s): %s", symbol, client_id, e,
+                            d.get("status"))
+                return self._parse_order(d)
+        log.error("order %s %s outcome UNKNOWN after %s", symbol, client_id or "<no client id>", e)
+        return OrderResult(client_id=client_id, status="UNKNOWN", raw=raw)
+
     async def market_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False,
                            client_id: str = "") -> OrderResult:
         try:
-            d = await self.rest.new_order(symbol, side, "MARKET", quantity=qty, reduce_only=reduce_only,
+            # Hedge mode: reduceOnly must not be sent together with positionSide (-1106); the opposite-side
+            # order on the LONG/SHORT leg is implicitly reduce-only.
+            d = await self.rest.new_order(symbol, side, "MARKET", quantity=qty,
+                                          reduce_only=reduce_only and not self.hedge_mode,
                                           client_id=client_id or None,
                                           position_side=self._pos_side(side, reduce_only))
-        except BinanceError as e:
+        except (BinanceError, httpx.HTTPError) as e:
             log.error("market order %s %s %s failed: %s", symbol, side, qty, e)
-            return OrderResult(client_id=client_id, status="REJECTED", raw={"code": e.code, "msg": e.msg})
+            return await self._order_error_result(symbol, client_id, e)
         return self._parse_order(d)
 
     async def limit_order(self, symbol: str, side: str, qty: float, price: float, post_only: bool = True,
                           reduce_only: bool = False, client_id: str = "") -> OrderResult:
         try:
             d = await self.rest.new_order(symbol, side, "LIMIT", quantity=qty, price=price,
-                                          time_in_force="GTX" if post_only else "GTC", reduce_only=reduce_only,
+                                          time_in_force="GTX" if post_only else "GTC",
+                                          reduce_only=reduce_only and not self.hedge_mode,
                                           client_id=client_id or None,
                                           position_side=self._pos_side(side, reduce_only))
-        except BinanceError as e:
-            if e.code == -5022:  # GTX would immediately match
+        except (BinanceError, httpx.HTTPError) as e:
+            if isinstance(e, BinanceError) and e.code == -5022:  # GTX would immediately match
                 return OrderResult(client_id=client_id, status="EXPIRED", raw={"code": e.code, "msg": e.msg})
             log.error("limit order %s %s %s@%s failed: %s", symbol, side, qty, price, e)
-            return OrderResult(client_id=client_id, status="REJECTED", raw={"code": e.code, "msg": e.msg})
+            return await self._order_error_result(symbol, client_id, e)
         return self._parse_order(d)
 
     async def cancel_order(self, symbol: str, order_id: str = "", client_id: str = "") -> bool:
         try:
             await self.rest.cancel_order(symbol, order_id or None, client_id or None)
             return True
-        except BinanceError as e:
-            if e.code == -2011:  # unknown order (already filled/cancelled)
+        except (BinanceError, httpx.HTTPError) as e:
+            if getattr(e, "code", None) == -2011:  # unknown order (already filled/cancelled)
                 return False
             log.warning("cancel order failed: %s", e)
             return False
 
     async def query_order(self, symbol: str, order_id: str = "", client_id: str = "") -> OrderResult:
+        """Status "UNKNOWN" means "the exchange has no such order" (a definitive answer the engine may act on).
+        Transient failures (rate limit, 5xx, transport) are raised so the caller retries instead of cancelling."""
         try:
             d = await self.rest.query_order(symbol, order_id or None, client_id or None)
         except BinanceError as e:
-            return OrderResult(order_id=order_id, client_id=client_id, status="UNKNOWN", raw={"code": e.code})
+            if e.code in ORDER_NOT_FOUND_CODES:
+                return OrderResult(order_id=order_id, client_id=client_id, status="UNKNOWN",
+                                   raw={"code": e.code, "msg": e.msg})
+            raise
         return self._parse_order(d)
 
     async def place_stop(self, symbol: str, side: str, trigger_price: float, qty: float | None = None,
@@ -177,14 +243,15 @@ class LiveAccount(Account):
                 log.warning("closePosition stop rejected (%s); retrying with quantity+reduceOnly", e)
         if qty is None:
             raise ValueError("qty required when close_position is False")
-        d = await self.rest.new_algo_order(symbol, side, "STOP_MARKET", trigger_price, quantity=qty, reduce_only=True,
+        d = await self.rest.new_algo_order(symbol, side, "STOP_MARKET", trigger_price, quantity=qty,
+                                           reduce_only=not self.hedge_mode,
                                            client_algo_id=client_id or None, position_side=self._pos_side(side, True))
         return str(d.get("algoId", ""))
 
     async def place_take_profit(self, symbol: str, side: str, trigger_price: float, qty: float,
                                 client_id: str = "") -> str:
         d = await self.rest.new_algo_order(symbol, side, "TAKE_PROFIT_MARKET", trigger_price, quantity=qty,
-                                           reduce_only=True, client_algo_id=client_id or None,
+                                           reduce_only=not self.hedge_mode, client_algo_id=client_id or None,
                                            position_side=self._pos_side(side, True))
         return str(d.get("algoId", ""))
 
@@ -192,8 +259,8 @@ class LiveAccount(Account):
         try:
             await self.rest.cancel_algo_order(symbol, algo_id)
             return True
-        except BinanceError as e:
-            if e.code in (-2011, -4120, -1102):
+        except (BinanceError, httpx.HTTPError) as e:
+            if getattr(e, "code", None) in (-2011, -4120, -1102):
                 return False
             log.warning("cancel algo failed: %s", e)
             return False
@@ -202,8 +269,8 @@ class LiveAccount(Account):
         for fn in (self.rest.cancel_all_orders, self.rest.cancel_all_algo_orders):
             try:
                 await fn(symbol)
-            except BinanceError as e:
-                if e.code not in (-2011,):
+            except (BinanceError, httpx.HTTPError) as e:
+                if getattr(e, "code", None) not in (-2011,):
                     log.warning("cancel all (%s) failed: %s", fn.__name__, e)
 
     # --- user data stream ----------------------------------------------------------------------
@@ -223,7 +290,7 @@ class LiveAccount(Account):
                 fee = qty * price * self.taker_fee * 0.9  # commission paid in BNB etc.
             ot = o.get("ot") or o.get("o")
             cid = o.get("c", "") or ""
-            reduce_only = bool(o.get("R"))
+            reduce_only = bool(o.get("R")) or bool(o.get("cp"))  # closePosition (cp) orders are reduce-only by nature
             if ot == "STOP_MARKET" or cid.startswith("HLS"):
                 kind = "SL"
             elif ot == "TAKE_PROFIT_MARKET" or cid.startswith("HLT"):
@@ -251,7 +318,50 @@ class LiveAccount(Account):
             for b in a.get("B", []):
                 if b.get("a") == "USDT" and self.last_state:
                     self.last_state.balance = float(b.get("wb", self.last_state.balance))
+            if a.get("m") == "FUNDING_FEE":
+                await self._on_funding_event(a, int(msg.get("T") or msg.get("E") or now_ms()))
         elif et == "MARGIN_CALL":
             log.error("MARGIN CALL received: %s", msg)
         elif et == "ALGO_UPDATE":
             log.debug("algo update: %s", msg)
+
+    def _funding_price(self, symbol: str, fallback: float = 0.0) -> float:
+        snap = self.cached_positions.get(symbol)
+        return (snap.mark or snap.entry_price) if snap else fallback
+
+    async def _on_funding_event(self, a: dict, ts: int) -> None:
+        """Book a funding settlement as a FUNDING fill (fee > 0 = paid), the convention PaperAccount.apply_funding
+        uses, so Position.funding / net_pnl() are comparable between live and paper.
+
+        Binance pushes a FUNDING_FEE ACCOUNT_UPDATE with the balance change in B[].bc (negative when paid) and,
+        for an isolated position, exactly one P entry naming the symbol. For cross margin P is empty and the
+        stream carries only the aggregate, so the per-symbol amounts are read from the income ledger.
+        """
+        amount = sum(float(b.get("bc", 0.0) or 0.0) for b in a.get("B", []) if b.get("a") in STABLE_ASSETS)
+        syms = {p.get("s") for p in a.get("P", []) if p.get("s")}
+        hour = ts // 3_600_000  # funding settles at most once per hour per symbol
+        if len(syms) == 1:
+            sym = syms.pop()
+            if amount:
+                self._funding_seen.add(f"{sym}:{hour}")
+                price = self._funding_price(sym, float(a["P"][0].get("ep", 0.0) or 0.0))
+                await self._emit_fill(Fill(symbol=sym, order_side="FUNDING", qty=0.0, price=price, fee=-amount, ts=ts,
+                                           kind="FUNDING"))
+            return
+        try:
+            rows = await self.rest.income_history("FUNDING_FEE", start=ts - 10 * 60_000, end=ts + 60_000)
+        except (BinanceError, httpx.HTTPError) as e:
+            log.warning("funding income lookup failed: %s", e)
+            return
+        for r in rows or []:
+            sym = r.get("symbol")
+            income = float(r.get("income", 0.0) or 0.0)
+            row_ts = int(r.get("time") or ts)
+            keys = (str(r.get("tranId") or f"{sym}:{row_ts}"), f"{sym}:{row_ts // 3_600_000}")
+            if not sym or not income or any(k in self._funding_seen for k in keys):
+                continue
+            self._funding_seen.update(keys)
+            await self._emit_fill(Fill(symbol=sym, order_side="FUNDING", qty=0.0, price=self._funding_price(sym),
+                                       fee=-income, ts=row_ts, kind="FUNDING"))
+        if len(self._funding_seen) > 5000:
+            self._funding_seen = set(list(self._funding_seen)[-2000:])

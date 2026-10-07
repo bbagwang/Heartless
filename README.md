@@ -42,11 +42,13 @@ heartless doctor                   # 키·연결·권한 점검
 heartless run
 ```
 
+> 🔐 봇 토큰이나 대시보드 토큰을 채팅·로그 등 다른 곳에 노출했다면 BotFather `/revoke` 로 재발급하고 `.env` 를 갱신하세요. `.env` 는 gitignore 대상입니다.
+
 ### 3) Telegram 소유자 페어링
 첫 실행 로그에 `TELEGRAM PAIRING CODE: 123456` 이 출력됩니다. 봇에게 `/start 123456` 을 보내면 **그 계정이 유일한 소유자**로 영구 등록됩니다(DB 저장). 이후 다른 사용자의 메시지는 조용히 무시됩니다. 미리 `TELEGRAM_OWNER_ID` 를 지정해도 됩니다.
 
 ### 4) 웹 대시보드
-기본 `http://<서버>:8080/?token=<토큰>`. 토큰은 시작 로그와 Telegram `/web` 으로 확인합니다. 외부 공개 시 반드시 HTTPS 리버스 프록시 또는 VPN 뒤에 두세요(docker-compose 는 127.0.0.1 에만 바인딩).
+기본 `http://127.0.0.1:8080/?token=<토큰>` (토큰은 Telegram `/web` 으로 확인, Telegram 이 없을 때만 시작 로그에 출력). 첫 접속 시 토큰은 HttpOnly 쿠키로 옮겨지고 URL 에서 제거됩니다. 기본 바인딩은 루프백(`WEB_HOST=127.0.0.1`)이며, 외부에서 접근하려면 HTTPS 리버스 프록시 또는 VPN 뒤에 두세요(docker-compose 는 컨테이너 안에서 0.0.0.0, 호스트에는 127.0.0.1 로만 노출).
 
 ### Docker
 ```bash

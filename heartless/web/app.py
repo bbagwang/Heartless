@@ -16,6 +16,10 @@ from heartless.util.timeutil import now_ms
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
+# brute-force throttle for *presented* wrong tokens, keyed by client IP
+FAIL_WINDOW_S = 900
+FAIL_MAX_ATTEMPTS = 10
+FAIL_MAX_IPS = 1024
 
 LOGIN_HTML = """<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>Heartless</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -38,13 +42,24 @@ class WebServer:
     # --- auth ----------------------------------------------------------------------------------
     def _check_token(self, request: Request) -> bool:
         tok = request.query_params.get("token") or request.headers.get("x-token") or request.cookies.get("hl_token") or ""
+        # bytes comparison: compare_digest() rejects non-ASCII str with a TypeError (-> HTTP 500); as bytes any input
+        # simply mismatches and is counted like every other wrong token
+        if tok and secrets.compare_digest(tok.encode("utf-8"), self.app.web_token.encode("utf-8")):
+            return True  # the valid token is never refused: the lock below only throttles presented-but-wrong tokens
+        if not tok:
+            return False  # anonymous visits (login page, Docker healthcheck, scanners) are not attempts
         ip = request.client.host if request.client else "?"
-        fails = [t for t in self._fail.get(ip, []) if time.time() - t < 900]
-        if len(fails) >= 10:
+        now = time.time()
+        fails = [t for t in self._fail.get(ip, []) if now - t < FAIL_WINDOW_S]
+        if len(fails) >= FAIL_MAX_ATTEMPTS:
             raise HTTPException(429, "too many attempts")
-        if tok and secrets.compare_digest(tok, self.app.web_token):
-            return True
-        fails.append(time.time())
+        if ip not in self._fail and len(self._fail) >= FAIL_MAX_IPS:
+            # bound the table: drop expired buckets first, then the stalest ones (rotating source addresses)
+            self._fail = {k: v for k, v in self._fail.items() if v and now - v[-1] < FAIL_WINDOW_S}
+            stale = sorted(self._fail, key=lambda k: self._fail[k][-1])
+            for k in stale[: max(0, len(self._fail) - FAIL_MAX_IPS + 1)]:
+                del self._fail[k]
+        fails.append(now)
         self._fail[ip] = fails
         return False
 
@@ -64,10 +79,14 @@ class WebServer:
         async def index(request: Request):
             if not self._check_token(request):
                 return HTMLResponse(LOGIN_HTML, status_code=401)
-            resp = FileResponse(STATIC / "index.html")
             if request.query_params.get("token"):
-                resp.set_cookie("hl_token", request.query_params["token"], httponly=True, samesite="lax", max_age=30 * 86400)
-            return resp
+                # move the secret from the URL (browser history, referrers, proxy logs) into an HttpOnly cookie
+                secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+                resp = RedirectResponse("/", status_code=303)
+                resp.set_cookie("hl_token", request.query_params["token"], httponly=True, samesite="lax",
+                                secure=secure, max_age=30 * 86400)
+                return resp
+            return FileResponse(STATIC / "index.html")
 
         @api.get("/api/status")
         async def status(_: bool = auth):
@@ -160,12 +179,17 @@ class WebServer:
             return RedirectResponse("data:,")
 
     async def run(self) -> None:
+        # behind a reverse proxy (nginx / Docker bridge) every client shares one request.client.host; set the env var
+        # FORWARDED_ALLOW_IPS to the proxy's address so uvicorn applies X-Forwarded-For and the throttle sees real clients
         config = uvicorn.Config(self.api, host=self.s.web_host, port=self.s.web_port, log_level="warning", access_log=False)
         self.server = uvicorn.Server(config)
         # the bot owns signal handling
         self.server.capture_signals = lambda: contextlib.nullcontext()  # type: ignore[method-assign]
         self.server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
-        log.info("web dashboard on http://%s:%s/?token=%s", self.s.web_host, self.s.web_port, self.app.web_token)
+        if self.s.telegram_bot_token:
+            log.info("web dashboard on http://%s:%s/ (token via Telegram /web)", self.s.web_host, self.s.web_port)
+        else:
+            log.info("web dashboard on http://%s:%s/?token=%s", self.s.web_host, self.s.web_port, self.app.web_token)
         await self.server.serve()
 
 

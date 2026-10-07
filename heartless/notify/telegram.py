@@ -1,7 +1,10 @@
 """Owner-only Telegram bot built directly on the Bot API (no heavy framework).
 
-Pairing: unless TELEGRAM_OWNER_ID is set, the first user to send `/start <code>` with the pairing
-code printed in the logs becomes the only owner. Everyone else is ignored silently.
+Pairing: unless TELEGRAM_OWNER_ID is set, the first user to send `/start <code>` (in a private chat) with
+the pairing code printed in the logs becomes the only owner. Everyone else is ignored silently. The code is a
+fresh high-entropy secret on every process start (never persisted), it expires after PAIRING_TTL_SEC, and
+pairing is disarmed after PAIRING_MAX_FAILURES wrong codes (restart to re-arm). Setting TELEGRAM_OWNER_ID
+skips pairing entirely and is the recommended setup.
 """
 from __future__ import annotations
 
@@ -27,6 +30,10 @@ COMMANDS = [
     ("help", "도움말"),
 ]
 
+PAIRING_TTL_SEC = 600          # a pairing code is only honoured this long after start-up
+PAIRING_MAX_FAILURES = 5       # wrong `/start <code>` attempts (any sender) before pairing is disarmed
+TELEGRAM_API_ATTEMPTS = 4      # one request + up to three re-sends after a 429 flood-control reply
+
 
 class TelegramBot:
     def __init__(self, app):
@@ -37,11 +44,17 @@ class TelegramBot:
         self.client = httpx.AsyncClient(timeout=70)
         self.owner_id: int | None = self.s.telegram_owner_id or app.store.get("telegram.owner")
         self.pairing_code: str | None = None
+        self._pairing_born = time.monotonic()
+        self._pairing_failures = 0
         if not self.owner_id:
-            self.pairing_code = app.store.get("telegram.pairing") or f"{secrets.randbelow(900000) + 100000}"
-            app.store.set("telegram.pairing", self.pairing_code)
+            # Fresh high-entropy code per process start. It is deliberately NOT read from / written to the store:
+            # the old persisted 6-digit code survived restarts, never expired and could be brute-forced.
+            self.pairing_code = secrets.token_urlsafe(12)
             log.warning("=" * 70)
-            log.warning("TELEGRAM PAIRING CODE: %s  -> send '/start %s' to the bot to become the owner", self.pairing_code, self.pairing_code)
+            log.warning("TELEGRAM PAIRING CODE: %s  -> send '/start %s' to the bot (private chat) to become the owner",
+                        self.pairing_code, self.pairing_code)
+            log.warning("pairing expires in %d min or after %d wrong codes (restart to re-arm); "
+                        "set TELEGRAM_OWNER_ID to skip pairing", PAIRING_TTL_SEC // 60, PAIRING_MAX_FAILURES)
             log.warning("=" * 70)
         self._offset = 0
         self._queue: asyncio.Queue = asyncio.Queue()
@@ -56,18 +69,26 @@ class TelegramBot:
 
     # --- transport -----------------------------------------------------------------------------
     async def api(self, method: str, **params):
-        try:
-            r = await self.client.post(f"{self.base}/{method}", json=params)
-            data = r.json()
-            if not data.get("ok"):
-                if data.get("error_code") == 429:
-                    await asyncio.sleep(float(data.get("parameters", {}).get("retry_after", 3)))
-                else:
-                    log.warning("telegram %s failed: %s", method, data.get("description"))
-            return data
-        except Exception as e:  # noqa: BLE001
-            log.warning("telegram %s error: %s", method, e)
-            return {"ok": False}
+        data: dict = {"ok": False}
+        for attempt in range(1, TELEGRAM_API_ATTEMPTS + 1):
+            try:
+                r = await self.client.post(f"{self.base}/{method}", json=params)
+                data = r.json()
+            except Exception as e:  # noqa: BLE001
+                log.warning("telegram %s error: %s", method, e)
+                return {"ok": False}
+            if data.get("ok"):
+                return data
+            if data.get("error_code") != 429:
+                log.warning("telegram %s failed: %s", method, data.get("description"))
+                return data
+            # Flood control: Telegram rejected the request, so re-sending the identical call after retry_after
+            # is safe. Previously the failure was returned after the sleep and the message silently dropped.
+            wait = float((data.get("parameters") or {}).get("retry_after", 3))
+            log.warning("telegram %s rate limited (attempt %d/%d), retrying in %.0fs", method, attempt,
+                        TELEGRAM_API_ATTEMPTS, wait)
+            await asyncio.sleep(wait)
+        return data
 
     def send(self, text: str, keyboard: list[list[dict]] | None = None, chat_id: int | None = None) -> None:
         self._queue.put_nowait((text, keyboard, chat_id))
@@ -134,14 +155,35 @@ class TelegramBot:
         text = msg["text"].strip()
         if not self._is_owner(uid):
             parts = text.split()
-            if parts and parts[0].startswith("/start") and self.owner_id is None and len(parts) >= 2 and self.pairing_code \
-                    and secrets.compare_digest(parts[1], self.pairing_code):
+            if parts and parts[0].startswith("/start") and self.owner_id is None and len(parts) >= 2 and self.pairing_code:
+                chat = msg["chat"]
+                # Pair only from the sender's private chat: the confirmation carries the startup summary (web
+                # token), and a group/supergroup would expose it to every member.
+                if chat.get("type", "private") != "private" or int(chat.get("id", uid)) != int(uid):
+                    log.warning("telegram pairing attempt ignored outside a private chat (uid=%s chat=%s)", uid, chat.get("id"))
+                    return
+                if time.monotonic() - self._pairing_born > PAIRING_TTL_SEC:
+                    self.pairing_code = None
+                    log.error("telegram pairing disabled (code expired after %ds); restart to get a new code or set "
+                              "TELEGRAM_OWNER_ID", PAIRING_TTL_SEC)
+                    return
+                if not secrets.compare_digest(parts[1].encode("utf-8"), self.pairing_code.encode("utf-8")):
+                    self._pairing_failures += 1
+                    log.warning("telegram pairing attempt rejected from uid=%s (%d/%d)", uid, self._pairing_failures,
+                                PAIRING_MAX_FAILURES)
+                    if self._pairing_failures >= PAIRING_MAX_FAILURES:
+                        self.pairing_code = None
+                        log.error("telegram pairing disabled after %d wrong codes; restart to get a new code or set "
+                                  "TELEGRAM_OWNER_ID", self._pairing_failures)
+                    return
                 self.owner_id = int(uid)
                 self.app.store.set("telegram.owner", self.owner_id)
-                self.app.store.set("telegram.pairing", None)
+                self.app.store.set("telegram.pairing", None)  # drop any code persisted by older versions
                 self.pairing_code = None
                 log.info("telegram owner paired: %s", uid)
-                self.send("✅ 페어링 완료. 이제 이 계정만 Heartless 를 제어할 수 있습니다.\n\n" + self.app.startup_summary(), chat_id=chat_id)
+                # No explicit chat_id: like every other reply this resolves to the owner's private chat, so the
+                # web token in the startup summary is never posted into the chat the /start arrived from.
+                self.send("✅ 페어링 완료. 이제 이 계정만 Heartless 를 제어할 수 있습니다.\n\n" + self.app.startup_summary())
                 self.send(self._help())
             return  # silently ignore strangers
         await self._handle_command(text, chat_id)
@@ -380,11 +422,15 @@ def _chunks(text: str, n: int) -> list[str]:
         return [text]
     out, cur = [], ""
     for line in text.split("\n"):
-        if len(cur) + len(line) + 1 > n:
-            out.append(cur)
-            cur = line
-        else:
-            cur = f"{cur}\n{line}" if cur else line
+        # A single line longer than n (LLM prose, big /universe) is hard-split so no chunk can exceed the
+        # Telegram limit; an empty `cur` is never flushed (it used to produce an empty sendMessage).
+        for piece in [line[i:i + n] for i in range(0, len(line), n)] or [line]:
+            if len(cur) + len(piece) + 1 > n:
+                if cur:
+                    out.append(cur)
+                cur = piece
+            else:
+                cur = f"{cur}\n{piece}" if cur else piece
     if cur:
         out.append(cur)
     return out

@@ -119,6 +119,24 @@ ENSEMBLE_SPECS = [
 ]
 
 
+def _enforce_order(alpha: str, vals: dict[str, float]) -> dict[str, float]:
+    """Keep the partial target strictly inside the final target (tp1_r < tp_r).
+
+    tp_r and tp1_r have overlapping ranges and are sampled/perturbed independently; without this the
+    engine would place the runner TP closer than the partial TP and invert the bracket structure.
+    Mutates and returns `vals`; a no-op for alphas without both keys.
+    """
+    if "tp_r" not in vals or "tp1_r" not in vals:
+        return vals
+    spec = next((s for s in ALPHA_SPECS.get(alpha, ()) if s.name == "tp1_r"), None)
+    if spec is None:
+        return vals
+    tp_r = float(vals["tp_r"])
+    if float(vals["tp1_r"]) >= tp_r:
+        vals["tp1_r"] = spec.clip(min(vals["tp1_r"], tp_r - (spec.step or 1e-9)))
+    return vals
+
+
 @dataclass
 class StrategyParams:
     version: str
@@ -150,6 +168,7 @@ class StrategyParams:
                 for k, v in vals.items():
                     spec = next((s for s in ALPHA_SPECS[a] if s.name == k), None)
                     p.alphas[a][k] = spec.clip(v) if spec else v
+                _enforce_order(a, p.alphas[a])
         for k, v in (d.get("ensemble") or {}).items():
             p.ensemble[k] = v
         for a, v in (d.get("enabled") or {}).items():
@@ -166,6 +185,7 @@ class StrategyParams:
     def with_alpha(self, alpha: str, values: dict[str, float], version: str | None = None, note: str = "") -> "StrategyParams":
         c = self.clone(version, note)
         c.alphas[alpha].update(values)
+        _enforce_order(alpha, c.alphas[alpha])
         return c
 
     def perturbed(self, alpha: str, rng: random.Random, scale: float = 0.25, n_params: int | None = None) -> dict[str, float]:
@@ -175,11 +195,11 @@ class StrategyParams:
         k = n_params or rng.randint(1, max(1, len(specs) // 2))
         for s in rng.sample(specs, k):
             cur[s.name] = s.perturb(cur[s.name], rng, scale)
-        return cur
+        return _enforce_order(alpha, cur)
 
     @staticmethod
     def random_alpha_params(alpha: str, rng: random.Random) -> dict[str, float]:
-        return {s.name: s.sample(rng) for s in ALPHA_SPECS[alpha]}
+        return _enforce_order(alpha, {s.name: s.sample(rng) for s in ALPHA_SPECS[alpha]})
 
     @staticmethod
     def distance(alpha: str, a: dict[str, float], b: dict[str, float]) -> float:

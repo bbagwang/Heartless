@@ -119,6 +119,8 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(
 const SERIES=['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'];
 const ALPHA_ORDER=['trend_pullback','squeeze_breakout','mean_reversion','momentum_burst','funding_fade','sweep_reversal'];
 const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+// HTML-escape for anything interpolated into innerHTML; symbols/reasons/exchange error text are not trusted markup
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(v,d=2)=>v==null?'–':Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 const sgn=v=>(v>0?'+':'')+fmt(v);
 const cls=v=>v>0?'pos':v<0?'neg':'';
@@ -151,11 +153,11 @@ function renderPositions(rows,engine){
   if(!rows.length){tb.innerHTML='<tr><td colspan="11" class="muted">열린 포지션 없음</td></tr>';return}
   for(const p of rows){
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td><b>${p.symbol}</b><div class="small muted">${p.status} · ${p.regime}</div></td><td class="${p.side==='LONG'?'pos':'neg'}">${p.side}</td>
-      <td><code>${p.alpha}</code>${p.alphas&&p.alphas.length>1?'<div class="small muted">+'+p.alphas.slice(1).join(', ')+'</div>':''}</td>
+    tr.innerHTML=`<td><b>${esc(p.symbol)}</b><div class="small muted">${esc(p.status)} · ${esc(p.regime)}</div></td><td class="${p.side==='LONG'?'pos':'neg'}">${esc(p.side)}</td>
+      <td><code>${esc(p.alpha)}</code>${p.alphas&&p.alphas.length>1?'<div class="small muted">+'+esc(p.alphas.slice(1).join(', '))+'</div>':''}</td>
       <td>${px(p.entry)}</td><td>${px(p.mark)}</td><td>${px(p.stop)}</td><td>${p.tp?px(p.tp):'trail'}${p.tp1_done?'<div class="small muted">1차익절✓</div>':''}</td>
       <td class="${cls(p.unrealized)}">${sgn(p.unrealized)}<div class="small">${sgn(p.pnl_pct)}%</div></td><td class="${cls(p.r)}">${fmt(p.r,2)}</td>
-      <td class="reason">${p.reason}</td><td><button class="ghost" data-sym="${p.symbol}">청산</button></td>`;
+      <td class="reason">${esc(p.reason)}</td><td><button class="ghost" data-sym="${esc(p.symbol)}">청산</button></td>`;
     tr.querySelector('button').onclick=async ev=>{if(confirm(p.symbol+' 포지션을 청산할까요?')){await post('/api/close',{symbol:p.symbol,engine});refresh()}};
     tb.appendChild(tr);
   }
@@ -164,16 +166,16 @@ function renderEngines(engines){
   const tb=document.querySelector('#engines tbody'); tb.innerHTML='';
   for(const [name,e] of Object.entries(engines)){
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${name==='live'?'🔴':'🧪'} ${name}</td><td><code>${e.params_version}</code></td><td>${fmt(e.equity)}</td><td class="${cls(e.realized_today)}">${sgn(e.realized_today)}</td><td>${e.positions.length}</td>`;
+    tr.innerHTML=`<td>${name==='live'?'🔴':'🧪'} ${esc(name)}</td><td><code>${esc(e.params_version)}</code></td><td>${fmt(e.equity)}</td><td class="${cls(e.realized_today)}">${sgn(e.realized_today)}</td><td>${e.positions.length}</td>`;
     tb.appendChild(tr);
   }
 }
 function renderResearch(s){
   const r=s.research||{}; const g=s.graduation; let h='';
-  h+=`<div>챔피언 <code>${s.params_version}</code></div>`;
+  h+=`<div>챔피언 <code>${esc(s.params_version)}</code></div>`;
   h+=`<div>마지막 리서치: ${r.last_cycle?ts(r.last_cycle):'–'} ${r.running?'<span class="badge">진행 중</span>':''}</div>`;
   h+=`<div>다음 예정: ${r.next_due?ts(r.next_due):'–'}</div>`;
-  if(s.challengers&&s.challengers.length){h+='<div style="margin-top:8px"><b>챌린저</b></div>';for(const c of s.challengers){h+=`<div>• ${c.name} <code>${c.version}</code> (${c.source}) ${ts(c.started)}~</div>`}}
+  if(s.challengers&&s.challengers.length){h+='<div style="margin-top:8px"><b>챌린저</b></div>';for(const c of s.challengers){h+=`<div>• ${esc(c.name)} <code>${esc(c.version)}</code> (${esc(c.source)}) ${ts(c.started)}~</div>`}}
   else h+='<div class="muted" style="margin-top:8px">활성 챌린저 없음</div>';
   if(g){h+=`<div style="margin-top:8px"><b>졸업 조건</b> ${g.ok?'✅':'⏳'}<br>거래 ${g.n}/${g.need.trades} · PF ${fmt(g.profit_factor)}/${g.need.profit_factor} · MDD ${fmt(g.max_dd_pct,1)}%/${g.need.max_dd_pct}% · 순익 ${sgn(g.net)}</div>`}
   document.getElementById('research').innerHTML=h;
@@ -212,15 +214,15 @@ function renderAlphaChart(rows){
   g+=`<line x1="${X(1)}" x2="${X(1)}" y1="${T}" y2="${H-B}" stroke="${css('--muted')}" stroke-dasharray="3 4"/><text x="${X(1)}" y="${H-6}" text-anchor="middle">1.0 = 중립</text>`;
   g+=`<line x1="${L}" x2="${L}" y1="${T}" y2="${H-B}" stroke="${css('--axis')}"/>`;
   order.forEach((a,i)=>{const r=rows.find(x=>x.alpha===a)||{trust:1,n:0,avg_r:0};const y=T+i*((H-T-B)/n)+((H-T-B)/n-bh)/2;const col=css(SERIES[ALPHA_ORDER.indexOf(a)>=0?ALPHA_ORDER.indexOf(a):i%8]);
-    g+=`<text x="${L-8}" y="${y+bh/2+4}" text-anchor="end">${a}</text><rect class="bar" data-i="${i}" x="${L}" y="${y}" width="${Math.max(0,X(r.trust)-L)}" height="${bh}" rx="4" fill="${col}"/><text x="${X(r.trust)+6}" y="${y+bh/2+4}">${fmt(r.trust,2)}</text>`});
+    g+=`<text x="${L-8}" y="${y+bh/2+4}" text-anchor="end">${esc(a)}</text><rect class="bar" data-i="${i}" x="${L}" y="${y}" width="${Math.max(0,X(r.trust)-L)}" height="${bh}" rx="4" fill="${col}"/><text x="${X(r.trust)+6}" y="${y+bh/2+4}">${fmt(r.trust,2)}</text>`});
   svg.innerHTML=g;
   const tip=document.getElementById('alphaTip');
-  svg.querySelectorAll('rect.bar').forEach(el=>{el.onmousemove=ev=>{const r=rows.find(x=>x.alpha===order[+el.dataset.i])||{};const rc=svg.getBoundingClientRect();tip.style.display='block';tip.innerHTML=`<b>${order[+el.dataset.i]}</b><br>trust ${fmt(r.trust,2)} · n=${r.n}<br>avg R ${sgn(r.avg_r)}<br>추세↑ ${r.trend_up?fmt(r.trend_up.mean):'-'} 횡보 ${r.range?fmt(r.range.mean):'-'} 변동 ${r.volatile?fmt(r.volatile.mean):'-'}`;tip.style.left=Math.min(ev.clientX-rc.left+12,rc.width-160)+'px';tip.style.top=(ev.clientY-rc.top-10)+'px'};el.onmouseleave=()=>tip.style.display='none'});
+  svg.querySelectorAll('rect.bar').forEach(el=>{el.onmousemove=ev=>{const r=rows.find(x=>x.alpha===order[+el.dataset.i])||{};const rc=svg.getBoundingClientRect();tip.style.display='block';tip.innerHTML=`<b>${esc(order[+el.dataset.i])}</b><br>trust ${fmt(r.trust,2)} · n=${r.n}<br>avg R ${sgn(r.avg_r)}<br>추세↑ ${r.trend_up?fmt(r.trend_up.mean):'-'} 횡보 ${r.range?fmt(r.range.mean):'-'} 변동 ${r.volatile?fmt(r.volatile.mean):'-'}`;tip.style.left=Math.min(ev.clientX-rc.left+12,rc.width-160)+'px';tip.style.top=(ev.clientY-rc.top-10)+'px'};el.onmouseleave=()=>tip.style.display='none'});
 }
 async function loadTrades(){const rows=await api('/api/trades?limit=40')||[];const tb=document.querySelector('#trades tbody');tb.innerHTML='';
   if(!rows.length){tb.innerHTML='<tr><td colspan="8" class="muted">거래 없음</td></tr>';return}
-  for(const t of rows){const tr=document.createElement('tr');tr.innerHTML=`<td>${ts(t.exit_time)}</td><td><b>${t.symbol}</b></td><td class="${t.side==='LONG'?'pos':'neg'}">${t.side}</td><td><code>${t.alpha}</code></td><td>${px(t.entry_price)} → ${px(t.exit_price)}</td><td class="${cls(t.pnl)}">${sgn(t.pnl)}</td><td class="${cls(t.r_multiple)}">${fmt(t.r_multiple)}</td><td class="reason">${t.exit_reason}</td>`;tb.appendChild(tr)}}
-async function loadEvents(){const rows=await api('/api/events?limit=30')||[];const el=document.getElementById('events');el.innerHTML=rows.map(e=>`<div><span class="muted">${ts(e.ts)}</span> <b>${e.topic}</b> ${typeof e.message==='object'?(e.message.message||e.message.reason||JSON.stringify(e.message).slice(0,160)):e.message}</div>`).join('')||'<div class="muted">없음</div>'}
+  for(const t of rows){const tr=document.createElement('tr');tr.innerHTML=`<td>${ts(t.exit_time)}</td><td><b>${esc(t.symbol)}</b></td><td class="${t.side==='LONG'?'pos':'neg'}">${esc(t.side)}</td><td><code>${esc(t.alpha)}</code></td><td>${px(t.entry_price)} → ${px(t.exit_price)}</td><td class="${cls(t.pnl)}">${sgn(t.pnl)}</td><td class="${cls(t.r_multiple)}">${fmt(t.r_multiple)}</td><td class="reason">${esc(t.exit_reason)}</td>`;tb.appendChild(tr)}}
+async function loadEvents(){const rows=await api('/api/events?limit=30')||[];const el=document.getElementById('events');el.innerHTML=rows.map(e=>`<div><span class="muted">${ts(e.ts)}</span> <b>${esc(e.topic)}</b> ${esc(typeof e.message==='object'?(e.message.message||e.message.reason||JSON.stringify(e.message).slice(0,160)):e.message)}</div>`).join('')||'<div class="muted">없음</div>'}
 document.getElementById('btnPause').onclick=async()=>{await post('/api/pause');refresh()};
 document.getElementById('btnResume').onclick=async()=>{await post('/api/resume');refresh()};
 document.getElementById('btnResearch').onclick=async()=>{const r=await post('/api/research/run');alert(r&&r.ok?'리서치 사이클을 시작했습니다':'이미 진행 중입니다')};

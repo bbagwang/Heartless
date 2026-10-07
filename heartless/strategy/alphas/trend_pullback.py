@@ -23,8 +23,12 @@ class TrendPullback(Alpha):
             return None
         if adx15 < p["adx_min"]:
             return None
-        up_15 = m15.v("ema21") > m15.v("ema50")
-        up_1h = h1.v("ema21") > h1.v("ema50") if ok(h1.v("ema21"), h1.v("ema50")) else up_15
+        e21_15, e50_15 = m15.v("ema21"), m15.v("ema50")
+        if not ok(e21_15, e50_15):
+            return None  # 15m EMAs still warming up: nan > nan is False and would read as a downtrend
+        up_15 = e21_15 > e50_15
+        e21_1h, e50_1h = h1.v("ema21"), h1.v("ema50")
+        up_1h = e21_1h > e50_1h if ok(e21_1h, e50_1h) else up_15
         if up_15 and up_1h and ema21 > ema50 and close > ema50:
             side = Side.LONG
         elif (not up_15) and (not up_1h) and ema21 < ema50 and close < ema50:

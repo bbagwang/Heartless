@@ -25,6 +25,21 @@ from heartless.util.timeutil import MS_DAY, now_ms
 log = logging.getLogger(__name__)
 
 
+def _max_dd_r(trades: list[dict]) -> float:
+    """Max drawdown of cumulative R multiples ordered by exit time.
+
+    Scale-free, unlike the USDT `max_dd` from summarize(): challenger paper accounts restart at
+    paper_initial_balance while the champion wallet carries its full history, and position sizes scale
+    with equity, so absolute drawdowns of the two accounts are not comparable.
+    """
+    cum = peak = dd = 0.0
+    for t in sorted(trades, key=lambda t: t.get("exit_time") or 0):
+        cum += float(t.get("r_multiple") or 0.0)
+        peak = max(peak, cum)
+        dd = max(dd, peak - cum)
+    return dd
+
+
 @dataclass
 class ChallengerSlot:
     name: str
@@ -45,6 +60,8 @@ class ResearchManager:
         self.graduation_notified_day: int = int(self.store.get("research.graduation_day", 0) or 0)
         self.running = False
         self.history: list[dict] = []
+        self.research_failures: int = 0
+        self.last_error: str = ""
 
     # --- champion persistence ------------------------------------------------------------------
     def load_champion(self) -> StrategyParams:
@@ -95,6 +112,16 @@ class ResearchManager:
                                                 self.store.get("advisor.seeds", {}) or {})
         except Exception as e:  # noqa: BLE001
             log.exception("research cycle failed")
+            # A crashed worker (OOM kill, os._exit) leaves the executor permanently broken: every later
+            # submit() raises BrokenProcessPool immediately. Discard it so the next cycle recreates one.
+            if self.pool is not None:
+                try:
+                    self.pool.shutdown(wait=False, cancel_futures=True)
+                except Exception:  # noqa: BLE001
+                    log.debug("research pool shutdown after failure raised", exc_info=True)
+                self.pool = None
+            self.research_failures += 1
+            self.last_error = f"{now}: {e}"
             await self.app.emit("error", {"message": f"리서치 사이클 실패: {e}"})
             self.running = False
             return None
@@ -156,9 +183,11 @@ class ResearchManager:
                     await self.app.retire_challenger(slot, reason="조기 탈락 (avgR < -0.5)")
                 continue
             st_ch, st_champ = summarize(ch_trades), summarize(champ_trades)
+            # drawdown compared in R units: the two paper accounts have different equity bases
+            st_ch["max_dd_r"], st_champ["max_dd_r"] = _max_dd_r(ch_trades), _max_dd_r(champ_trades)
             o_ch, o_champ = objective(st_ch, 10), objective(st_champ, 10)
             better = (o_ch > o_champ + 0.5 and st_ch["avg_r"] > st_champ["avg_r"] + 0.05
-                      and st_ch["max_dd"] <= st_champ["max_dd"] * 1.2 + 1e-9 and st_ch["net"] > 0)
+                      and st_ch["max_dd_r"] <= st_champ["max_dd_r"] * 1.2 + 1e-9 and st_ch["net"] > 0)
             if better:
                 await self.app.promote(slot, st_ch, st_champ)
             elif len(ch_trades) >= self.s.promotion_min_trades * 2 and o_ch < o_champ:
@@ -169,7 +198,10 @@ class ResearchManager:
         since = now_ms() - 14 * MS_DAY
         trades = self.store.load_trades(engine="paper", since=since)
         st = summarize(trades)
-        curve = self.store.load_equity("paper", since=since, limit=5000)
+        # load_equity keeps the NEWEST `limit` rows; the engine persists one row per minute, so a 14-day
+        # window holds ~20k rows and limit=5000 would silently drop everything older than ~3.5 days
+        # (x2 headroom for the extra rows written after restarts).
+        curve = self.store.load_equity("paper", since=since, limit=2 * 14 * (MS_DAY // 60_000) + 10)
         from heartless.execution.stats import equity_drawdown
 
         _, dd_pct = equity_drawdown(curve)
@@ -195,3 +227,4 @@ class ResearchManager:
     def shutdown(self) -> None:
         if self.pool is not None:
             self.pool.shutdown(wait=False, cancel_futures=True)
+            self.pool = None

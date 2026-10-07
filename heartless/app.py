@@ -9,10 +9,10 @@ from typing import Any
 
 from heartless.config import Settings
 from heartless.core.bus import EventBus
-from heartless.core.models import Candle, Regime, SymbolInfo, Ticker
+from heartless.core.models import Candle, PositionStatus, Regime, SymbolInfo, Ticker
 from heartless.core.store import Store
 from heartless.data.candles import CandleArrays
-from heartless.data.features import MarketView
+from heartless.data.features import LIVE_WINDOW, MarketView
 from heartless.data.universe import select_universe
 from heartless.exchange.binance_rest import BinanceError, BinanceRest
 from heartless.exchange.binance_ws import MarketStream
@@ -31,6 +31,12 @@ from heartless.util.ids import short_id, token_hex
 from heartless.util.timeutil import MS_DAY, MS_HOUR, MS_MINUTE, local_day_start, next_local_time, now_ms
 
 log = logging.getLogger(__name__)
+
+# a challenger keeps its slot at least this long unless it already has a promotion-sized trade sample: research runs
+# every few hours and would otherwise evict the youngest slots before any challenger can reach promotion_min_trades
+CHALLENGER_MIN_AGE_MS = 2 * MS_DAY
+# how often the scheduler re-runs the history fetch for symbols whose backfill failed
+BACKFILL_RETRY_MS = 5 * MS_MINUTE
 
 
 class Heartless:
@@ -56,7 +62,8 @@ class Heartless:
         self.live_account: LiveAccount | None = None
         self.market = MarketStream(self.rest.ws_base, self._on_kline, self._on_book, self._on_mark)
         self.advisor = Advisor(settings.anthropic_api_key)
-        self.mode: str = self.store.get("mode", settings.mode)
+        self.mode_notice: str = ""  # startup warning when HEARTLESS_MODE and the persisted mode disagree
+        self.mode: str = self._resolve_mode(settings)
         if self.mode == "live" and not settings.live_capable:
             log.warning("HEARTLESS_MODE=live but no Binance keys; falling back to paper")
             self.mode = "paper"
@@ -69,6 +76,8 @@ class Heartless:
         self.telegram = None
         self.web = None
         self._backfilling: set[str] = set()
+        self._backfill_failed: set[str] = set()  # symbols whose history fetch failed; retried by the scheduler
+        self._last_backfill_retry = 0
         self._next_report_ts = next_local_time(settings.daily_report_hour, 0, settings.timezone)
         self._last_prune = 0
         self._last_oi_poll = 0
@@ -83,6 +92,31 @@ class Heartless:
         t = token_hex(16)
         self.store.set("web.token", t)
         return t
+
+    def _resolve_mode(self, settings: Settings) -> str:
+        """Startup mode. The mode last chosen via Telegram/web is persisted and normally wins over HEARTLESS_MODE: an
+        unchanged .env (the shipped example sets paper) must not undo /mode live on a crash-restart and leave real
+        positions unmanaged. An operator who CHANGES HEARTLESS_MODE between two starts means it, so that edit
+        overrides the persisted mode. Either disagreement is logged and reported in the startup message."""
+        stored = self.store.get("mode")
+        env_mode = settings.mode if "mode" in settings.model_fields_set else ""  # explicitly configured?
+        last_env = self.store.get("mode.env")
+        self.store.set("mode.env", env_mode)
+        mode = stored or settings.mode
+        if env_mode and stored and stored != env_mode:
+            if last_env is not None and env_mode != last_env:
+                log.warning("HEARTLESS_MODE changed (%s -> %s): overrides persisted mode %s", last_env or "unset",
+                            env_mode, stored)
+                self.store.set("mode", env_mode)
+                self.mode_notice = (f"⚠️ HEARTLESS_MODE 변경({last_env or '미설정'} → {env_mode}) 적용: "
+                                    f"저장된 {stored.upper()} 모드 대신 {env_mode.upper()} 모드로 시작")
+                mode = env_mode
+            else:
+                log.warning("persisted mode %s overrides HEARTLESS_MODE=%s (switch with /mode or the web dashboard)",
+                            stored, env_mode)
+                self.mode_notice = (f"⚠️ .env HEARTLESS_MODE={env_mode} 는 무시됨 — 저장된 {stored.upper()} 모드 사용 중 "
+                                    f"(/mode {env_mode} 로 전환)")
+        return mode
 
     async def emit(self, topic: str, payload: dict | None = None) -> None:
         payload = dict(payload or {})
@@ -134,6 +168,10 @@ class Heartless:
         lines = [f"Heartless 시작 — 모드: {'🔴 LIVE' if self.mode == 'live' else '🟢 PAPER'}",
                  f"유니버스 {len(self.universe)}종목: {', '.join(self.universe)}",
                  f"챔피언 파라미터: {self.params.version}", f"챌린저: {', '.join(c.name for c in self.challengers) or '-'}"]
+        if self.mode_notice:
+            lines.append(self.mode_notice)
+        if self.store.get("paused", False):
+            lines.append("⏸ 신규 진입 일시정지 상태로 시작 (재시작 전 /pause 또는 /kill 유지; /resume 로 재개)")
         if self.s.web_enabled:
             lines.append(f"웹 대시보드: http://<host>:{self.s.web_port}/?token={self.web_token}")
         return "\n".join(lines)
@@ -144,7 +182,7 @@ class Heartless:
         self._stopping = True
         log.info("shutting down")
         await self.market.stop()
-        for eng in self.engines.values():
+        for eng in list(self.engines.values()):
             try:
                 await eng.account.stop()
             except Exception:  # noqa: BLE001
@@ -152,6 +190,12 @@ class Heartless:
         self.research.shutdown()
         for t in self.tasks:
             t.cancel()
+        try:
+            # the scheduler writes the paper wallets only every 30 s; trades are written immediately, so without
+            # this flush a restart restores a wallet that disagrees with the trades booked since the last tick
+            self._persist_paper_accounts()
+        except Exception:  # noqa: BLE001
+            log.exception("paper account flush failed")
         await self.rest.close()
         self.store.close()
 
@@ -193,23 +237,35 @@ class Heartless:
             await self.emit("universe", {"message": f"유니버스 갱신: +{','.join(added) or '-'} / -{','.join(removed) or '-'}",
                                          "added": added, "removed": removed, "universe": self.universe})
 
-    async def _backfill(self, symbols: list[str]) -> None:
+    async def _backfill(self, symbols: list[str]) -> set[str]:
+        """Fetch the missing 1m history (and funding) into the store. Returns the symbols whose fetch failed; they
+        are remembered in `_backfill_failed` and retried by the scheduler, because a symbol left without history
+        would otherwise trade on minutes of data for the whole process lifetime (the stream gap fill only repairs
+        holes after the first live bar)."""
         now = now_ms()
         since = now - self.s.history_days * MS_DAY
         sem = asyncio.Semaphore(3)
+        failed: set[str] = set()
 
         async def one(sym: str) -> None:
             async with sem:
                 self._backfilling.add(sym)
                 try:
                     lo, hi, n = self.store.candle_range(sym)
-                    start = since if (hi is None or hi < since) else hi + MS_MINUTE
-                    if start < now - MS_MINUTE:
-                        rows = await self.rest.klines_range(sym, start, now, "1m")
-                        rows = [c for c in rows if c.close_time <= now]
-                        if rows:
-                            self.store.save_candles(sym, rows)
-                            log.info("backfilled %s: %d bars", sym, len(rows))
+                    ranges: list[tuple[int, int]] = []
+                    if hi is None or hi < since:
+                        ranges.append((since, now))
+                    else:
+                        if lo - MS_MINUTE > since:  # history before the oldest stored bar is missing (failed/partial fetch)
+                            ranges.append((since, lo - MS_MINUTE))
+                        ranges.append((hi + MS_MINUTE, now))
+                    for start, end in ranges:
+                        if start <= end and start < now - MS_MINUTE:
+                            rows = await self.rest.klines_range(sym, start, end, "1m")
+                            rows = [c for c in rows if c.close_time <= now]
+                            if rows:
+                                self.store.save_candles(sym, rows)
+                                log.info("backfilled %s: %d bars", sym, len(rows))
                     f_lo, f_hi = self.store.funding_range(sym)
                     f_start = since if (f_hi is None or f_hi < since) else f_hi + 1
                     if f_start < now - 8 * MS_HOUR:
@@ -217,10 +273,26 @@ class Heartless:
                         self.store.save_funding(sym, [(int(r["fundingTime"]), float(r["fundingRate"]), float(r.get("markPrice", 0) or 0)) for r in fr])
                 except Exception as e:  # noqa: BLE001
                     log.warning("backfill %s failed: %s", sym, e)
+                    failed.add(sym)
                 finally:
                     self._backfilling.discard(sym)
 
         await asyncio.gather(*(one(s) for s in symbols))
+        self._backfill_failed -= set(symbols)
+        self._backfill_failed |= failed
+        return failed
+
+    async def _retry_backfill(self) -> None:
+        """Re-run the history fetch for symbols whose startup/universe backfill failed and rebuild their views."""
+        self._backfill_failed &= set(self.universe)
+        pending = sorted(self._backfill_failed)
+        if not pending:
+            return
+        await self._backfill(pending)
+        fixed = [s for s in pending if s not in self._backfill_failed]
+        if fixed:
+            self._build_views(fixed)
+            log.info("backfill retry repaired %s", ", ".join(fixed))
 
     def _build_views(self, symbols: list[str]) -> None:
         since = now_ms() - self.s.history_days * MS_DAY
@@ -250,8 +322,10 @@ class Heartless:
         self.paper_accounts["paper"] = pa
         self.engines["paper"] = TradingEngine("paper", pa, self.params, self.s, self.symbols, self.store, self.bus,
                                               self.bandit, notify=(self.mode != "live"))
+        self._apply_persisted_pause(self.engines["paper"])
         await self._restore_paper_positions(self.engines["paper"])
         await self.engines["paper"].start()
+        await self._rearm_paper_positions(self.engines["paper"])
         # challengers
         for slot in self.research.load_challengers():
             await self._start_challenger(slot, restore=True)
@@ -259,26 +333,76 @@ class Heartless:
         if self.mode == "live":
             await self._start_live()
 
+    def _apply_persisted_pause(self, eng: TradingEngine) -> None:
+        """Honour the owner's /pause or /kill across restarts. pause()/resume() persist the flag, but every engine
+        starts with a fresh RiskState, so it is re-applied to each engine as it is created: the paper champion,
+        challengers and a live engine started later via /mode live alike (the deployments auto-restart the process,
+        so without this a kill switch would silently re-arm entries on the next crash or reboot)."""
+        if self.store.get("paused", False):
+            eng.risk.state.paused = True
+            eng.risk.state.halt_reason = (self.store.get("halt_reason") or eng.risk.state.halt_reason
+                                          or "재시작 전 일시정지 상태 복원 (/resume 로 재개)")
+
     async def _restore_paper_positions(self, eng: TradingEngine) -> None:
         """Recreate open paper positions inside the simulated account after a restart."""
         acc: PaperAccount = eng.account  # type: ignore[assignment]
         for p in self.store.load_open_positions(eng.name):
-            if p.status.value == "OPEN" and p.qty > 0:
+            # a CLOSING row is a close interrupted mid-flight: its quantity is still held in the simulated account
+            if p.status in (PositionStatus.OPEN, PositionStatus.CLOSING) and p.qty > 0:
                 from heartless.exchange.paper import PaperPosition
 
                 acc.positions[p.symbol] = PaperPosition(qty=p.qty * p.side.sign, entry=p.entry_price, leverage=p.leverage)
                 acc.orders.clear()
 
-    async def _start_live(self) -> None:
-        if self.live_account is not None:
+    async def _rearm_paper_positions(self, eng: TradingEngine) -> None:
+        """After `eng.start()` loaded a paper engine's persisted positions, give them simulated brackets again: the
+        fresh PaperAccount holds no algo orders and the rows still carry the previous process's algo ids, so without
+        this take-profits would never fill and stops would degrade to the on_tick software backstop (biasing the
+        paper record that drives promotion and the go-live offer). A CLOSING row (close interrupted mid-flight) is
+        handed back as OPEN so it is managed and protected again instead of blocking its symbol forever."""
+        acc = eng.account
+        if not acc.is_paper:
             return
-        self.live_account = LiveAccount(self.rest, "live", self.s.taker_fee)
-        self.live_account.set_symbols(self.symbols)
-        await self.live_account.start()
-        eng = TradingEngine("live", self.live_account, self.params, self.s, self.symbols, self.store, self.bus,
-                            self.bandit, notify=True)
+        for pos in list(eng.positions.values()):
+            if pos.status is PositionStatus.CLOSING and pos.qty > 0:
+                pos.status = PositionStatus.OPEN
+            if pos.status is not PositionStatus.OPEN or pos.qty <= 0 or pos.symbol not in eng.symbols:
+                continue
+            pp = getattr(acc, "positions", {}).get(pos.symbol)
+            if pp is None or abs(pp.qty) <= 0:
+                continue  # not mirrored in the simulator: _paper_reconcile finalizes it
+            # drop the dead process's ids WITHOUT cancelling them: the fresh simulator numbers its algos from 1
+            # again, so a stale id can collide with (and would cancel) a bracket just placed for another symbol
+            pos.sl_algo_id = pos.tp_algo_id = ""
+            pos.extra.pop("tp1_algo_id", None)
+            await eng._place_brackets(pos)  # fresh SL / TP1 / TP (TP1 is skipped when it already filled)
+            eng._save(pos)
+
+    async def _start_live(self) -> None:
+        if "live" in self.engines:
+            return
+        # Build everything into locals and publish only once BOTH starts succeeded. A failure half-way (REST/auth
+        # error in LiveAccount.start(), reconcile in eng.start()) must leave neither an account nor an engine behind:
+        # otherwise a retry reports success without a live engine, or an unreconciled live engine trades real money
+        # while mode/status still say paper.
+        acc = LiveAccount(self.rest, "live", self.s.taker_fee)
+        acc.set_symbols(self.symbols)
+        eng = TradingEngine("live", acc, self.params, self.s, self.symbols, self.store, self.bus, self.bandit, notify=True)
+        self._apply_persisted_pause(eng)
+        try:
+            await acc.start()
+            await eng.start()
+        except BaseException:
+            try:
+                await acc.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        self.live_account = acc
         self.engines["live"] = eng
-        await eng.start()
+        # the paper champion trades the same params on the same bars: while live is attached its outcomes alone are
+        # booked into the shared bandit (weight 1.5), the paper duplicates are dropped
+        self.bandit.live_attached = True
         if "paper" in self.engines:
             self.engines["paper"].notify = False
         log.info("live engine started")
@@ -290,17 +414,26 @@ class Heartless:
             saved = self.store.get(f"{slot.name}.account")
             if saved:
                 pa.wallet = float(saved.get("wallet", pa.wallet))
-        self.paper_accounts[slot.name] = pa
-        eng = TradingEngine(slot.name, pa, slot.params, self.s, self.symbols, self.store, self.bus,
-                            AlphaBandit(list(slot.params.alphas), store=None), notify=False)
-        if restore:
-            await self._restore_paper_positions(eng)
+                pa.initial_balance = float(saved.get("initial", pa.initial_balance))
+                pa.realized = float(saved.get("realized", 0.0))
+                pa.fees_paid = float(saved.get("fees", 0.0))
+                pa.funding_paid = float(saved.get("funding", 0.0))
         else:
+            # a fresh challenger reuses a slot name: it must not inherit the retired one's record or its risk halts
             self.store.delete_positions(slot.name)
             self.store.delete_trades(slot.name)
             self.store.delete_equity(slot.name)
+            self.store.set(f"{slot.name}.risk", None)
+        self.paper_accounts[slot.name] = pa
+        eng = TradingEngine(slot.name, pa, slot.params, self.s, self.symbols, self.store, self.bus,
+                            AlphaBandit(list(slot.params.alphas), store=None), notify=False)
+        self._apply_persisted_pause(eng)
+        if restore:
+            await self._restore_paper_positions(eng)
         self.engines[slot.name] = eng
         await eng.start()
+        if restore:
+            await self._rearm_paper_positions(eng)
         if slot not in self.challengers:
             self.challengers.append(slot)
 
@@ -313,11 +446,25 @@ class Heartless:
         if free:
             name = free[0]
         else:
-            # replace the worst-performing challenger (by net pnl since start)
+            # replace the worst-performing challenger (by net pnl since start) among those that have had a fair
+            # trial: a promotion-sized sample, or an age of CHALLENGER_MIN_AGE_MS. Evicting younger slots at every
+            # research cycle would churn them before any challenger can reach promotion_min_trades.
+            now = now_ms()
+
+            def trades(slot: ChallengerSlot) -> list[dict]:
+                return self.store.load_trades(engine=slot.name, since=slot.started)
+
             def score(slot: ChallengerSlot) -> float:
-                st = summarize(self.store.load_trades(engine=slot.name, since=slot.started))
+                st = summarize(trades(slot))
                 return st["net"] if st["n"] else -1e-9
-            victim = min(self.challengers, key=score)
+
+            eligible = [c for c in self.challengers
+                        if len(trades(c)) >= self.s.promotion_min_trades or now - c.started >= CHALLENGER_MIN_AGE_MS]
+            if not eligible:
+                log.info("no challenger slot for %s candidate: all %d challengers are still in their trial period",
+                         source, len(self.challengers))
+                return None
+            victim = min(eligible, key=score)
             await self.retire_challenger(victim, reason="새 후보로 교체", silent=True)
             name = victim.name
         slot = ChallengerSlot(name=name, params=params, started=now_ms(), source=source)
@@ -386,13 +533,20 @@ class Heartless:
         mark = t.mark or t.mid
         if not mark:
             return
-        for acc in self.paper_accounts.values():
+        # snapshots: a live close inside on_tick yields to the loop, during which the scheduler may retire/install
+        # a challenger or switch modes (dict mutation mid-iteration would tear down the market stream)
+        for acc in list(self.paper_accounts.values()):
             await acc.on_ticker(t)
-        for eng in self.engines.values():
+        for eng in list(self.engines.values()):
             pos = eng.positions.get(sym)
             if pos is not None:
                 pos.extra["last_mark"] = mark
-                await eng.on_tick(sym, mark, t.bid, t.ask)
+                try:
+                    await eng.on_tick(sym, mark, t.bid, t.ask)
+                except Exception:  # noqa: BLE001
+                    # one engine's failure (a paper simulator / store error) must never skip the software backstop of
+                    # the engines after it in the loop -- the live engine is created last
+                    log.exception("engine %s on_tick failed for %s", eng.name, sym)
 
     async def _kline_worker(self) -> None:
         while True:
@@ -407,9 +561,10 @@ class Heartless:
         if ca is None:
             return
         # gap detection: fetch missing bars if the stream skipped some
+        missing: list[Candle] = []
         if ca.n and c.open_time - int(ca.open_time[ca.n - 1]) > MS_MINUTE and sym not in self._backfilling:
             try:
-                missing = await self.rest.klines_range(sym, int(ca.open_time[ca.n - 1]) + MS_MINUTE, c.open_time - 1, "1m")
+                missing = await self.rest.klines_range(sym, int(ca.open_time[ca.n - 1]) + MS_MINUTE, c.open_time - 1, "1m") or []
                 if missing:
                     ca.extend(missing)
                     self.store.save_candles(sym, missing)
@@ -421,17 +576,22 @@ class Heartless:
         view = self.views.get(sym)
         if view is None:
             return
-        minute = (c.open_time // MS_MINUTE) % 60
+        # rebuild every timeframe whose period ended on ANY bar that entered the array in this call: when the
+        # :04/:14/:59 bar arrived through the gap fill the 5m/15m/1h frame would otherwise stay stale until the
+        # next boundary (up to an hour of regime/HTF features computed on the previous period)
         tfs = ["1m"]
-        if (c.open_time // MS_MINUTE + 1) % 5 == 0:
-            tfs.append("5m")
-        if (c.open_time // MS_MINUTE + 1) % 15 == 0:
-            tfs.append("15m")
-        if minute == 59:
-            tfs.append("1h")
+        for b in (*missing, c):
+            m = b.open_time // MS_MINUTE
+            if (m + 1) % 5 == 0 and "5m" not in tfs:
+                tfs.append("5m")
+            if (m + 1) % 15 == 0 and "15m" not in tfs:
+                tfs.append("15m")
+            if m % 60 == 59 and "1h" not in tfs:
+                tfs.append("1h")
         await asyncio.to_thread(self._rebuild_view, view, ca, tfs)
         view.seek(c.close_time)
-        if view.closed("5m") or sym not in self.regimes:
+        # a 5m close inside the gap is not flagged by seek() (it closed more than a minute ago): refresh explicitly
+        if missing or view.closed("5m") or sym not in self.regimes:
             self.regimes[sym] = detect_regime(view)
         ctx = self._context(sym, c.close_time)
         for eng in list(self.engines.values()):
@@ -497,6 +657,9 @@ class Heartless:
                     if "live" in self.engines:
                         await self.engines["live"].reconcile()
                     await self._paper_reconcile()
+                if self._backfill_failed and now - self._last_backfill_retry >= BACKFILL_RETRY_MS:
+                    self._last_backfill_retry = now
+                    await self._retry_backfill()
                 if now - self._last_oi_poll >= 15 * MS_MINUTE:
                     self._last_oi_poll = now
                     asyncio.create_task(self._poll_open_interest())
@@ -529,12 +692,13 @@ class Heartless:
 
     async def _paper_reconcile(self) -> None:
         """Keep paper engines consistent with their simulated accounts (e.g. after restarts)."""
-        for name, acc in self.paper_accounts.items():
+        for name, acc in list(self.paper_accounts.items()):
             eng = self.engines.get(name)
             if eng is None:
                 continue
             for sym, pos in list(eng.positions.items()):
-                if pos.status.value != "OPEN":
+                # a CLOSING row whose simulated quantity is gone was closed by the previous process: book it
+                if pos.status not in (PositionStatus.OPEN, PositionStatus.CLOSING):
                     continue
                 pp = acc.positions.get(sym)
                 if pp is None or abs(pp.qty) <= 0:
@@ -555,22 +719,27 @@ class Heartless:
 
     def _update_health(self, now: int) -> None:
         stale = [s for s in self.universe if now - self.last_bar_ts.get(s, self.started_at) > 3 * MS_MINUTE]
+        short = [s for s in self.universe if s in self.candles and self.candles[s].n < LIVE_WINDOW["1m"]]
         self.health = {"market_stream": self.market.connected, "stale_symbols": stale, "queue": self._kline_queue.qsize(),
+                       "short_history": short, "backfill_pending": sorted(self._backfill_failed),
                        "user_stream": self.live_account.user_stream.connected if self.live_account else None,
                        "uptime_min": (now - self.started_at) / MS_MINUTE, "used_weight": self.rest.used_weight}
 
     # --- control API (Telegram / web) ----------------------------------------------------------
     async def pause(self, reason: str = "owner") -> None:
         for eng in self.engines.values():
-            eng.risk.state.paused = True
-        self.store.set("paused", True)
+            eng.risk.pause()  # also writes the per-engine risk blob now, so a restart right after still sees the pause
+        self.store.set("paused", True)  # read back by _apply_persisted_pause for every engine created later
+        self.store.set("halt_reason", f"일시정지 ({reason}) — /resume 로 재개")
         await self.emit("control", {"message": f"⏸ 신규 진입 일시정지 ({reason}). 기존 포지션은 계속 관리됩니다"})
 
     async def resume(self) -> None:
         for eng in self.engines.values():
-            eng.risk.state.paused = False
-            eng.risk.state.halt_reason = ""
+            # clears the flag in the per-engine blob immediately and re-bases the drawdown peak to the current equity,
+            # so the max-drawdown pause re-arms after a further decline instead of staying latched until a new high
+            eng.risk.resume(eng.stats.equity)
         self.store.set("paused", False)
+        self.store.set("halt_reason", "")
         await self.emit("control", {"message": "▶️ 거래 재개"})
 
     async def close_symbol(self, symbol: str, engine: str | None = None) -> int:
@@ -599,26 +768,52 @@ class Heartless:
         if mode == "live":
             if not self.s.live_capable:
                 return "Binance API 키가 설정되지 않아 라이브 모드를 켤 수 없습니다"
-            await self._start_live()
+            try:
+                await self._start_live()
+            except Exception as e:  # noqa: BLE001
+                # _start_live published nothing: mode stays paper, nothing is persisted, and the owner is told
+                # (Telegram/web show this string) instead of a silent log line
+                log.exception("live start failed")
+                await self.emit("error", {"message": f"라이브 전환 실패: {e}"})
+                return f"라이브 전환 실패: {e}"
             self.mode = "live"
             self.store.set("mode", "live")
             await self.emit("mode_changed", {"message": "🔴 LIVE 모드 전환: 실제 자금으로 거래를 시작합니다", "mode": "live"})
             return "라이브 모드로 전환했습니다"
-        # live -> paper: flatten and remove the live engine
+        # live -> paper: flatten, then remove the live engine -- but only once nothing is left open, on our side or
+        # on the exchange. Dropping the engine with a position still open (a rejected/timed-out reduce-only order)
+        # would orphan real money: no trailing/time stop, no reconcile, no software backstop.
         eng = self.engines.get("live")
         n = 0
         if eng:
             eng.entries_enabled = False
-            n = await eng.close_all("모드 전환(paper)")
-            await asyncio.sleep(1.0)
-            self.engines.pop("live", None)
+            err = ""
+            remaining: set[str] = set()
             try:
-                await eng.account.stop()
+                n = await eng.close_all("모드 전환(paper)")
+                await asyncio.sleep(1.0)
+                remaining = {p.symbol for p in eng.open_positions()}
+                remaining |= {s for s, snap in (await eng.account.get_positions()).items() if abs(snap.qty) > 0}
+            except Exception as e:  # noqa: BLE001
+                log.exception("live -> paper flatten failed")
+                err = str(e)
+            if err or remaining:
+                eng.entries_enabled = True  # back to the pre-call state: nothing stays half-switched
+                msg = (f"라이브 포지션 청산 미완료 ({', '.join(sorted(remaining)) or err}): 전환 취소, 라이브 모드 유지. "
+                       f"잠시 후 /mode paper 를 다시 시도하세요")
+                await self.emit("error", {"message": msg})
+                return msg
+            self.engines.pop("live", None)
+        acc = eng.account if eng else self.live_account
+        if acc is not None:
+            try:
+                await acc.stop()
             except Exception:  # noqa: BLE001
                 pass
-            self.live_account = None
+        self.live_account = None  # also releases an account left behind by an earlier failed switch
         self.mode = "paper"
         self.store.set("mode", "paper")
+        self.bandit.live_attached = False  # live's final outcomes were booked above; paper learns again at weight 1.0
         if "paper" in self.engines:
             self.engines["paper"].notify = True
         await self.emit("mode_changed", {"message": f"🟢 PAPER 모드 전환 (라이브 포지션 {n}개 청산)", "mode": "paper"})
@@ -632,10 +827,12 @@ class Heartless:
         day_start = local_day_start(now_ms(), self.s.timezone)
         today = self.store.load_trades(engine=prim.name, since=day_start) if prim else []
         st_today = summarize(today)
-        return {"mode": self.mode, "paused": prim.risk.state.paused if prim else False, "universe": self.universe,
+        return {"mode": self.mode, "paused": prim.risk.state.paused if prim else bool(self.store.get("paused", False)),
+                "universe": self.universe,
                 "params_version": self.params.version, "engines": engines, "primary": prim.name if prim else None,
                 "today": st_today, "health": self.health, "research": {"last_cycle": self.research.last_cycle_ts,
                                                                          "running": self.research.running,
+                                                                         "failures": self.research.research_failures, "last_error": self.research.last_error,
                                                                          "next_due": self.research.last_cycle_ts + self.s.research_interval_minutes * 60_000},
                 "challengers": [{"name": c.name, "version": c.params.version, "source": c.source, "started": c.started}
                                 for c in self.challengers],
