@@ -163,10 +163,22 @@ class LiveAccount(Account):
 
     async def place_stop(self, symbol: str, side: str, trigger_price: float, qty: float | None = None,
                          close_position: bool = False, client_id: str = "") -> str:
-        d = await self.rest.new_algo_order(symbol, side, "STOP_MARKET", trigger_price, quantity=qty,
-                                           close_position=close_position, reduce_only=not close_position,
-                                           client_algo_id=client_id or None,
-                                           position_side=self._pos_side(side, True))
+        """STOP_MARKET via the Algo Order service. Prefers closePosition=true (covers the whole position even
+        after partial fills); falls back to quantity+reduceOnly if the service rejects closePosition."""
+        if close_position:
+            try:
+                d = await self.rest.new_algo_order(symbol, side, "STOP_MARKET", trigger_price, close_position=True,
+                                                   client_algo_id=client_id or None,
+                                                   position_side=self._pos_side(side, True))
+                return str(d.get("algoId", ""))
+            except BinanceError as e:
+                if qty is None or e.code in (-2019, -4045, -1021, -1022):  # margin / quota / auth -> don't retry blindly
+                    raise
+                log.warning("closePosition stop rejected (%s); retrying with quantity+reduceOnly", e)
+        if qty is None:
+            raise ValueError("qty required when close_position is False")
+        d = await self.rest.new_algo_order(symbol, side, "STOP_MARKET", trigger_price, quantity=qty, reduce_only=True,
+                                           client_algo_id=client_id or None, position_side=self._pos_side(side, True))
         return str(d.get("algoId", ""))
 
     async def place_take_profit(self, symbol: str, side: str, trigger_price: float, qty: float,

@@ -282,7 +282,7 @@ class TradingEngine:
         info = self.symbols[pos.symbol]
         close_side = pos.side.close_order_side
         try:
-            pos.sl_algo_id = await self.account.place_stop(pos.symbol, close_side, pos.stop, close_position=True,
+            pos.sl_algo_id = await self.account.place_stop(pos.symbol, close_side, pos.stop, qty=pos.qty, close_position=True,
                                                            client_id=client_order_id(f"S{self.tag}"))
             pos.last_stop_update = self.clock()
         except Exception as e:  # noqa: BLE001
@@ -376,8 +376,8 @@ class TradingEngine:
             return
         old_id = pos.sl_algo_id
         try:
-            new_id = await self.account.place_stop(pos.symbol, pos.side.close_order_side, new_stop, close_position=True,
-                                                   client_id=client_order_id(f"S{self.tag}"))
+            new_id = await self.account.place_stop(pos.symbol, pos.side.close_order_side, new_stop, qty=pos.qty,
+                                                   close_position=True, client_id=client_order_id(f"S{self.tag}"))
         except Exception as e:  # noqa: BLE001
             log.warning("[%s] replace stop failed on %s: %s", self.name, pos.symbol, e)
             return
@@ -659,8 +659,8 @@ class TradingEngine:
             if not has_stop:
                 log.warning("[%s] %s has no exchange stop, re-placing", self.name, sym)
                 try:
-                    pos.sl_algo_id = await self.account.place_stop(sym, pos.side.close_order_side, pos.stop, close_position=True,
-                                                                   client_id=client_order_id(f"S{self.tag}"))
+                    pos.sl_algo_id = await self.account.place_stop(sym, pos.side.close_order_side, pos.stop, qty=pos.qty,
+                                                                   close_position=True, client_id=client_order_id(f"S{self.tag}"))
                     pos.last_stop_update = now
                 except Exception as e:  # noqa: BLE001
                     await self._emit("error", {"message": f"{sym} 손절 재설정 실패: {e}"})

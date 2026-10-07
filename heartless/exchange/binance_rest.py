@@ -109,8 +109,8 @@ class BinanceRest:
                 data = resp.json()
             except ValueError:
                 data = {"code": -1, "msg": resp.text[:200]}
-            if resp.status_code >= 400 or (isinstance(data, dict) and data.get("code", 0) not in (0, 200, None)
-                                           and "msg" in data and resp.status_code != 200):
+            body_err = isinstance(data, dict) and isinstance(data.get("code"), int) and data["code"] < 0
+            if resp.status_code >= 400 or body_err:
                 code = int(data.get("code", -1)) if isinstance(data, dict) else -1
                 msg = data.get("msg", str(data)) if isinstance(data, dict) else str(data)
                 if code == -1021 and attempt <= retries:  # timestamp out of recvWindow -> resync
