@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None) -> None:
     lb.add_argument("--params", default=None, help="StrategyParams JSON file (default: stored champion)")
     lb.add_argument("--set", action="append", default=[], help="override, e.g. trend_pullback.adx_min=24")
     lb.add_argument("--workers", type=int, default=None)
+    lb.add_argument("--stress", action="store_true", help="1.5x fees and 2x slippage")
     lb.add_argument("--json", action="store_true")
     lb.add_argument("--trades-out", default=None)
     sub.add_parser("doctor", help="check configuration and connectivity")

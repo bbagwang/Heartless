@@ -71,3 +71,9 @@ def test_splits_and_overrides_and_symbol_inference():
     assert p.alphas["trend_pullback"]["adx_min"] == 25 and p.ensemble["entry_threshold"] == 0.6 and p.enabled["funding_fade"] is False
     info = infer_symbol_info("BTCUSDT", np.array([85000.0, 85000.1, 85000.3] * 100))
     assert math.isclose(info.tick_size, 0.1) and info.step_size == 0.0001
+
+
+def test_no_alpha_module_failed_to_import():
+    from heartless.strategy.alphas import FAILED_ALPHAS
+
+    assert FAILED_ALPHAS == {}, FAILED_ALPHAS

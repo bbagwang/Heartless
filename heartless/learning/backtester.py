@@ -175,7 +175,8 @@ class Backtester:
             stats.update(final_equity=initial_balance, return_pct=0.0, max_dd_pct=0.0)
             return BacktestResult(stats, [], [], initial_balance, params.version, only_alpha)
         account = BarPaperAccount(name="bt", initial_balance=initial_balance, taker_fee=self.s.taker_fee,
-                                  maker_fee=self.s.maker_fee, clock=lambda: self.now)
+                                  maker_fee=self.s.maker_fee, clock=lambda: self.now,
+                                  slippage_bps=getattr(self.s, "backtest_slippage_bps", 1.5))
         account.set_symbols(self.symbols)
         engine = TradingEngine("bt", account, params, self.s, self.symbols, store=None, bus=None,
                                bandit=bandit or AlphaBandit(list(params.alphas), seed=7), only_alpha=only_alpha,

@@ -32,6 +32,8 @@ WARMUP_MS = 12 * MS_DAY  # indicator warm-up loaded before the evaluation window
 # halts, drawdown pause) are switched off: otherwise a losing stretch silences an alpha for the rest of the
 # window and its statistics stop describing the signal. Per-trade sizing and per-symbol limits stay as in live.
 RESEARCH_SETTINGS = {"DAILY_LOSS_LIMIT_PCT": 1000.0, "WEEKLY_LOSS_LIMIT_PCT": 1000.0, "MAX_DRAWDOWN_HALT_PCT": 1000.0}
+# cost stress test: 1.5x fees and 2x slippage; an edge that only exists at nominal costs is not an edge
+STRESS_SETTINGS = {"TAKER_FEE": 0.00075, "MAKER_FEE": 0.0003, "BACKTEST_SLIPPAGE_BPS": 3.0}
 
 
 # --- symbol metadata -----------------------------------------------------------------------------------
@@ -244,7 +246,9 @@ def main_cli(settings, args) -> None:
         params = StrategyParams.from_dict(rows[0]["params"]) if rows else StrategyParams.default()
     store.close()
     params = apply_overrides(params, args.set)
-    res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers)
+    extra_settings = dict(STRESS_SETTINGS) if getattr(args, "stress", False) else {}
+    res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers,
+                   settings=extra_settings)
     if args.json:
         print(json.dumps({"summary": res.summary(), "by_alpha": res.by_alpha, "by_symbol": res.by_symbol,
                           "by_month": res.by_month}, default=str))

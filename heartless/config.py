@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     paper_initial_balance: float = Field(default=10_000.0, alias="PAPER_INITIAL_BALANCE")
     taker_fee: float = Field(default=0.0005, alias="TAKER_FEE")
     maker_fee: float = Field(default=0.0002, alias="MAKER_FEE")
+    backtest_slippage_bps: float = Field(default=1.5, alias="BACKTEST_SLIPPAGE_BPS")  # simulated market-order slippage
 
     # --- learning ----------------------------------------------------------------------------
     research_interval_minutes: int = Field(default=240, alias="RESEARCH_INTERVAL_MINUTES")

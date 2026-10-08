@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 import pkgutil
 
 from heartless.strategy.base import Alpha
@@ -18,12 +19,23 @@ from heartless.strategy.base import Alpha
 _PREFERRED = ["trend_pullback", "squeeze_breakout", "mean_reversion", "momentum_burst", "funding_fade", "sweep_reversal"]
 
 
+log = logging.getLogger(__name__)
+# module name -> error for alpha modules that failed to import; the rest of the registry still loads so that one
+# broken experimental file cannot take the whole bot down (startup and tests surface these loudly)
+FAILED_ALPHAS: dict[str, str] = {}
+
+
 def _discover() -> list[Alpha]:
     found: dict[str, Alpha] = {}
     for mod in pkgutil.iter_modules(__path__):
         if mod.name.startswith("_"):
             continue
-        module = importlib.import_module(f"{__name__}.{mod.name}")
+        try:
+            module = importlib.import_module(f"{__name__}.{mod.name}")
+        except Exception as e:  # noqa: BLE001
+            FAILED_ALPHAS[mod.name] = f"{type(e).__name__}: {e}"
+            log.error("alpha module %s failed to import and is disabled: %s", mod.name, e)
+            continue
         for _, cls in inspect.getmembers(module, inspect.isclass):
             if issubclass(cls, Alpha) and cls is not Alpha and cls.__module__ == module.__name__ and not inspect.isabstract(cls):
                 inst = cls()
@@ -37,4 +49,4 @@ def _discover() -> list[Alpha]:
 ALL_ALPHAS: list[Alpha] = _discover()
 ALPHA_BY_NAME: dict[str, Alpha] = {a.name: a for a in ALL_ALPHAS}
 
-__all__ = ["ALL_ALPHAS", "ALPHA_BY_NAME"]
+__all__ = ["ALL_ALPHAS", "ALPHA_BY_NAME", "FAILED_ALPHAS"]
