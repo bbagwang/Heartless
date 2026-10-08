@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS funding (
     symbol TEXT NOT NULL, funding_time INTEGER NOT NULL, rate REAL, mark REAL,
     PRIMARY KEY (symbol, funding_time)
 );
+CREATE TABLE IF NOT EXISTS metrics (
+    symbol TEXT NOT NULL, ts INTEGER NOT NULL, oi REAL, oi_value REAL, top_ls_accounts REAL, top_ls_positions REAL,
+    ls_accounts REAL, taker_ls_vol REAL,
+    PRIMARY KEY (symbol, ts)
+);
 CREATE TABLE IF NOT EXISTS positions (
     id TEXT PRIMARY KEY, engine TEXT, symbol TEXT, side TEXT, status TEXT,
     entry_time INTEGER, exit_time INTEGER, data TEXT
@@ -157,6 +162,31 @@ class Store:
 
     def funding_range(self, symbol: str) -> tuple[int | None, int | None]:
         r = self.query("SELECT MIN(funding_time) a, MAX(funding_time) b FROM funding WHERE symbol=?", (symbol,))[0]
+        return r["a"], r["b"]
+
+    # --- metrics (open interest / long-short ratios, 5m) ------------------------------------
+    def save_metrics(self, symbol: str, rows) -> int:
+        data = [(symbol, r.ts, r.oi, r.oi_value, r.top_ls_accounts, r.top_ls_positions, r.ls_accounts, r.taker_ls_vol)
+                for r in rows]
+        if data:
+            self.executemany("INSERT OR REPLACE INTO metrics(symbol,ts,oi,oi_value,top_ls_accounts,top_ls_positions,"
+                             "ls_accounts,taker_ls_vol) VALUES(?,?,?,?,?,?,?,?)", data)
+        return len(data)
+
+    def load_metrics(self, symbol: str, start: int | None = None, end: int | None = None) -> list[dict]:
+        sql = "SELECT * FROM metrics WHERE symbol=?"
+        params: list[Any] = [symbol]
+        if start is not None:
+            sql += " AND ts>=?"
+            params.append(start)
+        if end is not None:
+            sql += " AND ts<=?"
+            params.append(end)
+        sql += " ORDER BY ts"
+        return [dict(r) for r in self.query(sql, params)]
+
+    def metrics_range(self, symbol: str) -> tuple[int | None, int | None]:
+        r = self.query("SELECT MIN(ts) a, MAX(ts) b FROM metrics WHERE symbol=?", (symbol,))[0]
         return r["a"], r["b"]
 
     # --- positions / trades ------------------------------------------------------------------

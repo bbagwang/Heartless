@@ -5,12 +5,26 @@ from heartless.core.models import EntryStyle, Regime, Side, Signal
 from heartless.data.features import MarketView
 from heartless.strategy.alphas._common import clamp_conf, protective_stop, targets
 from heartless.strategy.base import Alpha, Context, ok
+from heartless.strategy.spec import ParamSpec
 
 
 class TrendPullback(Alpha):
     name = "trend_pullback"
     timeframe = "5m"
     description = "1h/15m trend + ADX filter, 5m pullback to EMA21 with RSI dip, resumption bar entry (post-only limit)"
+    # tunable parameters (the shared min_conf / tp1_frac are added by the registry)
+    param_specs = [
+        ParamSpec("adx_min", 20, 14, 32, 1, integer=True),
+        ParamSpec("pullback_atr", 0.6, 0.2, 1.5, 0.1),
+        ParamSpec("rsi_low", 45, 32, 52, 1, integer=True),
+        ParamSpec("sl_atr", 1.6, 0.9, 3.0, 0.1),
+        ParamSpec("tp_r", 2.2, 1.2, 4.0, 0.1),
+        ParamSpec("tp1_r", 1.0, 0.6, 1.8, 0.1),
+        ParamSpec("trail_atr", 2.5, 1.0, 4.0, 0.25),
+        ParamSpec("max_hold", 36, 12, 96, 1, integer=True),  # in 5m bars
+    ]
+    # prior weight per market regime (0..1); the Thompson-sampling bandit learns the rest
+    regime_affinity = {Regime.TREND_UP: 1.0, Regime.TREND_DOWN: 1.0, Regime.RANGE: 0.55, Regime.VOLATILE: 0.4}
 
     def evaluate(self, view: MarketView, ctx: Context, p: dict) -> Signal | None:
         if not view.closed("5m"):

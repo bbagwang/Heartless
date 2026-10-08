@@ -5,12 +5,24 @@ from heartless.core.models import EntryStyle, Regime, Side, Signal
 from heartless.data.features import MarketView
 from heartless.strategy.alphas._common import clamp_conf
 from heartless.strategy.base import Alpha, Context, ok
+from heartless.strategy.spec import ParamSpec
 
 
 class MeanReversion(Alpha):
     name = "mean_reversion"
     timeframe = "5m"
     description = "RSI(2) + Bollinger(2.4σ) extreme with rejection wick in a low-ADX/high-choppiness range, target = band midline"
+    # tunable parameters (the shared min_conf / tp1_frac are added by the registry)
+    param_specs = [
+        ParamSpec("bb_k", 2.4, 1.8, 3.2, 0.1),
+        ParamSpec("rsi2_lo", 6, 2, 15, 1, integer=True),
+        ParamSpec("adx_max", 20, 14, 28, 1, integer=True),
+        ParamSpec("chop_min", 55, 45, 65, 1, integer=True),
+        ParamSpec("sl_atr", 1.4, 0.8, 2.5, 0.1),
+        ParamSpec("max_hold", 24, 6, 60, 1, integer=True),
+    ]
+    # prior weight per market regime (0..1); the Thompson-sampling bandit learns the rest
+    regime_affinity = {Regime.TREND_UP: 0.35, Regime.TREND_DOWN: 0.35, Regime.RANGE: 1.0, Regime.VOLATILE: 0.6}
 
     def evaluate(self, view: MarketView, ctx: Context, p: dict) -> Signal | None:
         if not view.closed("5m"):

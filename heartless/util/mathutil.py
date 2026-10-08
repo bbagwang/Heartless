@@ -10,7 +10,12 @@ def round_step(value: float, step: float, mode: str = "down") -> float:
         return value
     d_step = Decimal(str(step))
     d_val = Decimal(str(value))
-    q = (d_val / d_step).quantize(Decimal("1"), rounding=ROUND_DOWN if mode == "down" else ROUND_HALF_EVEN)
+    ratio = d_val / d_step
+    if mode == "down":
+        # tolerate binary floating-point residue: 0.0564 - 0.0282 = 0.028199999999999996 must stay 0.0282, not
+        # drop a whole step (which would leave a one-step position that no bracket covers)
+        ratio += Decimal("1e-9")
+    q = ratio.quantize(Decimal("1"), rounding=ROUND_DOWN if mode == "down" else ROUND_HALF_EVEN)
     return float(q * d_step)
 
 
@@ -19,7 +24,7 @@ def round_up_step(value: float, step: float) -> float:
         return value
     d_step = Decimal(str(step))
     d_val = Decimal(str(value))
-    q = (d_val / d_step).to_integral_value(rounding="ROUND_CEILING")
+    q = (d_val / d_step - Decimal("1e-9")).to_integral_value(rounding="ROUND_CEILING")
     return float(q * d_step)
 
 

@@ -5,12 +5,27 @@ from heartless.core.models import EntryStyle, Regime, Side, Signal
 from heartless.data.features import MarketView
 from heartless.strategy.alphas._common import clamp_conf, protective_stop, targets
 from heartless.strategy.base import Alpha, Context, ok
+from heartless.strategy.spec import ParamSpec
 
 
 class MomentumBurst(Alpha):
     name = "momentum_burst"
     timeframe = "1m"
     description = "N consecutive 1m thrust bars with volume z-score and taker-flow confirmation in trend direction (market entry, tight trail)"
+    # tunable parameters (the shared min_conf / tp1_frac are added by the registry)
+    param_specs = [
+        ParamSpec("bars", 3, 2, 5, 1, integer=True),
+        ParamSpec("vol_z_min", 2.0, 1.0, 4.0, 0.1),
+        ParamSpec("taker_min", 0.6, 0.52, 0.7, 0.01),
+        ParamSpec("move_atr_min", 1.0, 0.5, 2.5, 0.1),
+        ParamSpec("sl_atr", 0.9, 0.5, 2.0, 0.1),
+        ParamSpec("tp_r", 1.6, 0.8, 3.0, 0.1),
+        ParamSpec("tp1_r", 0.8, 0.5, 1.5, 0.1),
+        ParamSpec("trail_atr", 1.2, 0.6, 2.5, 0.1),
+        ParamSpec("max_hold", 20, 5, 60, 1, integer=True),  # in 1m bars
+    ]
+    # prior weight per market regime (0..1); the Thompson-sampling bandit learns the rest
+    regime_affinity = {Regime.TREND_UP: 1.0, Regime.TREND_DOWN: 1.0, Regime.RANGE: 0.6, Regime.VOLATILE: 0.7}
 
     def evaluate(self, view: MarketView, ctx: Context, p: dict) -> Signal | None:
         if not view.closed("1m"):

@@ -10,6 +10,7 @@ import numpy as np
 from heartless.config import Settings
 from heartless.core.models import Candle, Regime, SymbolInfo, Ticker
 from heartless.data.candles import CandleArrays
+from heartless.data.extras import MetricsSeries
 from heartless.data.features import MarketView
 from heartless.exchange.base import OrderResult
 from heartless.exchange.paper import PaperAccount, PaperOrder
@@ -85,11 +86,13 @@ class BarPaperAccount(PaperAccount):
 
 class Backtester:
     def __init__(self, settings: Settings, symbols: dict[str, SymbolInfo], candles: dict[str, CandleArrays],
-                 funding: dict[str, list[tuple[int, float]]] | None = None):
+                 funding: dict[str, list[tuple[int, float]]] | None = None, metrics: dict | None = None):
         self.s = settings
         self.symbols = symbols
         self.candles = {s: c for s, c in candles.items() if c.n > 300}
         self.funding = funding or {}
+        self.metrics = metrics or {}  # symbol -> MetricsSeries (open interest / long-short ratios)
+        self._extras_cache: dict[str, tuple[int, dict]] = {}
         self.views: dict[str, MarketView] = {}
         self.now = 0
         self._timeline: np.ndarray | None = None
@@ -107,6 +110,25 @@ class Backtester:
         for sym, rows in self.funding.items():
             if rows:
                 self._fund_idx[sym] = np.array([r[0] for r in rows], dtype=np.int64)
+
+    def _extras(self, sym: str, t: int) -> dict:
+        """Positioning snapshot at t, recomputed only when a new 5-minute metrics row becomes usable."""
+        ms = self.metrics.get(sym)
+        if ms is None or len(ms) == 0:
+            return {}
+        idx = ms._idx(t)
+        cached = self._extras_cache.get(sym)
+        if cached is not None and cached[0] == idx and idx >= 0:
+            snap = cached[1]
+            if snap and not snap.get("stale"):
+                snap = dict(snap)
+                snap["age_min"] = (t - int(ms.ts[idx]) - 300_000) / 60_000
+                if snap["age_min"] > 30:
+                    return {"stale": True, "age_min": snap["age_min"]}
+            return snap
+        snap = ms.snapshot(t)
+        self._extras_cache[sym] = (idx, snap)
+        return snap
 
     def _funding_rate(self, sym: str, t: int) -> float:
         """Settled-rate lookup: the rate of the most recent settlement at or before `t` (what apply_funding charges)."""
@@ -196,9 +218,13 @@ class Backtester:
                 half = account.spread_bps / 2e4
                 tk = Ticker(sym, bid=c.close * (1 - half), ask=c.close * (1 + half), mark=c.close, last=c.close, ts=t,
                             funding_rate=self._upcoming_funding_rate(sym, t), next_funding_time=(bucket + 1) * FUNDING_INTERVAL)
+                extras = self._extras(sym, t)
+                oi4 = extras.get("oi_chg_4h") if extras else None
                 ctx = Context(symbol=sym, info=self.symbols[sym], ticker=tk, regime=reg, regime_info=reg_info,
-                              btc_regime=btc_regime if sym != "BTCUSDT" else None, oi_change=None, now=t,
-                              funding_rate=tk.funding_rate, minutes_to_funding=((bucket + 1) * FUNDING_INTERVAL - t) / MS_MINUTE)
+                              btc_regime=btc_regime if sym != "BTCUSDT" else None,
+                              oi_change=oi4 if oi4 is not None and oi4 == oi4 else None, now=t,
+                              funding_rate=tk.funding_rate, minutes_to_funding=((bucket + 1) * FUNDING_INTERVAL - t) / MS_MINUTE,
+                              extras=extras)
                 pos = engine.positions.get(sym)
                 if pos is not None:
                     pos.extra["last_mark"] = c.close
@@ -240,6 +266,7 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
     syms = symbol_list or store.candle_symbols()
     candles: dict[str, CandleArrays] = {}
     funding: dict[str, list[tuple[int, float]]] = {}
+    metrics: dict = {}
     for s in syms:
         if s not in symbols:
             continue
@@ -251,4 +278,8 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
         candles[s] = ca
         # one interval past `until` so the last bucket's upcoming (next-settlement) rate is known to the Context
         funding[s] = store.load_funding(s, since - FUNDING_INTERVAL, until + FUNDING_INTERVAL if until else 2**62)
-    return Backtester(settings, symbols, candles, funding)
+        if hasattr(store, "load_metrics"):
+            mrows = store.load_metrics(s, since - 2 * 86_400_000, until)
+            if mrows:
+                metrics[s] = MetricsSeries.from_rows(mrows)
+    return Backtester(settings, symbols, candles, funding, metrics)

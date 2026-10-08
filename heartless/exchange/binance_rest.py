@@ -180,6 +180,18 @@ class BinanceRest:
         return await self.request("GET", "/futures/data/topLongShortPositionRatio",
                                   {"symbol": symbol, "period": period, "limit": limit})
 
+    async def top_long_short_account_ratio(self, symbol: str, period: str = "5m", limit: int = 10) -> list[dict]:
+        return await self.request("GET", "/futures/data/topLongShortAccountRatio",
+                                  {"symbol": symbol, "period": period, "limit": limit})
+
+    async def global_long_short_account_ratio(self, symbol: str, period: str = "5m", limit: int = 10) -> list[dict]:
+        return await self.request("GET", "/futures/data/globalLongShortAccountRatio",
+                                  {"symbol": symbol, "period": period, "limit": limit})
+
+    async def taker_long_short_ratio(self, symbol: str, period: str = "5m", limit: int = 10) -> list[dict]:
+        return await self.request("GET", "/futures/data/takerlongshortRatio",
+                                  {"symbol": symbol, "period": period, "limit": limit})
+
     # --- account -------------------------------------------------------------------------------
     async def account(self) -> dict:
         try:

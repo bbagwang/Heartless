@@ -21,6 +21,9 @@ class Context:
     funding_rate: float = 0.0
     minutes_to_funding: float = 999.0
     book_imbalance: float = 0.0  # (bidQty-askQty)/(bidQty+askQty)
+    # derivatives positioning snapshot (open interest, long/short ratios, taker ratio) - see data/extras.py.
+    # Identical computation in live trading and backtests; empty when no metrics are available.
+    extras: dict = field(default_factory=dict)
 
 
 def ok(*vals: float) -> bool:
@@ -31,6 +34,9 @@ class Alpha(ABC):
     name: str = "alpha"
     timeframe: str = "5m"
     description: str = ""
+    param_specs: list = []  # list[ParamSpec]; min_conf and tp1_frac are added by the registry
+    regime_affinity: dict | None = None  # {Regime: weight 0..1}
+    enabled_by_default: bool = True
 
     @abstractmethod
     def evaluate(self, view: MarketView, ctx: Context, p: dict[str, float]) -> Signal | None: ...

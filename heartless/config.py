@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     universe_min_quote_volume: float = Field(default=80_000_000.0, alias="UNIVERSE_MIN_QUOTE_VOLUME")
     universe_refresh_minutes: int = Field(default=60, alias="UNIVERSE_REFRESH_MINUTES")
     history_days: int = Field(default=21, alias="HISTORY_DAYS")
+    # bulk history from the public data.binance.vision archive (no API weight); REST only fills the recent tail
+    archive_backfill: bool = Field(default=True, alias="ARCHIVE_BACKFILL")
     always_include: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT", alias="ALWAYS_INCLUDE")
 
     # --- risk (defaults are deliberately conservative; the optimizer never touches these) -----

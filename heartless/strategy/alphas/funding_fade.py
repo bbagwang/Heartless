@@ -5,12 +5,24 @@ from heartless.core.models import EntryStyle, Regime, Side, Signal
 from heartless.data.features import MarketView
 from heartless.strategy.alphas._common import clamp_conf, targets
 from heartless.strategy.base import Alpha, Context, ok
+from heartless.strategy.spec import ParamSpec
 
 
 class FundingFade(Alpha):
     name = "funding_fade"
     timeframe = "15m"
     description = "Extreme funding + RSI extreme + 15m stall and 5m Supertrend flip => fade the crowded side (post-only limit)"
+    # tunable parameters (the shared min_conf / tp1_frac are added by the registry)
+    param_specs = [
+        ParamSpec("funding_min", 0.0004, 0.0002, 0.0015, 0.0001),
+        ParamSpec("rsi_ext", 68, 60, 80, 1, integer=True),
+        ParamSpec("sl_atr", 2.0, 1.0, 3.5, 0.1),
+        ParamSpec("tp_r", 2.0, 1.0, 4.0, 0.1),
+        ParamSpec("tp1_r", 1.0, 0.6, 1.8, 0.1),
+        ParamSpec("max_hold", 48, 12, 96, 1, integer=True),  # in 15m bars
+    ]
+    # prior weight per market regime (0..1); the Thompson-sampling bandit learns the rest
+    regime_affinity = {Regime.TREND_UP: 0.6, Regime.TREND_DOWN: 0.6, Regime.RANGE: 0.9, Regime.VOLATILE: 0.8}
 
     def evaluate(self, view: MarketView, ctx: Context, p: dict) -> Signal | None:
         if not view.closed("15m"):

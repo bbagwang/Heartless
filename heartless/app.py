@@ -12,6 +12,7 @@ from heartless.core.bus import EventBus
 from heartless.core.models import Candle, PositionStatus, Regime, SymbolInfo, Ticker
 from heartless.core.store import Store
 from heartless.data.candles import CandleArrays
+from heartless.data.extras import MetricsSeries
 from heartless.data.features import LIVE_WINDOW, MarketView
 from heartless.data.universe import select_universe
 from heartless.exchange.binance_rest import BinanceError, BinanceRest
@@ -52,6 +53,7 @@ class Heartless:
         self.tickers: dict[str, Ticker] = {}
         self.book_qty: dict[str, tuple[float, float]] = {}
         self.oi_hist: dict[str, deque] = {}
+        self.metrics_series: dict[str, MetricsSeries] = {}  # 5m positioning data per symbol
         self.regimes: dict[str, tuple[Regime, dict]] = {}
         self.bandit = AlphaBandit(list(StrategyParams.default().alphas), store=self.store, engine="shared")
         self.research = ResearchManager(self)
@@ -76,6 +78,7 @@ class Heartless:
         self.telegram = None
         self.web = None
         self._backfilling: set[str] = set()
+        self.archive = None  # BinanceArchive, created lazily for bulk backfill
         self._backfill_failed: set[str] = set()  # symbols whose history fetch failed; retried by the scheduler
         self._last_backfill_retry = 0
         self._next_report_ts = next_local_time(settings.daily_report_hour, 0, settings.timezone)
@@ -196,6 +199,11 @@ class Heartless:
             self._persist_paper_accounts()
         except Exception:  # noqa: BLE001
             log.exception("paper account flush failed")
+        if self.archive is not None:
+            try:
+                await self.archive.close()
+            except Exception:  # noqa: BLE001
+                pass
         await self.rest.close()
         self.store.close()
 
@@ -260,6 +268,21 @@ class Heartless:
                             ranges.append((since, lo - MS_MINUTE))
                         ranges.append((hi + MS_MINUTE, now))
                     for start, end in ranges:
+                        if self.s.archive_backfill and start <= end and start < now - MS_MINUTE and end - start > 2 * MS_DAY:
+                            # bulk history from the public archive first (no API weight); REST only fills the tail
+                            try:
+                                if self.archive is None:
+                                    from heartless.data.archive import BinanceArchive
+
+                                    self.archive = BinanceArchive()
+                                arch = await self.archive.klines(sym, start, end, now)
+                                arch = [c for c in arch if c.close_time <= now]
+                                if arch:
+                                    self.store.save_candles(sym, arch)
+                                    log.info("archive backfill %s: %d bars", sym, len(arch))
+                                    start = max(start, arch[-1].open_time + MS_MINUTE)
+                            except Exception as e:  # noqa: BLE001
+                                log.info("archive backfill %s unavailable (%s); using REST", sym, e)
                         if start <= end and start < now - MS_MINUTE:
                             rows = await self.rest.klines_range(sym, start, end, "1m")
                             rows = [c for c in rows if c.close_time <= now]
@@ -620,16 +643,20 @@ class Heartless:
         btc = self.regimes.get("BTCUSDT", (None, {}))[0] if sym != "BTCUSDT" else None
         bq = self.book_qty.get(sym)
         imb = (bq[0] - bq[1]) / (bq[0] + bq[1]) if bq and (bq[0] + bq[1]) > 0 else 0.0
-        oi = self.oi_hist.get(sym)
-        oi_change = None
-        if oi and len(oi) >= 2:
-            old = next((v for ts, v in oi if ts <= now - 4 * MS_HOUR), oi[0][1])
-            if old:
-                oi_change = oi[-1][1] / old - 1
+        ms = self.metrics_series.get(sym)
+        extras = ms.snapshot(now) if ms is not None else {}
+        oi4 = extras.get("oi_chg_4h") if extras else None
+        oi_change = oi4 if oi4 is not None and oi4 == oi4 else None
+        if oi_change is None:  # fall back to the 15m OI history poll
+            oi = self.oi_hist.get(sym)
+            if oi and len(oi) >= 2:
+                old = next((v for ts, v in oi if ts <= now - 4 * MS_HOUR), oi[0][1])
+                if old:
+                    oi_change = oi[-1][1] / old - 1
         nft = t.next_funding_time or ((now // (8 * MS_HOUR)) + 1) * 8 * MS_HOUR
         return Context(symbol=sym, info=self.symbols[sym], ticker=t, regime=reg, regime_info=info, btc_regime=btc,
                        oi_change=oi_change, now=now, funding_rate=t.funding_rate,
-                       minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), book_imbalance=imb)
+                       minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), book_imbalance=imb, extras=extras)
 
     async def _btc_shock_check(self, view: MarketView) -> None:
         m1 = view.tf("1m")
@@ -660,9 +687,9 @@ class Heartless:
                 if self._backfill_failed and now - self._last_backfill_retry >= BACKFILL_RETRY_MS:
                     self._last_backfill_retry = now
                     await self._retry_backfill()
-                if now - self._last_oi_poll >= 15 * MS_MINUTE:
+                if now - self._last_oi_poll >= 5 * MS_MINUTE:
                     self._last_oi_poll = now
-                    asyncio.create_task(self._poll_open_interest())
+                    asyncio.create_task(self._poll_metrics())
                 if now - self._last_universe >= self.s.universe_refresh_minutes * MS_MINUTE:
                     await self.refresh_universe()
                 if self.research.due(now) and not self.research.running:
@@ -704,6 +731,34 @@ class Heartless:
                 if pp is None or abs(pp.qty) <= 0:
                     mark = self.marks().get(sym) or pos.entry_price
                     await eng._finalize(pos, mark, now_ms(), "시뮬 계정과 동기화")
+
+    async def _poll_metrics(self) -> None:
+        """Poll the 5-minute positioning series (OI, top-trader / global long-short, taker ratio) for every
+        symbol. The first poll loads ~2 days (enough for the 24h change and the OI z-score); later polls fetch
+        the newest points and merge them. Rows are archive-shaped, so alphas see exactly what backtests saw."""
+        from heartless.data.extras import rows_from_rest
+
+        for sym in list(self.universe):
+            have = self.metrics_series.get(sym)
+            limit = 500 if have is None or len(have) < 100 else 6
+            try:
+                oi, tp, ta, ga, tk = await asyncio.gather(
+                    self.rest.open_interest_hist(sym, "5m", limit), self.rest.top_long_short_ratio(sym, "5m", limit),
+                    self.rest.top_long_short_account_ratio(sym, "5m", limit),
+                    self.rest.global_long_short_account_ratio(sym, "5m", limit),
+                    self.rest.taker_long_short_ratio(sym, "5m", limit))
+                fresh = MetricsSeries.from_rows(rows_from_rest(oi, tp, ta, ga, tk))
+                merged = fresh if have is None else have.merge(fresh)
+                self.metrics_series[sym] = merged.tail(1200)
+                # keep the 15m OI deque fed for anything still reading it
+                dq = self.oi_hist.setdefault(sym, deque(maxlen=64))
+                if oi:
+                    dq.clear()
+                    for r in oi[-64:]:
+                        dq.append((int(r["timestamp"]), float(r["sumOpenInterest"])))
+            except Exception as e:  # noqa: BLE001
+                log.debug("metrics poll %s failed: %s", sym, e)
+            await asyncio.sleep(0.25)
 
     async def _poll_open_interest(self) -> None:
         for sym in list(self.universe):

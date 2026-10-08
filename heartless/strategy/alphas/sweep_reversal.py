@@ -5,12 +5,26 @@ from heartless.core.models import EntryStyle, Regime, Side, Signal
 from heartless.data.features import MarketView
 from heartless.strategy.alphas._common import clamp_conf, targets
 from heartless.strategy.base import Alpha, Context, ok
+from heartless.strategy.spec import ParamSpec
 
 
 class SweepReversal(Alpha):
     name = "sweep_reversal"
     timeframe = "5m"
     description = "Stop-hunt wick beyond prior N-bar high/low, close back inside with a rejection wick and volume (market entry)"
+    # tunable parameters (the shared min_conf / tp1_frac are added by the registry)
+    param_specs = [
+        ParamSpec("lookback", 20, 10, 50, choices=(10, 20, 50)),
+        ParamSpec("sweep_atr", 0.2, 0.05, 0.8, 0.05),
+        ParamSpec("vol_z_min", 1.0, 0.3, 3.0, 0.1),
+        ParamSpec("wick_min", 0.4, 0.25, 0.7, 0.05),
+        ParamSpec("sl_buffer_atr", 0.3, 0.1, 0.8, 0.05),
+        ParamSpec("tp_r", 2.0, 1.0, 4.0, 0.1),
+        ParamSpec("tp1_r", 1.0, 0.6, 1.8, 0.1),
+        ParamSpec("max_hold", 36, 12, 96, 1, integer=True),
+    ]
+    # prior weight per market regime (0..1); the Thompson-sampling bandit learns the rest
+    regime_affinity = {Regime.TREND_UP: 0.7, Regime.TREND_DOWN: 0.7, Regime.RANGE: 1.0, Regime.VOLATILE: 0.8}
 
     def evaluate(self, view: MarketView, ctx: Context, p: dict) -> Signal | None:
         if not view.closed("5m"):

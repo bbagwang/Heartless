@@ -453,6 +453,13 @@ class TradingEngine:
                 kind = "SL"
         step = self.symbols[pos.symbol].step_size if pos.symbol in self.symbols else 0.0
         remaining = pos.qty > step * 0.5 + 1e-12
+        if remaining and self._is_dust(pos, fill.price):
+            # a leftover below the exchange minimum (rounding residue, partial bracket fill) is not a position
+            # worth managing and no bracket may cover it: flatten it now instead of holding it indefinitely
+            main = {"SL": "손절(SL)" if not pos.be_moved else "본절 손절(BE)", "TP": "익절(TP)"}.get(kind, pos.exit_reason or "청산")
+            self._save(pos)
+            await self.close_position(pos.symbol, f"{main} (+잔량 정리)")
+            return
         if remaining and kind == "TP" and pos.tp1 and not pos.tp1_done and not engine_close:
             pos.tp1_done = True
             pos.extra.pop("tp1_algo_id", None)
@@ -469,6 +476,14 @@ class TradingEngine:
                 (pos.side is Side.LONG and pos.stop > pos.entry_price) or (pos.side is Side.SHORT and pos.stop < pos.entry_price)):
             reason = "트레일링 스탑"
         await self._finalize(pos, fill.price, fill.ts or self.clock(), reason)
+
+    def _is_dust(self, pos: Position, price: float) -> bool:
+        info = self.symbols.get(pos.symbol)
+        if info is None or pos.qty <= 0:
+            return False
+        px = price or pos.entry_price
+        return pos.qty < info.min_qty * 0.999 or (px > 0 and pos.qty * px < info.min_notional * 0.999) or \
+            (pos.original_qty > 0 and pos.qty < pos.original_qty * 0.02 and pos.qty <= info.step_size * 1.001)
 
     async def _move_stop_to_breakeven(self, pos: Position) -> None:
         info = self.symbols[pos.symbol]
@@ -541,11 +556,16 @@ class TradingEngine:
             atr = pos.atr
         # 1) time stop
         if pos.max_hold_bars and pos.bars_held >= pos.max_hold_bars:
-            if r_now < 0.5:
-                await self.close_position(pos.symbol, "시간 초과 청산(time stop)")
+            if r_now < 0.5 or pos.bars_held >= 3 * pos.max_hold_bars:
+                # not working at the deadline, or a winner held 3x past it: a scalp must not turn into a swing
+                reason = "시간 초과 청산(time stop)" if r_now < 0.5 else "최대 보유시간 초과 청산"
+                await self.close_position(pos.symbol, reason)
                 return
             if not pos.be_moved:
                 await self._move_stop_to_breakeven(pos)
+            if pos.trail_atr_mult <= 0:
+                # a working trade past its deadline keeps running only under a protective trail
+                pos.trail_atr_mult = 1.5
         # 2) funding avoidance: don't pay a large funding bill on a trade that is not working
         if ctx.minutes_to_funding <= 2 and r_now < 0.3:
             adverse = ctx.funding_rate * pos.side.sign  # long pays positive funding

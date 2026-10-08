@@ -31,6 +31,21 @@ def main(argv: list[str] | None = None) -> None:
     rs.add_argument("--days", type=int, default=None)
     rs.add_argument("--candidates", type=int, default=None)
     rs.add_argument("--apply", action="store_true", help="promote the best candidates straight to champion (offline use)")
+    fe = sub.add_parser("fetch", help="download history from the Binance public data archive (no API weight)")
+    fe.add_argument("--symbols", default=None, help="comma separated (default: ALWAYS_INCLUDE + stored symbols)")
+    fe.add_argument("--days", type=int, default=90)
+    fe.add_argument("--no-metrics", action="store_true", help="skip open-interest / long-short metrics")
+    lb = sub.add_parser("lab", help="research lab: parallel per-symbol backtests on stored history with train/valid/holdout splits")
+    lb.add_argument("--alpha", default=None, help="evaluate a single alpha in isolation")
+    lb.add_argument("--split", default="train", choices=["train", "valid", "holdout", "all"])
+    lb.add_argument("--start", default=None, help="ISO date, overrides --split")
+    lb.add_argument("--end", default=None)
+    lb.add_argument("--symbols", default=None)
+    lb.add_argument("--params", default=None, help="StrategyParams JSON file (default: stored champion)")
+    lb.add_argument("--set", action="append", default=[], help="override, e.g. trend_pullback.adx_min=24")
+    lb.add_argument("--workers", type=int, default=None)
+    lb.add_argument("--json", action="store_true")
+    lb.add_argument("--trades-out", default=None)
     sub.add_parser("doctor", help="check configuration and connectivity")
     sub.add_parser("params", help="print the champion parameters")
     args = parser.parse_args(argv)
@@ -43,6 +58,12 @@ def main(argv: list[str] | None = None) -> None:
         asyncio.run(_backtest(settings, args))
     elif cmd == "research":
         _research(settings, args)
+    elif cmd == "fetch":
+        asyncio.run(_fetch(settings, args))
+    elif cmd == "lab":
+        from heartless.learning.lab import main_cli
+
+        main_cli(settings, args)
     elif cmd == "doctor":
         asyncio.run(_doctor(settings))
     elif cmd == "params":
@@ -213,6 +234,31 @@ async def _symbols_offline(settings):
         return parse_exchange_info(await rest.exchange_info())
     finally:
         await rest.close()
+
+
+async def _fetch(settings, args) -> None:
+    from heartless.core.store import Store
+    from heartless.data.archive import BinanceArchive, sync_symbol
+
+    store = Store(settings.db_path)
+    if args.symbols:
+        symbols = [x.strip().upper() for x in args.symbols.split(",") if x.strip()]
+    else:
+        symbols = list(dict.fromkeys(settings.always_include_list + store.candle_symbols()))
+    now = now_ms()
+    start = now - args.days * MS_DAY
+    async with BinanceArchive() as archive:
+        for sym in symbols:
+            try:
+                res = await sync_symbol(store, archive, sym, start, now, now, metrics=not args.no_metrics)
+            except Exception as e:  # noqa: BLE001
+                print(f"{sym}: failed ({e})", file=sys.stderr)
+                continue
+            lo, hi, n = store.candle_range(sym)
+            span = f"{(hi - lo) / MS_DAY:.1f}d" if lo else "-"
+            print(f"{sym}: +{res['candles']} candles (total {n}, {span}), +{res['funding']} funding, +{res['metrics']} metrics")
+        print(f"downloaded {archive.downloaded_bytes / 1e6:.1f} MB from {archive._good or '-'}")
+    store.close()
 
 
 async def _doctor(settings) -> None:

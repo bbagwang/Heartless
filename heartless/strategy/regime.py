@@ -57,12 +57,12 @@ def detect_regime(view: MarketView) -> tuple[Regime, dict]:
     return Regime.RANGE, info
 
 
-# prior affinity of each alpha to each regime (0..1); the bandit learns the rest
-REGIME_AFFINITY: dict[str, dict[Regime, float]] = {
-    "trend_pullback": {Regime.TREND_UP: 1.0, Regime.TREND_DOWN: 1.0, Regime.RANGE: 0.55, Regime.VOLATILE: 0.4},
-    "squeeze_breakout": {Regime.TREND_UP: 0.9, Regime.TREND_DOWN: 0.9, Regime.RANGE: 0.85, Regime.VOLATILE: 0.5},
-    "mean_reversion": {Regime.TREND_UP: 0.35, Regime.TREND_DOWN: 0.35, Regime.RANGE: 1.0, Regime.VOLATILE: 0.6},
-    "momentum_burst": {Regime.TREND_UP: 1.0, Regime.TREND_DOWN: 1.0, Regime.RANGE: 0.6, Regime.VOLATILE: 0.7},
-    "funding_fade": {Regime.TREND_UP: 0.6, Regime.TREND_DOWN: 0.6, Regime.RANGE: 0.9, Regime.VOLATILE: 0.8},
-    "sweep_reversal": {Regime.TREND_UP: 0.7, Regime.TREND_DOWN: 0.7, Regime.RANGE: 1.0, Regime.VOLATILE: 0.8},
-}
+# prior affinity of each alpha to each regime (0..1); each alpha declares its own `regime_affinity`
+def _build_affinity() -> dict[str, dict[Regime, float]]:
+    from heartless.strategy.alphas import ALL_ALPHAS
+
+    default = {Regime.TREND_UP: 0.8, Regime.TREND_DOWN: 0.8, Regime.RANGE: 0.8, Regime.VOLATILE: 0.6}
+    return {a.name: dict(getattr(a, "regime_affinity", None) or default) for a in ALL_ALPHAS}
+
+
+REGIME_AFFINITY: dict[str, dict[Regime, float]] = _build_affinity()

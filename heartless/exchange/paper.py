@@ -79,8 +79,10 @@ class PaperAccount(Account):
         self.impact_bps_per_10k = impact_bps_per_10k
         self.spread_bps = spread_bps
         self.positions: dict[str, PaperPosition] = {}
-        self.orders: dict[str, PaperOrder] = {}
-        self.algos: dict[str, PaperAlgo] = {}
+        self.orders: dict[str, PaperOrder] = {}  # working orders only (terminal ones move to _done_orders)
+        self.algos: dict[str, PaperAlgo] = {}  # working algos only (terminal ones move to _done_algos)
+        self._done_orders: dict[str, PaperOrder] = {}  # bounded history so query_order still answers
+        self._done_algos: dict[str, PaperAlgo] = {}
         self.tickers: dict[str, Ticker] = {}
         self._ids = itertools.count(1)
         self._clock = clock or now_ms
@@ -103,6 +105,8 @@ class PaperAccount(Account):
         self.positions.clear()
         self.orders.clear()
         self.algos.clear()
+        self._done_orders.clear()
+        self._done_algos.clear()
         self.fees_paid = self.funding_paid = self.realized = 0.0
         self.trade_count = 0
         self._funding_next.clear()
@@ -123,6 +127,22 @@ class PaperAccount(Account):
     def mark(self, symbol: str) -> float:
         t = self.tickers.get(symbol)
         return (t.mark or t.mid or t.last) if t else 0.0
+
+    _DONE_KEEP = 500
+
+    def _prune(self) -> None:
+        """Move terminal orders/algos out of the working sets. Without this every trigger check walks every order
+        ever placed, which makes long backtests quadratic."""
+        for oid in [k for k, o in self.orders.items() if o.status not in ("NEW", "PARTIALLY_FILLED")]:
+            self._done_orders[oid] = self.orders.pop(oid)
+        for aid in [k for k, a in self.algos.items() if a.status != "NEW"]:
+            self._done_algos[aid] = self.algos.pop(aid)
+        for done in (self._done_orders, self._done_algos):
+            while len(done) > self._DONE_KEEP:
+                done.pop(next(iter(done)))
+
+    def has_working(self, symbol: str) -> bool:
+        return any(o.symbol == symbol for o in self.orders.values()) or any(a.symbol == symbol for a in self.algos.values())
 
     def unrealized_total(self) -> float:
         tot = 0.0
@@ -198,16 +218,17 @@ class PaperAccount(Account):
         return OrderResult(oid, client_id, o.status, o.filled_qty, o.avg_price)
 
     async def cancel_order(self, symbol: str, order_id: str = "", client_id: str = "") -> bool:
-        for o in self.orders.values():
+        for o in list(self.orders.values()) + list(self._done_orders.values()):
             if o.symbol == symbol and (o.order_id == order_id or (client_id and o.client_id == client_id)):
                 if o.status in ("NEW", "PARTIALLY_FILLED"):
                     o.status = "CANCELED"
+                    self._prune()
                     return True
                 return False
         return False
 
     async def query_order(self, symbol: str, order_id: str = "", client_id: str = "") -> OrderResult:
-        for o in self.orders.values():
+        for o in list(self.orders.values()) + list(reversed(list(self._done_orders.values()))):
             if o.symbol == symbol and (o.order_id == order_id or (client_id and o.client_id == client_id)):
                 return OrderResult(o.order_id, o.client_id, o.status, o.filled_qty, o.avg_price)
         return OrderResult(order_id, client_id, "UNKNOWN")
@@ -230,6 +251,7 @@ class PaperAccount(Account):
         a = self.algos.get(algo_id)
         if a and a.symbol == symbol and a.status == "NEW":  # ids restart per process: never touch another symbol's bracket
             a.status = "CANCELED"
+            self._prune()
             return True
         return False
 
@@ -240,6 +262,7 @@ class PaperAccount(Account):
         for a in self.algos.values():
             if a.symbol == symbol and a.status == "NEW":
                 a.status = "CANCELED"
+        self._prune()
 
     # --- simulation drivers --------------------------------------------------------------------
     async def on_ticker(self, t: Ticker) -> None:
@@ -280,6 +303,14 @@ class PaperAccount(Account):
         """
         t = self.tickers.get(symbol) or Ticker(symbol)
         half = self.spread_bps / 2e4
+        if not self.has_working(symbol):
+            # nothing can trigger or fill: just publish the closing book (dominant case in backtests)
+            t.mark = t.last = c.close
+            t.bid = c.close * (1 - half)
+            t.ask = c.close * (1 + half)
+            t.ts = c.close_time
+            self.tickers[symbol] = t
+            return
 
         def set_px(px: float) -> None:
             t.mark = t.last = px
@@ -335,6 +366,7 @@ class PaperAccount(Account):
             if passes >= 8 or not any(k not in known and a.status == "NEW" and a.symbol == symbol
                                       for k, a in self.algos.items()):
                 break
+        self._prune()
 
     async def _check_triggers_once(self, symbol: str, mark: float, bid: float, ask: float, ts: int,
                                    intrabar: bool) -> None:

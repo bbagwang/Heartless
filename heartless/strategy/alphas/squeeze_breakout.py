@@ -5,12 +5,28 @@ from heartless.core.models import EntryStyle, Regime, Side, Signal
 from heartless.data.features import MarketView
 from heartless.strategy.alphas._common import clamp_conf, protective_stop, targets
 from heartless.strategy.base import Alpha, Context, ok
+from heartless.strategy.spec import ParamSpec
 
 
 class SqueezeBreakout(Alpha):
     name = "squeeze_breakout"
     timeframe = "5m"
     description = "BB/KC squeeze release + Donchian breakout with volume z-score and taker-flow confirmation (market entry)"
+    # tunable parameters (the shared min_conf / tp1_frac are added by the registry)
+    param_specs = [
+        ParamSpec("squeeze_bars_min", 6, 3, 14, 1, integer=True),
+        ParamSpec("bbw_rank_max", 0.25, 0.1, 0.5, 0.05),
+        ParamSpec("vol_z_min", 1.2, 0.5, 3.0, 0.1),
+        ParamSpec("taker_min", 0.55, 0.5, 0.65, 0.01),
+        ParamSpec("dc_len", 20, 10, 20, choices=(10, 20, 50)),
+        ParamSpec("sl_atr", 1.5, 0.8, 3.0, 0.1),
+        ParamSpec("tp_r", 2.5, 1.2, 4.5, 0.1),
+        ParamSpec("tp1_r", 1.2, 0.6, 2.0, 0.1),
+        ParamSpec("trail_atr", 2.0, 1.0, 4.0, 0.25),
+        ParamSpec("max_hold", 48, 12, 120, 1, integer=True),
+    ]
+    # prior weight per market regime (0..1); the Thompson-sampling bandit learns the rest
+    regime_affinity = {Regime.TREND_UP: 0.9, Regime.TREND_DOWN: 0.9, Regime.RANGE: 0.85, Regime.VOLATILE: 0.5}
 
     def evaluate(self, view: MarketView, ctx: Context, p: dict) -> Signal | None:
         if not view.closed("5m"):
