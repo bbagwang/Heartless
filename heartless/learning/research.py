@@ -109,7 +109,7 @@ class ResearchManager:
             result = await loop.run_in_executor(self.pool, run_research_cycle, str(self.s.db_path), settings_dict,
                                                 self.app.params.to_dict(), symbols_dict, self.s.research_lookback_days,
                                                 self.s.research_candidates, now % 100_000, None,
-                                                self.store.get("advisor.seeds", {}) or {})
+                                                self.store.get("advisor.seeds", {}) or {}, self.s.research_folds)
         except Exception as e:  # noqa: BLE001
             log.exception("research cycle failed")
             # A crashed worker (OOM kill, os._exit) leaves the executor permanently broken: every later
@@ -136,31 +136,123 @@ class ResearchManager:
         return result
 
     async def _apply_results(self, result: dict) -> None:
-        """Turn per-alpha winners into challenger parameter sets."""
-        improvements: list[tuple[str, dict, float, dict]] = []
+        """Turn walk-forward results into challenger parameter sets.
+
+        * better parameters for an enabled alpha -> challenger with those parameters;
+        * a disabled alpha whose best candidate passes a stricter gate (positive in most confirmation folds) ->
+          challenger with the alpha switched ON (self-healing: an alpha that starts working again comes back);
+        * an enabled alpha that loses in every confirmation fold and has no better parameters -> challenger with
+          the alpha switched OFF (self-pruning). Challengers still have to beat the champion in real-time paper."""
+        proposals: list[tuple[float, str, StrategyParams, str]] = []
         for alpha, r in result.get("alphas", {}).items():
             best, base = r["best"], r["base"]
-            if best.get("is_base"):
-                continue
-            if best["score"] <= -1e8:
-                continue
-            margin = 0.15 + 0.1 * best.get("distance", 0.0)
+            enabled = r.get("enabled", True)
+            k = int(r.get("n_folds", 1) or 1)
+            need_folds = max(1, (2 * k + 2) // 3)  # 2 of 3, 3 of 4 ...
             base_score = base["score"] if base["score"] > -1e8 else -1.0
-            if best["score"] > base_score + margin and best["test"].get("avg_r", 0) > 0 and best["test"].get("n", 0) >= 5:
-                improvements.append((alpha, best["params"], best["score"] - base_score, best["test"]))
-        improvements.sort(key=lambda x: -x[2])
+            test = best.get("test", {})
+            if not best.get("is_base") and best["score"] > -1e8:
+                margin = 0.15 + 0.1 * best.get("distance", 0.0)
+                folds_ok = k <= 1 or best.get("folds_pos", 0) >= need_folds
+                if best["score"] > base_score + margin and test.get("avg_r", 0) > 0 and test.get("n", 0) >= 5 and folds_ok:
+                    if enabled:
+                        ch = self.app.params.with_alpha(alpha, best["params"], version=short_id("v"),
+                                                        note=f"research:{alpha} (+{best['score'] - base_score:.2f} score, "
+                                                             f"OOS avgR {test.get('avg_r', 0):+.2f}, folds+ {best.get('folds_pos', 0)}/{k})")
+                        proposals.append((best["score"] - base_score, alpha, ch,
+                                          f"{alpha}: 파라미터 개선 (OOS n={test.get('n', 0)}, avgR {test.get('avg_r', 0):+.2f}, 구간+ {best.get('folds_pos', 0)}/{k})"))
+                        continue
+                    if test.get("avg_r", 0) >= 0.05 and test.get("n", 0) >= 15 and best.get("folds_pos", 0) >= need_folds:
+                        ch = self.app.params.with_alpha(alpha, best["params"], version=short_id("v"),
+                                                        note=f"research:enable {alpha} (OOS avgR {test.get('avg_r', 0):+.2f}, folds+ {best.get('folds_pos', 0)}/{k})")
+                        ch.enabled[alpha] = True
+                        proposals.append((best["score"] - base_score + 0.5, alpha, ch,
+                                          f"{alpha}: 비활성 알파 재검증 통과 → 켠 챌린저 (OOS avgR {test.get('avg_r', 0):+.2f}, 구간+ {best.get('folds_pos', 0)}/{k})"))
+                        continue
+            if enabled and k > 1:
+                folds = base.get("folds") or []
+                losing = [f for f in folds if f.get("n", 0) >= 8 and f.get("avg_r", 0) < -0.1]
+                if len(folds) == k and len(losing) == k:
+                    ch = self.app.params.clone(version=short_id("v"), note=f"research:prune {alpha} (lost in all {k} folds)")
+                    ch.enabled[alpha] = False
+                    avg = sum(f.get("avg_r", 0) for f in folds) / k
+                    proposals.append((0.25 + abs(avg), alpha, ch, f"{alpha}: 모든 검증 구간 손실 (평균 {avg:+.2f}R) → 끈 챌린저"))
+        proposals.sort(key=lambda x: -x[0])
         lines = []
-        for alpha, params, gain, test in improvements[: self.s.challengers]:
-            challenger = self.app.params.with_alpha(alpha, params, version=short_id("v"),
-                                                    note=f"research:{alpha} (+{gain:.2f} score, OOS avgR {test.get('avg_r', 0):+.2f}, n={test.get('n', 0)})")
+        for _, alpha, challenger, text in proposals[: self.s.challengers]:
             slot = await self.app.install_challenger(challenger, source=alpha)
             if slot:
-                lines.append(f"• {alpha}: 챌린저 {slot.name} 교체 (OOS n={test.get('n', 0)}, avgR {test.get('avg_r', 0):+.2f}, PF {test.get('profit_factor', 0):.2f})")
+                lines.append(f"• {text} → {slot.name}")
         summary = {a: {"best_score": round(r["best"]["score"], 2), "base_score": round(r["base"]["score"], 2),
-                       "test_n": r["best"]["test"].get("n", 0), "test_avg_r": r["best"]["test"].get("avg_r", 0.0)}
+                       "test_n": r["best"]["test"].get("n", 0), "test_avg_r": r["best"]["test"].get("avg_r", 0.0),
+                       "folds_pos": r["best"].get("folds_pos", 0), "enabled": r.get("enabled", True)}
                    for a, r in result.get("alphas", {}).items()}
         await self.app.emit("research_done", {"message": "\n".join(lines) if lines else "개선된 파라미터 없음 — 챔피언 유지",
                                               "summary": summary, "seconds": result.get("seconds"), "result": result})
+
+    # --- discovery ---------------------------------------------------------------------------------
+    def discovery_due(self, now: int) -> bool:
+        last = int(self.store.get("discovery.last_cycle", 0) or 0)
+        return now - last >= self.s.discovery_interval_hours * 3_600_000
+
+    async def discovery_cycle(self, force: bool = False) -> dict | None:
+        """Mine rule-based alphas on the stored history and hand validated rule sets to a paper challenger."""
+        if self.running:
+            return None
+        now = now_ms()
+        if not force and not self.discovery_due(now):
+            return None
+        syms = [s for s in self.app.universe if self.store.candle_range(s)[0] is not None]
+        ranges = [self.store.candle_range(s) for s in syms]
+        if not ranges:
+            return None
+        first, last = max(r[0] for r in ranges), min(r[1] for r in ranges)
+        days = (last - first) / MS_DAY
+        self.store.set("discovery.last_cycle", now)
+        if days < self.s.discovery_min_days:
+            await self.app.emit("research_done", {"message": f"알파 발굴 건너뜀: 저장된 이력 {days:.0f}일 < {self.s.discovery_min_days}일", "notify": False})
+            return None
+        start = first + 14 * MS_DAY  # indicator warm-up
+        split = start + int((last - start) * 0.7)
+        self.running = True
+        try:
+            if self.pool is None:
+                self.pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+            loop = asyncio.get_running_loop()
+            await self.app.emit("research_started", {"message": f"알파 발굴 시작 ({len(syms)}종목, {days:.0f}일 이력)"})
+            result = await loop.run_in_executor(self.pool, _discovery_worker, str(self.s.db_path), syms, (start, split - 1),
+                                                (split, last))
+        except Exception as e:  # noqa: BLE001
+            log.exception("discovery cycle failed")
+            if self.pool is not None:
+                try:
+                    self.pool.shutdown(wait=False, cancel_futures=True)
+                except Exception:  # noqa: BLE001
+                    pass
+                self.pool = None
+            self.running = False
+            await self.app.emit("error", {"message": f"알파 발굴 실패: {e}"})
+            return None
+        self.running = False
+        self.store.set("discovery.last", {"ts": now, **{k: result[k] for k in ("tested", "t_bar", "passed", "seconds", "rows")}})
+        passed = result.get("passed") or []
+        if passed:
+            current = self.app.params.alphas.get("discovered", {}).get("rules") or []
+            known = {r.get("id") for r in current}
+            fresh = [r for r in passed if r.get("id") not in known]
+            if fresh:
+                rules = (fresh + current)[:6]
+                ch = self.app.params.clone(version=short_id("v"), note=f"discovery: {len(fresh)} new rule(s)")
+                ch.alphas.setdefault("discovered", {})["rules"] = rules
+                ch.enabled["discovered"] = True
+                slot = await self.app.install_challenger(ch, source="discovered")
+                msg = f"알파 발굴: {result['tested']}개 규칙 검사, {len(fresh)}개 신규 규칙이 검증 통과 → 챌린저 {slot.name if slot else '-'}"
+            else:
+                msg = f"알파 발굴: 검증 통과 규칙이 이미 배포된 규칙과 동일 ({len(passed)}개)"
+        else:
+            msg = f"알파 발굴: {result['tested']}개 규칙 검사, 다중검정·검증 구간을 통과한 규칙 없음 (과최적화 차단)"
+        await self.app.emit("research_done", {"message": msg, "seconds": result.get("seconds")})
+        return result
 
     # --- promotion -----------------------------------------------------------------------------
     async def evaluate_challengers(self, force: bool = False) -> None:
@@ -228,3 +320,23 @@ class ResearchManager:
         if self.pool is not None:
             self.pool.shutdown(wait=False, cancel_futures=True)
             self.pool = None
+
+
+def _discovery_worker(db_path: str, symbols: list[str], train: tuple[int, int], valid: tuple[int, int]) -> dict:
+    """Runs in the research process: mine 15m and 1h rules, return the validated ones (JSON-serialisable)."""
+    from heartless.learning import discovery as D
+
+    out = {"tested": 0, "passed": [], "seconds": 0.0, "rows": {}, "t_bar": 0.0}
+    for tf in ("15m", "1h"):
+        try:
+            res = D.mine(db_path, symbols, train, valid, tf, D.SearchConfig(beam=25, depth=3), workers=1)
+        except Exception as e:  # noqa: BLE001
+            out.setdefault("errors", []).append(f"{tf}: {e}")
+            continue
+        out["tested"] += res["tested"]
+        out["passed"] += res["passed"]
+        out["seconds"] += res["seconds"]
+        out["rows"][tf] = res["rows"]
+        out["t_bar"] = max(out["t_bar"], res["t_bar"])
+    out["passed"].sort(key=lambda r: -r.get("stats", {}).get("valid", {}).get("t", 0.0))
+    return out

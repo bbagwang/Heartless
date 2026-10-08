@@ -62,7 +62,12 @@ class Settings(BaseSettings):
 
     # --- learning ----------------------------------------------------------------------------
     research_interval_minutes: int = Field(default=240, alias="RESEARCH_INTERVAL_MINUTES")
-    research_lookback_days: int = Field(default=14, alias="RESEARCH_LOOKBACK_DAYS")
+    research_lookback_days: int = Field(default=30, alias="RESEARCH_LOOKBACK_DAYS")
+    research_folds: int = Field(default=3, alias="RESEARCH_FOLDS")  # walk-forward confirmation windows
+    # history kept in the database for research / discovery (live feature views only use HISTORY_DAYS)
+    data_retention_days: int = Field(default=90, alias="DATA_RETENTION_DAYS")
+    discovery_interval_hours: int = Field(default=24, alias="DISCOVERY_INTERVAL_HOURS")
+    discovery_min_days: int = Field(default=45, alias="DISCOVERY_MIN_DAYS")
     research_candidates: int = Field(default=10, alias="RESEARCH_CANDIDATES")
     challengers: int = Field(default=2, alias="CHALLENGERS")
     promotion_min_trades: int = Field(default=25, alias="PROMOTION_MIN_TRADES")

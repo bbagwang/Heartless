@@ -251,7 +251,9 @@ class Heartless:
         would otherwise trade on minutes of data for the whole process lifetime (the stream gap fill only repairs
         holes after the first live bar)."""
         now = now_ms()
-        since = now - self.s.history_days * MS_DAY
+        # keep the longer research history in the store (cheap via the archive); live views use history_days
+        keep_days = max(self.s.history_days, self.s.data_retention_days if self.s.archive_backfill else self.s.history_days)
+        since = now - keep_days * MS_DAY
         sem = asyncio.Semaphore(3)
         failed: set[str] = set()
 
@@ -694,6 +696,8 @@ class Heartless:
                     await self.refresh_universe()
                 if self.research.due(now) and not self.research.running:
                     asyncio.create_task(self.research.cycle())
+                elif self.research.discovery_due(now) and not self.research.running:
+                    asyncio.create_task(self.research.discovery_cycle())
                 await self.research.evaluate_challengers()
                 await self.research.check_graduation()
                 if now >= self._next_report_ts:
@@ -706,7 +710,7 @@ class Heartless:
                         eng.reset_daily()
                 if now - self._last_prune >= 6 * MS_HOUR:
                     self._last_prune = now
-                    self.store.prune_candles(now - (self.s.history_days + 10) * MS_DAY)
+                    self.store.prune_candles(now - (max(self.s.history_days, self.s.data_retention_days) + 5) * MS_DAY)
                 self._update_health(now)
             except Exception:  # noqa: BLE001
                 log.exception("scheduler iteration failed")

@@ -167,3 +167,19 @@ def fmt_daily(today: dict, week: dict, st: dict, tz: str) -> str:
     if st.get("graduation") and st["graduation"].get("ok"):
         lines.append("🎓 페이퍼 성과가 졸업 기준을 충족했습니다. /golive 로 실거래 전환 가능")
     return "\n".join(lines)
+
+
+def fmt_discovery(last: dict | None, tz: str) -> str:
+    if not last:
+        return "<b>알파 발굴</b>: 아직 실행되지 않음 (/discover)"
+    lines = [f"<b>알파 발굴</b> {fmt_ts(last.get('ts'), tz, '%m-%d %H:%M')} · 검사 {last.get('tested', 0)}개 규칙 · "
+             f"다중검정 기준 t≥{last.get('t_bar', 0):.2f}"]
+    passed = last.get("passed") or []
+    if not passed:
+        lines.append("검증 구간까지 통과한 규칙 없음 (과최적화 차단)")
+    for r in passed[:5]:
+        va = r.get("stats", {}).get("valid", {})
+        conds = ", ".join(f"{c[0]} {c[1]} {c[2]:g}" for c in r.get("conds", []))
+        lines.append(f"• {esc(r.get('id'))} {esc(r.get('side'))} [{esc(r.get('tf'))}] {esc(conds)} — 검증 n={va.get('n', 0)}, "
+                     f"{va.get('avg_r', 0):+.2f}R")
+    return "\n".join(lines)

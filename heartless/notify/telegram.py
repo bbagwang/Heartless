@@ -26,7 +26,7 @@ COMMANDS = [
     ("params", "현재 파라미터"), ("trades", "최근 거래"), ("universe", "거래 종목"), ("health", "시스템 상태"),
     ("pause", "신규 진입 중지"), ("resume", "거래 재개"), ("close", "포지션 청산: /close BTCUSDT | all"),
     ("mode", "모드 전환: /mode paper|live"), ("golive", "실거래 전환"), ("kill", "전량 청산 + 정지"),
-    ("web", "웹 대시보드 링크"), ("report", "일일 리포트 즉시 전송"), ("optimize", "리서치 사이클 즉시 실행"),
+    ("web", "웹 대시보드 링크"), ("report", "일일 리포트 즉시 전송"), ("optimize", "리서치 사이클 즉시 실행"), ("discover", "알파 자동 발굴 즉시 실행"),
     ("help", "도움말"),
 ]
 
@@ -211,13 +211,19 @@ class TelegramBot:
         elif cmd == "/alphas":
             self.send(F.fmt_alphas(app.bandit.snapshot(), app.params))
         elif cmd == "/research":
-            self.send(F.fmt_research(app.research.last_summary, tz))
+            self.send(F.fmt_research(app.research.last_summary, tz) + "\n\n" + F.fmt_discovery(app.store.get("discovery.last"), tz))
         elif cmd == "/optimize":
             if app.research.running:
                 self.send("리서치가 이미 진행 중입니다")
             else:
                 asyncio.create_task(app.research.cycle(force=True))
                 self.send("🔬 리서치 사이클을 시작했습니다 (수 분 소요)")
+        elif cmd == "/discover":
+            if app.research.running:
+                self.send("리서치/발굴이 이미 진행 중입니다")
+            else:
+                asyncio.create_task(app.research.discovery_cycle(force=True))
+                self.send("⛏ 알파 발굴을 시작했습니다 (수 분 소요). 통과한 규칙만 챌린저로 투입됩니다")
         elif cmd == "/challengers":
             self.send(self._challengers_text())
         elif cmd == "/params":

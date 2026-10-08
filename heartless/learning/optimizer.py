@@ -29,6 +29,8 @@ class Candidate:
     score: float = -1e9
     is_base: bool = False
     distance: float = 0.0
+    folds: list = field(default_factory=list)
+    folds_pos: int = 0
 
 
 def score_candidate(train: dict, test: dict, distance: float, min_trades: int) -> float:
@@ -79,9 +81,47 @@ def optimize_alpha(bt: Backtester, base: StrategyParams, alpha: str, n_candidate
     return cands
 
 
+def confirm_folds(bt: Backtester, base: StrategyParams, alpha: str, cands: list[Candidate],
+                  folds: list[tuple[int, int]], min_trades: int = 6) -> None:
+    """Re-measure finalists on several consecutive out-of-sample windows (walk-forward confirmation).
+
+    A candidate's final score blends its screening train objective with the mean minus half the dispersion of its
+    per-fold objectives, so a parameter set that only shines in one window does not win."""
+    for c in cands:
+        trial = base.with_alpha(alpha, c.params, version=f"fold-{alpha}")
+        full_stats = []
+        for a, b in folds:
+            try:
+                full_stats.append(bt.run(trial, a, b, only_alpha=alpha).stats)
+            except Exception:  # noqa: BLE001
+                log.exception("fold run failed for %s", alpha)
+                full_stats.append({"n": 0, "avg_r": 0.0})
+        objs = [objective(fs, min_trades) if fs.get("n", 0) >= min_trades else None for fs in full_stats]
+        fold_stats = [_slim(fs) for fs in full_stats]
+        vals = [o for o in objs if o is not None and o > -1e8]
+        c.folds = fold_stats
+        c.folds_pos = sum(1 for fs in fold_stats if fs.get("n", 0) >= min_trades and fs.get("avg_r", 0) > 0)
+        if len(vals) >= max(2, len(folds) - 1):
+            mean = sum(vals) / len(vals)
+            sd = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+            o_tr = objective(c.train, 12) if c.train else -1.0
+            o_tr = o_tr if o_tr > -1e8 else -1.0
+            c.score = 0.25 * o_tr + 0.75 * (mean - 0.5 * sd) - 1.5 * c.distance
+        else:
+            c.score = -1e9
+
+
+def _has_own_params(alpha: str) -> bool:
+    from heartless.strategy.alphas import ALPHA_BY_NAME
+
+    a = ALPHA_BY_NAME.get(alpha)
+    return bool(a is not None and getattr(a, "param_specs", None))
+
+
 def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, symbols_dict: dict,
                        lookback_days: int, n_candidates: int, seed: int | None = None,
-                       alphas: list[str] | None = None, seeds: dict[str, list[dict]] | None = None) -> dict:
+                       alphas: list[str] | None = None, seeds: dict[str, list[dict]] | None = None,
+                       folds: int = 3) -> dict:
     """Entry point executed in a worker process. Returns a JSON-serialisable summary."""
     import logging as _logging
 
@@ -102,21 +142,38 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
     bt = load_backtester(settings, store, symbols, since)
     if not bt.candles:
         return {"error": "not enough candles", "alphas": {}}
-    split = since + int(lookback_days * MS_DAY * 0.68)
+    # screening: train on the first 60% of the window, test on the next 20%; confirmation: the last K windows
+    span = now - since
+    split = since + int(span * 0.6)
     train = (since, split)
-    test = (split, now)
-    out: dict = {"alphas": {}, "window": {"since": since, "split": split, "until": now},
+    test = (split, since + int(span * 0.8))
+    k = max(1, int(folds))
+    conf_start = since + int(span * 0.4)
+    step = (now - conf_start) // k
+    fold_windows = [(conf_start + i * step, conf_start + (i + 1) * step if i < k - 1 else now) for i in range(k)]
+    out: dict = {"alphas": {}, "window": {"since": since, "split": split, "until": now, "folds": fold_windows},
                  "symbols": list(bt.candles.keys())}
     for alpha in (alphas or list(ALPHA_SPECS)):
+        if alpha not in base.alphas or not _has_own_params(alpha):
+            continue  # e.g. the rule-driven "discovered" alpha is improved by the discovery engine, not here
         ta = time.time()
         cands = optimize_alpha(bt, base, alpha, n_candidates, train, test, rng, seeds=(seeds or {}).get(alpha))
+        finalists = [c for c in cands[:3] if c.score > -1e8]
         base_c = next((c for c in cands if c.is_base), cands[-1])
-        best = cands[0]
+        if base_c not in finalists:
+            finalists.append(base_c)
+        if k > 1:
+            confirm_folds(bt, base, alpha, finalists, fold_windows)
+            finalists.sort(key=lambda c: c.score, reverse=True)
+        best = finalists[0] if finalists else cands[0]
         out["alphas"][alpha] = {
-            "base": {"params": base_c.params, "train": _slim(base_c.train), "test": _slim(base_c.test), "score": base_c.score},
+            "enabled": bool(base.enabled.get(alpha, True)),
+            "base": {"params": base_c.params, "train": _slim(base_c.train), "test": _slim(base_c.test), "score": base_c.score,
+                     "folds": getattr(base_c, "folds", []), "folds_pos": getattr(base_c, "folds_pos", 0)},
             "best": {"params": best.params, "train": _slim(best.train), "test": _slim(best.test), "score": best.score,
-                     "is_base": best.is_base, "distance": best.distance},
-            "n_candidates": len(cands), "seconds": round(time.time() - ta, 1),
+                     "is_base": best.is_base, "distance": best.distance, "folds": getattr(best, "folds", []),
+                     "folds_pos": getattr(best, "folds_pos", 0)},
+            "n_folds": k, "n_candidates": len(cands), "seconds": round(time.time() - ta, 1),
             "top3": [{"params": c.params, "score": round(c.score, 3), "test_n": c.test.get("n", 0),
                       "test_avg_r": round(c.test.get("avg_r", 0.0), 3)} for c in cands[:3]],
         }
