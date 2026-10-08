@@ -47,6 +47,14 @@ def main(argv: list[str] | None = None) -> None:
     lb.add_argument("--stress", action="store_true", help="1.5x fees and 2x slippage")
     lb.add_argument("--json", action="store_true")
     lb.add_argument("--trades-out", default=None)
+    dc = sub.add_parser("discover", help="mine rule-based alphas on stored history (TRAIN) and validate them (VALID)")
+    dc.add_argument("--tf", default="15m", choices=["15m", "1h"])
+    dc.add_argument("--symbols", default=None)
+    dc.add_argument("--beam", type=int, default=30)
+    dc.add_argument("--depth", type=int, default=3)
+    dc.add_argument("--min-trades", type=int, default=150)
+    dc.add_argument("--workers", type=int, default=2)
+    dc.add_argument("--out", default=None, help="write the full result JSON here")
     sub.add_parser("doctor", help="check configuration and connectivity")
     sub.add_parser("params", help="print the champion parameters")
     args = parser.parse_args(argv)
@@ -65,6 +73,8 @@ def main(argv: list[str] | None = None) -> None:
         from heartless.learning.lab import main_cli
 
         main_cli(settings, args)
+    elif cmd == "discover":
+        _discover(settings, args)
     elif cmd == "doctor":
         asyncio.run(_doctor(settings))
     elif cmd == "params":
@@ -235,6 +245,35 @@ async def _symbols_offline(settings):
         return parse_exchange_info(await rest.exchange_info())
     finally:
         await rest.close()
+
+
+def _discover(settings, args) -> None:
+    from heartless.core.store import Store
+    from heartless.learning import discovery as D
+    from heartless.learning.lab import store_splits
+
+    store = Store(settings.db_path)
+    symbols = [x.strip().upper() for x in args.symbols.split(",")] if args.symbols else store.candle_symbols()
+    sp = store_splits(store, symbols)
+    cfg = D.SearchConfig(min_trades=args.min_trades, beam=args.beam, depth=args.depth)
+    res = D.mine(str(settings.db_path), symbols, sp["train"], sp["valid"], args.tf, cfg, workers=args.workers,
+                 progress=lambda m: print(m, file=sys.stderr, flush=True))
+    store.set("discovery.last", {"tf": args.tf, "tested": res["tested"], "t_bar": res["t_bar"], "passed": res["passed"],
+                                 "ts": now_ms()})
+    store.close()
+    print(f"tested {res['tested']} rules on {res['rows']['train']} TRAIN rows; family-wise t bar {res['t_bar']:.2f}; "
+          f"{len(res['passed'])} rule(s) passed VALID ({res['seconds']:.0f}s)")
+    for r in res["results"]:
+        st = r["rule"]["stats"]
+        tr, va = st["train"], st["valid"]
+        print(f"{'PASS' if r['passed'] else 'fail'} {r['rule']['side']:5s} sl={r['rule']['sl_atr']} tp={r['rule']['tp_r']}R "
+              f"hold={r['rule']['hold_min']}m {r['rule']['conds']}")
+        print(f"     TRAIN n={tr['n']} days={tr.get('days', 0)} avgR={tr['avg_r']:+.3f} excess={tr.get('avg_ex', 0):+.3f} "
+              f"t={tr['t']:.2f} t_excess={tr.get('t_ex', 0):.2f} | VALID n={va['n']} avgR={va['avg_r']:+.3f} "
+              f"excess={va.get('avg_ex', 0):+.3f} t={va['t']:.2f}")
+    if args.out:
+        with open(args.out, "w") as f:
+            json.dump(res, f, default=str, indent=1)
 
 
 async def _fetch(settings, args) -> None:

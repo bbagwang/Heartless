@@ -41,10 +41,22 @@ class Account(ABC):
 
     def __init__(self) -> None:
         self._fill_handlers: list[FillHandler] = []
+        self._algo_handlers: list = []  # async callables(event: dict) for conditional-order status changes
         self.symbols: dict[str, SymbolInfo] = {}
 
     def on_fill(self, handler: FillHandler) -> None:
         self._fill_handlers.append(handler)
+
+    def on_algo_event(self, handler) -> None:
+        """Register an async callback for conditional (algo) order status changes reported by the exchange.
+
+        The event dict carries: symbol, algo_id, client_id, status (NEW/CANCELED/TRIGGERING/TRIGGERED/FINISHED/
+        REJECTED/EXPIRED), order_type."""
+        self._algo_handlers.append(handler)
+
+    async def _emit_algo_event(self, event: dict) -> None:
+        for h in list(self._algo_handlers):
+            await h(event)
 
     async def _emit_fill(self, fill: Fill) -> None:
         for h in list(self._fill_handlers):

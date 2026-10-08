@@ -323,7 +323,18 @@ class LiveAccount(Account):
         elif et == "MARGIN_CALL":
             log.error("MARGIN CALL received: %s", msg)
         elif et == "ALGO_UPDATE":
-            log.debug("algo update: %s", msg)
+            # Binance futures user stream, conditional-order service: {"e":"ALGO_UPDATE","o":{"aid":..,"caid":..,"s":..,
+            # "X": algo status, "o": order type, ...}}. Field names have varied between docs revisions, so read both
+            # the short and the long spelling.
+            o = msg.get("o") or msg.get("ao") or {}
+            event = {"symbol": o.get("s") or o.get("symbol") or "",
+                     "algo_id": str(o.get("aid") or o.get("algoId") or ""),
+                     "client_id": o.get("caid") or o.get("clientAlgoId") or "",
+                     "status": (o.get("X") or o.get("algoStatus") or "").upper(),
+                     "order_type": o.get("o") or o.get("orderType") or o.get("type") or ""}
+            log.debug("algo update: %s", event)
+            if event["symbol"] and event["algo_id"]:
+                await self._emit_algo_event(event)
 
     def _funding_price(self, symbol: str, fallback: float = 0.0) -> float:
         snap = self.cached_positions.get(symbol)

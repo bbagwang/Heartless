@@ -140,10 +140,26 @@ class LabResult:
         return {"months_positive": sum(1 for m in months if m["avg_r"] > 0), "months": len(months),
                 "symbols_positive": sum(1 for s in syms if s["avg_r"] > 0), "symbols": len(syms)}
 
+    def day_clustered_t(self) -> float:
+        """t-statistic with trades clustered by exit day: simultaneous trades on correlated coins are not independent,
+        so this is the honest significance (the per-trade t_stat overstates it)."""
+        if len(self.trades) < 3:
+            return 0.0
+        r = np.array([float(t.get("r_multiple") or 0.0) for t in self.trades])
+        days = np.array([int((t.get("exit_time") or 0) // MS_DAY) for t in self.trades])
+        uniq, inv = np.unique(days, return_inverse=True)
+        k = len(uniq)
+        if k < 5:
+            return 0.0
+        mean = r.mean()
+        resid = np.bincount(inv, weights=r) - np.bincount(inv) * mean
+        var = (resid ** 2).sum() * k / (k - 1) / (len(r) ** 2)
+        return float(mean / math.sqrt(var)) if var > 0 else 0.0
+
     def summary(self) -> dict:
         o = self.overall
         return {"alpha": self.alpha, "n": o["n"], "win_rate": round(o["win_rate"], 1),
-                "avg_r": round(o["avg_r"], 4), "t_stat": round(o["t_stat"], 2),
+                "avg_r": round(o["avg_r"], 4), "t_stat": round(o["t_stat"], 2), "t_day": round(self.day_clustered_t(), 2),
                 "profit_factor": round(min(o["profit_factor"], 99.0), 3), "net": round(o["net"], 1),
                 "fees": round(o["fees"], 1), "trades_per_day": round(o["n"] / max((self.end - self.start) / MS_DAY, 1e-9), 2),
                 "avg_hold_min": round(o["avg_hold_min"], 1), **self.consistency(), "seconds": round(self.seconds, 1)}
@@ -153,7 +169,7 @@ class LabResult:
         lines = [f"[{self.alpha or 'ensemble'}] {datetime.fromtimestamp(self.start / 1000, tz=timezone.utc):%Y-%m-%d} -> "
                  f"{datetime.fromtimestamp(self.end / 1000, tz=timezone.utc):%Y-%m-%d}  n={s['n']} win={s['win_rate']}% "
                  f"avgR={s['avg_r']:+.4f} t={s['t_stat']:+.2f} PF={s['profit_factor']:.2f} net={s['net']:+.1f} "
-                 f"fees={s['fees']:.0f} trades/day={s['trades_per_day']} hold={s['avg_hold_min']:.0f}m "
+                 f"t_day={s['t_day']:+.2f} fees={s['fees']:.0f} trades/day={s['trades_per_day']} hold={s['avg_hold_min']:.0f}m "
                  f"months+ {s['months_positive']}/{s['months']} symbols+ {s['symbols_positive']}/{s['symbols']} ({s['seconds']:.0f}s)"]
         for a, st in sorted(self.by_alpha.items(), key=lambda kv: -kv[1]["avg_r"]):
             lines.append(f"  alpha {a:20s} n={st['n']:5d} win={st['win_rate']:5.1f}% avgR={st['avg_r']:+.4f} "

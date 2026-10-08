@@ -73,6 +73,8 @@ class TradingEngine:
         self.stats = EngineStats()
         self.closed: list[TradeRecord] = []  # in-memory (backtests + recent)
         self.account.on_fill(self.on_fill)
+        if hasattr(self.account, "on_algo_event"):
+            self.account.on_algo_event(self.on_algo_event)
         self.last_views: dict[str, MarketView] = {}
         self._equity_cache: tuple[int, float] = (0, 0.0)
         self.entries_enabled = True
@@ -407,6 +409,32 @@ class TradingEngine:
         except Exception as e:  # noqa: BLE001
             log.error("[%s] failed to restore stop for %s: %s", self.name, pos.symbol, e)
             await self._emit("error", {"message": f"{pos.symbol} 손절 재설정 실패 ({e}). 봇 내부 백스톱으로 보호 중"})
+
+    async def on_algo_event(self, event: dict) -> None:
+        """The exchange reports a conditional order's status. If our protective stop was rejected or expired
+        without filling (margin check, price protection, system cancel), re-arm it right away instead of waiting for
+        the next reconcile; a TP that died is simply forgotten (the stop still protects the position)."""
+        pos = self.positions.get(event.get("symbol", ""))
+        if pos is None or pos.status is not PositionStatus.OPEN:
+            return
+        status = event.get("status", "")
+        if status not in ("REJECTED", "EXPIRED", "CANCELED"):
+            return
+        aid = event.get("algo_id", "")
+        if aid and aid == pos.sl_algo_id:
+            if status == "CANCELED" and self.clock() - pos.last_stop_update < 5_000:
+                return  # our own replace/cancel sequence
+            log.warning("[%s] exchange %s our stop on %s; re-arming", self.name, status.lower(), pos.symbol)
+            pos.sl_algo_id = ""
+            await self._ensure_stop(pos)
+            self._save(pos)
+            await self._emit("reconcile", {"message": f"{pos.symbol} 손절 주문이 거래소에서 {status} 되어 즉시 재설정했습니다"})
+        elif aid and aid == pos.tp_algo_id and status in ("REJECTED", "EXPIRED"):
+            pos.tp_algo_id = ""
+            self._save(pos)
+        elif aid and aid == pos.extra.get("tp1_algo_id") and status in ("REJECTED", "EXPIRED"):
+            pos.extra.pop("tp1_algo_id", None)
+            self._save(pos)
 
     async def _refresh_brackets(self, pos: Position) -> None:
         await self._cancel_brackets(pos)
