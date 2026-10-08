@@ -103,6 +103,14 @@ def test_short_geometry():
     assert sig.stop > max(short_setup().series["high"])
 
 
+def test_long_short_mirror_symmetry():
+    # short_setup is long_setup mirrored around 100: both sides must produce identical geometry and confidence
+    lg, sh = evaluate(long_setup()), evaluate(short_setup())
+    assert lg is not None and sh is not None and lg.confidence == sh.confidence
+    assert abs((lg.tags["ref_price"] - lg.stop) - (sh.stop - sh.tags["ref_price"])) < 1e-9
+    assert abs((lg.take_profit - lg.tags["ref_price"]) - (sh.tags["ref_price"] - sh.take_profit)) < 1e-9
+
+
 def test_wide_swing_sets_stop_beyond_swing():
     # a deep pullback swing (2.5 ATR below the close) must widen the stop past it, not cut through it
     cur = long_setup(low=[98.5, 100.1, 100.6, 101.2], ema21=98.7)
@@ -126,3 +134,27 @@ def test_unaligned_or_no_resumption_returns_none():
     assert evaluate(long_setup(open=101.3)) is None  # red bar: no resumption
     assert evaluate(short_setup(open=98.7)) is None
     assert evaluate(long_setup(low=[100.9, 101.0, 101.1, 101.2])) is None  # never reached the EMA21 zone
+
+
+def test_partial_target_lies_between_entry_and_final_target():
+    # default ships without a partial (tp1_r = 0); when enabled the partial must sit inside the final target
+    assert evaluate(long_setup()).tp1 is None
+    lg = evaluate(long_setup(), tp1_r=1.0)
+    sh = evaluate(short_setup(), tp1_r=1.0)
+    assert lg.limit_price < lg.tp1 < lg.take_profit
+    assert sh.take_profit < sh.tp1 < sh.limit_price
+
+
+def test_optional_extension_filter():
+    # close 72 bars ago at 90 -> the trend ran 11 ATR in 3 days
+    extended = long_setup(close=[101.0] * 72 + [90.0])
+    assert evaluate(extended) is not None  # filter off by default (ext_max = 0)
+    assert evaluate(extended, ext_max=2.5) is None
+    fresh = long_setup(close=[101.0] * 72 + [100.0])  # only 1 ATR in 3 days
+    assert evaluate(fresh, ext_max=2.5) is not None
+    assert evaluate(long_setup(close=[101.0] * 72), ext_max=2.5) is None  # 3-day history missing -> no trade
+
+
+def test_shipped_disabled():
+    assert TrendPullback.enabled_by_default is False
+    assert StrategyParams.default().enabled["trend_pullback"] is False

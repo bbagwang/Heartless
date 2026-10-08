@@ -27,8 +27,9 @@ def _assert_in_bounds(alpha, vals):
 
 
 def test_target_alphas_present():
-    # every alpha that uses targets() is covered by this test module
-    assert set(TARGET_ALPHAS) == {"trend_pullback", "squeeze_breakout", "momentum_burst", "funding_fade", "sweep_reversal"}
+    # every alpha with both a partial (tp1_r) and a final (tp_r) target is covered by this test module; the real-data
+    # redesigns of squeeze_breakout, momentum_burst and mean_reversion dropped the partial target
+    assert set(TARGET_ALPHAS) == {"trend_pullback", "funding_fade", "sweep_reversal", "intraday_levels"}
 
 
 def test_spec_bounds_allow_strict_order_at_tp_r_lower_bound():
@@ -78,14 +79,14 @@ def test_from_dict_corrects_inverted_hand_edited_params():
     d = StrategyParams.default().to_dict()
     d["alphas"]["trend_pullback"]["tp_r"] = 1.2
     d["alphas"]["trend_pullback"]["tp1_r"] = 1.8
-    d["alphas"]["momentum_burst"]["tp_r"] = 0.8
-    d["alphas"]["momentum_burst"]["tp1_r"] = 0.8  # equal is also inverted (TP1 would never be the partial)
+    d["alphas"]["sweep_reversal"]["tp_r"] = 1.5
+    d["alphas"]["sweep_reversal"]["tp1_r"] = 1.5  # equal is also inverted (TP1 would never be the partial)
     p = StrategyParams.from_dict(d)
     tp = p.alphas["trend_pullback"]
     assert tp["tp_r"] == 1.2  # final target is authoritative, partial is pulled inside
     assert abs(tp["tp1_r"] - 1.1) < 1e-9
-    mb = p.alphas["momentum_burst"]
-    assert mb["tp_r"] == 0.8 and abs(mb["tp1_r"] - 0.7) < 1e-9
+    sr = p.alphas["sweep_reversal"]
+    assert sr["tp_r"] == 1.5 and abs(sr["tp1_r"] - 1.4) < 1e-9
     for alpha in TARGET_ALPHAS:
         assert p.alphas[alpha]["tp1_r"] < p.alphas[alpha]["tp_r"]
         _assert_in_bounds(alpha, p.alphas[alpha])
@@ -93,10 +94,10 @@ def test_from_dict_corrects_inverted_hand_edited_params():
 
 def test_from_dict_partial_override_of_tp_r_only_still_ordered():
     # legacy file only lowers tp_r below the default tp1_r
-    d = {"alphas": {"squeeze_breakout": {"tp_r": 1.2}}}  # default tp1_r is 1.2
+    d = {"alphas": {"intraday_levels": {"tp_r": 1.5}}}  # default tp1_r is 1.5
     p = StrategyParams.from_dict(d)
-    sb = p.alphas["squeeze_breakout"]
-    assert sb["tp_r"] == 1.2 and sb["tp1_r"] < 1.2
+    il = p.alphas["intraday_levels"]
+    assert il["tp_r"] == 1.5 and il["tp1_r"] < 1.5
 
 
 def test_with_alpha_enforces_order_for_external_seeds():

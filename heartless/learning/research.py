@@ -67,9 +67,19 @@ class ResearchManager:
     def load_champion(self) -> StrategyParams:
         rows = self.store.load_params_versions(role="champion", limit=1)
         if rows:
-            p = StrategyParams.from_dict(rows[0]["params"])
+            p, reset = StrategyParams.from_stored(rows[0]["params"])
             p.version = rows[0]["id"]
             p.note = rows[0].get("note", "")
+            if reset:
+                # the stored champion was tuned / switched on for alpha designs that have since been replaced or
+                # re-validated: keep its other settings, reset those alphas to the shipped defaults, persist as new version
+                new = p.clone(note=f"design change: {', '.join(reset)} reset to shipped defaults (was {p.version})")
+                log.warning("stored champion %s predates the current design of %s; using shipped defaults for them as "
+                            "champion %s", p.version, ", ".join(reset), new.version)
+                self.store.set_params_role(p.version, "retired")
+                self.store.save_params_version(new.version, new.created, "champion", "design-reset", new.note,
+                                               new.to_dict())
+                return new
             return p
         p = StrategyParams.default()
         self.store.save_params_version(p.version, p.created, "champion", "default", p.note, p.to_dict())
@@ -78,7 +88,11 @@ class ResearchManager:
     def load_challengers(self) -> list[ChallengerSlot]:
         slots: list[ChallengerSlot] = []
         for row in self.store.load_params_versions(role="challenger", limit=self.s.challengers):
-            p = StrategyParams.from_dict(row["params"])
+            p, reset = StrategyParams.from_stored(row["params"])
+            if reset:  # its experiment was about an alpha design that no longer exists
+                log.warning("retiring challenger %s: stored for an older design of %s", row["id"], ", ".join(reset))
+                self.store.set_params_role(row["id"], "retired")
+                continue
             p.version = row["id"]
             slots.append(ChallengerSlot(name=row["metrics"].get("slot", f"challenger-{len(slots) + 1}"), params=p,
                                         started=row["metrics"].get("started", row["created"]), source=row.get("note", "")))
@@ -140,7 +154,8 @@ class ResearchManager:
 
         * better parameters for an enabled alpha -> challenger with those parameters;
         * a disabled alpha whose best candidate passes a stricter gate (positive in most confirmation folds) ->
-          challenger with the alpha switched ON (self-healing: an alpha that starts working again comes back);
+          challenger with the alpha switched ON (self-healing: an alpha that starts working again comes back); this
+          includes the case where the best candidate is the alpha's current parameters;
         * an enabled alpha that loses in every confirmation fold and has no better parameters -> challenger with
           the alpha switched OFF (self-pruning). Challengers still have to beat the champion in real-time paper."""
         proposals: list[tuple[float, str, StrategyParams, str]] = []
@@ -169,6 +184,15 @@ class ResearchManager:
                         proposals.append((best["score"] - base_score + 0.5, alpha, ch,
                                           f"{alpha}: 비활성 알파 재검증 통과 → 켠 챌린저 (OOS avgR {test.get('avg_r', 0):+.2f}, 구간+ {best.get('folds_pos', 0)}/{k})"))
                         continue
+            if (not enabled and best.get("is_base") and best["score"] > -1e8 and test.get("avg_r", 0) >= 0.05
+                    and test.get("n", 0) >= 15 and best.get("folds_pos", 0) >= need_folds):
+                # a disabled alpha whose CURRENT parameters now pass the stricter gate (no better candidate needed)
+                ch = self.app.params.clone(version=short_id("v"),
+                                           note=f"research:enable {alpha} as is (OOS avgR {test.get('avg_r', 0):+.2f}, folds+ {best.get('folds_pos', 0)}/{k})")
+                ch.enabled[alpha] = True
+                proposals.append((0.5, alpha, ch, f"{alpha}: 비활성 알파가 현재 파라미터로 재검증 통과 → 켠 챌린저 "
+                                                  f"(OOS avgR {test.get('avg_r', 0):+.2f}, 구간+ {best.get('folds_pos', 0)}/{k})"))
+                continue
             if enabled and k > 1:
                 folds = base.get("folds") or []
                 losing = [f for f in folds if f.get("n", 0) >= 8 and f.get("avg_r", 0) < -0.1]

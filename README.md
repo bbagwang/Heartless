@@ -1,10 +1,10 @@
 # Heartless
 
-> 감정 없이, 기계적으로. Binance USDⓈ-M 선물 단타를 **완전 자동**으로 수행하고, 페이퍼 트레이딩으로 **스스로 알파를 갈고닦는** 트레이딩 봇.
+> 감정 없이, 기계적으로. Binance USDⓈ-M 선물 단기 매매(수 시간~2일 보유)를 **완전 자동**으로 수행하고, 페이퍼 트레이딩으로 **스스로 알파를 갈고닦는** 트레이딩 봇.
 
-Heartless 는 Binance API 키만 넣으면 나머지는 전부 알아서 판단합니다. 종목 선정, 레짐 분류, 6개 알파의 신호 결합, 포지션 사이징, 손절/익절/트레일링, 리스크 한도, 그리고 **파라미터 최적화와 챔피언/챌린저 승격**까지 모두 자동입니다. 모든 결정은 Telegram 으로 "왜 잡았고, 얼마를 노리고, 어디서 자르는지" 설명과 함께 실시간 전송되며, 웹 대시보드에서도 확인·제어할 수 있습니다. **소유자(당신) 외에는 아무도 제어할 수 없습니다.**
+Heartless 는 Binance API 키만 넣으면 나머지는 전부 알아서 판단합니다. 종목 선정, 레짐 분류, 기본 활성 알파들의 신호 결합, 포지션 사이징, 손절/익절/트레일링, 리스크 한도, 그리고 **파라미터 최적화와 챔피언/챌린저 승격**까지 모두 자동입니다. 모든 결정은 Telegram 으로 "왜 잡았고, 얼마를 노리고, 어디서 자르는지" 설명과 함께 실시간 전송되며, 웹 대시보드에서도 확인·제어할 수 있습니다. **소유자(당신) 외에는 아무도 제어할 수 없습니다.**
 
-> 📉 **실데이터 검증 현황**: 2026년 1~10월 Binance 선물 실데이터(12종목 1분봉·펀딩·미결제약정)로 검증한 결과, 초기 6개 알파는 학습 구간에서 모두 손실이었습니다(1,755건, 평균 -0.35R, PF 0.33). 5분봉 중앙 이동폭(5~9bp)이 왕복 비용(~13bp)보다 작아 1~5분 스캘핑은 구조적으로 불리하기 때문입니다. 알파는 실데이터 연구·감사를 거쳐 재설계 중이며, **검증을 통과한 알파만 기본 활성화**됩니다. 결과와 방법론은 [docs/RESEARCH.md](docs/RESEARCH.md)에 기록됩니다.
+> 📉 **실데이터 검증 현황** ([docs/RESEARCH.md](docs/RESEARCH.md)): 2026년 1~10월 Binance 선물 실데이터(12종목 1분봉·펀딩·미결제약정)로 검증한 결과, 초기 6개 알파(1~5분 스캘핑)는 모두 손실이었습니다(학습 구간 1,755건, 평균 -0.35R, PF 0.33). 5분 중앙 이동폭(5~9bp)이 왕복 비용(~13bp)보다 작기 때문입니다. 1시간봉 기반으로 재설계·신규 개발한 9개 알파 가운데 **`momentum_burst`, `htf_trend`, `intraday_levels` 3개만** 학습·비용 스트레스·검증 구간·독립 감사를 통과해 기본 활성화되어 있습니다(앙상블 검증 구간 +0.21R, PF 1.51). 하지만 **마지막에 한 번만 평가한 봉인 구간(2026-09-01~10-06)에서는 -0.03R, PF 0.96(공동 포트폴리오 -1.2%)으로 엣지가 확인되지 않았습니다.** 수익이 검증된 봇이 아닙니다. PAPER 모드로 운용하며 계속 재검증하세요.
 
 > ⚠️ **정직한 고지**: 어떤 소프트웨어도 수익을 보장할 수 없습니다. 레버리지 선물은 원금 전액 손실이 가능합니다. Heartless 는 기본값이 **PAPER(모의) 모드**이며, 페이퍼 성과가 졸업 기준을 넘기 전까지는 실거래를 권하지 않습니다. 실거래 전환은 반드시 당신의 명시적 확인(Telegram 버튼 또는 `/mode live`)으로만 이루어집니다. 잃어도 되는 금액만 사용하세요.
 
@@ -14,14 +14,14 @@ Heartless 는 Binance API 키만 넣으면 나머지는 전부 알아서 판단�
 
 | 영역 | 내용 |
 |---|---|
-| **완전 자동 거래** | 유동성 상위 USDT 무기한 선물을 매시간 자동 선정(기본 16종목, BTC/ETH/SOL 상시 포함). 1분봉 스트림 → 5m/15m/1h 멀티 타임프레임 피처 → 알파 → 앙상블 → 리스크 → 주문. 최대 5개 포지션 동시 보유. |
-| **알파 (자동 등록)** | `heartless/strategy/alphas/` 의 파일 하나가 알파 하나입니다(파라미터 범위·레짐 친화도·기본 활성 여부를 스스로 선언). 기존 6종(추세 눌림목, 스퀴즈 돌파, 평균회귀, 모멘텀 버스트, 펀딩 과밀, 유동성 스윕)은 실데이터 연구로 재설계·검증되며, 미결제약정·롱숏비율 기반 `positioning`, 1시간 추세추종 `htf_trend`, 일중 레벨 `intraday_levels` 가 추가 연구 대상입니다. 검증 실패 알파는 꺼진 상태로 남고, 자기개선 루프가 다시 검증되면 챌린저로 되살립니다. `discovered` 알파는 자동 발굴 엔진이 찾은 규칙을 거래합니다. |
+| **완전 자동 거래** | 유동성 상위 USDT 무기한 선물을 매시간 자동 선정(기본 16종목, BTC/ETH/SOL 상시 포함). 1분봉 스트림 → 5m/15m/1h 멀티 타임프레임 피처 → 알파 → 앙상블 → 리스크 → 주문. 최대 5개 포지션 동시 보유(같은 방향 3개). |
+| **알파 (자동 등록)** | `heartless/strategy/alphas/` 의 파일 하나가 알파 하나입니다(파라미터 범위·레짐 친화도·기본 활성 여부를 스스로 선언). 기본 활성(학습·검증 구간 통과, 봉인 구간에서는 엣지 미확인): `momentum_burst`(1h 거래량 폭발 버스트 소진 역추세), `htf_trend`(1주 추세 + 2일 조정 진입), `intraday_levels`(고변동성 날 UTC 일중 모멘텀). 기본 비활성(검증 실패): `trend_pullback`, `squeeze_breakout`, `mean_reversion`, `funding_fade`, `sweep_reversal`, `positioning`. 꺼진 알파도 리서치 사이클이 계속 평가하고, 다시 검증되면 켠 챌린저로 되살립니다. `discovered` 알파는 자동 발굴 엔진이 찾은 규칙을 거래합니다. |
 | **포지셔닝 데이터** | 5분 단위 미결제약정(1h/4h/24h 변화, z-점수), 탑트레이더·전체 롱숏비율, 테이커 매수/매도 비율을 라이브(REST 폴링)와 백테스트(공개 아카이브)에서 **동일한 코드**로 계산해 알파에 제공. |
 | **레짐 인식** | 1h EMA 정렬 + 15m ADX/기울기/슈퍼트렌드/허스트 → TREND_UP / TREND_DOWN / RANGE / VOLATILE. 레짐별 알파 친화도와 사이즈 조절. |
 | **자기 강화 학습** | ① Thompson sampling 밴딧이 (알파 × 레짐)별 신뢰도를 매 거래마다 갱신 ② 4시간마다 워크포워드 최적화 + **3개 시간 구간 확인**(평균 − 0.5×표준편차) ③ 검증 통과한 꺼진 알파는 켠 챌린저로, 모든 구간에서 지는 알파는 끈 챌린저로 자동 제안 ④ **매일 자동 알파 발굴**(수만 개 규칙 탐색, 일 단위 군집 t-통계·시장 방향 제거·다중검정 기준·별도 검증 구간) ⑤ 챌린저는 실시간 페이퍼로 챔피언을 이겨야만 승격 ⑥ (선택) 메타 라벨링: 알파별로 이기는 시장 상황을 학습해 신호를 거르거나 사이즈 조절 ⑦ (선택) AI 어드바이저 가설 → 백테스트 통과 시에만 채택. |
 | **페이퍼 ↔ 라이브** | 페이퍼 챔피언은 항상 실시간 데이터로 거래하며 학습 기준선 역할. 졸업 조건(14일 60건+, PF 1.25+, MDD 8% 이하, 순익 +) 충족 시 Telegram 으로 "라이브 전환" 버튼 제안. |
 | **리스크 관리** | 거래당 자본의 0.5%(수수료 포함) 리스크, 포지션 레버리지 5x·총 12x 상한, 일일 -3% 신규 진입 중단, 주간 -7% 리스크 반감, 고점 대비 -15% 자동 정지, BTC 5분 3% 급변 시 15분 진입 중단, 손실 종목 20분 쿨다운, 펀딩 직전 불리한 포지션 정리. |
-| **체결 품질** | 거래소 측 STOP_MARKET(마크가격 트리거, Binance 2025-12 신규 Algo Order API) + 소프트웨어 백스톱 이중 손절, 50% 부분익절 후 본절 이동, 샹들리에 트레일링, 시간 손절, 눌림목/평균회귀는 포스트온리 지정가(메이커 수수료), 돌파/모멘텀은 시장가. 45초마다 거래소와 포지션·주문 정합성 검증(reconcile), 외부 포지션 자동 인수 및 보호 손절. |
+| **체결 품질** | 거래소 측 STOP_MARKET(마크가격 트리거, Binance 2025-12 신규 Algo Order API) + 소프트웨어 백스톱 이중 손절, 부분익절 후 본절 이동(알파별), 샹들리에 트레일링, 시간 손절, `htf_trend`·`intraday_levels` 는 포스트온리 지정가(메이커 수수료), `momentum_burst` 는 다음 봉 시가 시장가. 45초마다 거래소와 포지션·주문 정합성 검증(reconcile), 외부 포지션 자동 인수 및 보호 손절. |
 | **Telegram** | 페어링 코드로 소유자 1인 바인딩. 진입/부분익절/청산/리스크/리서치/발굴/승격/일일리포트 알림. `/status /positions /pnl /alphas /research /challengers /params /trades /pause /resume /close /mode /golive /kill /web /report /optimize /discover /setkeys`. 위험한 동작은 인라인 버튼 확인, `/setkeys` 메시지는 즉시 삭제. |
 | **웹 대시보드** | 토큰 인증(소유자 전용). 자산 곡선, 알파 신뢰도, 포지션, 거래, 챌린저/리서치, 이벤트, 일시정지/청산/모드 전환/리서치 실행, **Binance 키·텔레그램 토큰 등록 화면**(HTTPS/로컬 전용). |
 | **운영** | SQLite 단일 파일 상태(재시작 시 포지션·파라미터·학습·리스크 상태 복원), Binance 공개 데이터 아카이브로 대량 이력 백필(API 가중치 0), Docker/systemd, 자동 재연결, 갭 보정, 레이트리밋 가드, 시간 동기화, 거래소가 손절을 거부·만료하면 즉시 재설정. |
@@ -80,8 +80,8 @@ docker compose logs -f            # 페어링 코드 확인
 1m kline(WS) ─▶ 1m/5m/15m/1h 피처 프레임(EMA 9/21/50/200, RSI 2/7/14, ATR, 볼린저/켈트너 스퀴즈,
                 세션 VWAP±σ, 슈퍼트렌드, ADX/DI, MACD, 돈치안 10/20/50, CHOP, 거래량 z, 테이커 매수비율,
                 CVD 프록시, 선형회귀 기울기, 허스트 프록시, 윅 비율)
-   ─▶ 레짐 분류 ─▶ 6 알파 평가(각 알파 전용 타임프레임 마감 시) ─▶ 앙상블(신뢰도 × 밴딧 신뢰 × 레짐 친화도,
-                동방향 컨플루언스 가산, 역방향 충돌 시 패스, 임계값 0.55)
+   ─▶ 레짐 분류 ─▶ 활성 알파 평가(각 알파 전용 타임프레임 마감 시, 현재 모두 1h) ─▶ 앙상블(신뢰도 × 밴딧 신뢰 × 레짐 친화도,
+                동방향 컨플루언스 가산, 역방향 충돌 시 패스, 임계값 0.50)
    ─▶ 리스크(한도·사이징·레버리지) ─▶ 주문(지정가 포스트온리 or 시장가)
    ─▶ 체결 시 거래소 STOP_MARKET(closePosition) + TAKE_PROFIT_MARKET(부분/전량) 설치
    ─▶ 매 분: 시간손절·본절·트레일링·펀딩회피·레짐전환 청산 / 매 틱: 소프트웨어 백스톱
@@ -90,15 +90,17 @@ docker compose logs -f            # 페어링 코드 확인
 
 사이징: `수량 = 자본 × 리스크% ÷ (|진입−손절| + 왕복수수료·슬리피지)` → 손절 시 손실이 정확히 리스크 금액(기본 0.5%)이 되도록. 신뢰도·밴딧·레짐에 따라 0.6~1.4배 조절.
 
-### 지표 선정 근거(리서치)
-단타에서 반복적으로 유효성이 보고되는 조합을 채택했습니다: 빠른 EMA(9/21) 구조 + RSI 단기 극단 + ATR 기반 동적 손절(약 1.5 ATR), 세션 VWAP 밴드, 볼린저-켈트너 스퀴즈 후 돌파, 거래량·테이커 플로우 확인, 펀딩비/미결제약정 과밀 신호(청산 캐스케이드 전후 평균회귀). 참고: [Mudrex – 선물 지표](https://mudrex.com/learn/professional-crypto-futures-trading-indicators/), [Tadonomics – 스캘핑 지표](https://tadonomics.com/best-indicators-for-scalping/), [Lunefi – 백테스트 승률](https://lunefi.com/blog/best-tradingview-indicators-2026-backtested-win-rates), [Cointester – 크립토 백테스팅](https://medium.com/@cointesterio/crypto-backtesting-in-2026-the-definitive-guide-to-building-profitable-strategies-9be131b38c31), [펀딩비 설계 논문(arXiv 2506.08573)](https://arxiv.org/abs/2506.08573), [Amberdata – 레버리지 청산](https://blog.amberdata.io/leverage-liquidations-the-31b-deleveraging). Binance 조건부 주문의 Algo Order API 이전(2025-12-09, 오류 -4120)은 [공식 변경 로그](https://developers.binance.com/docs/derivatives/change-log) 및 [마이그레이션 가이드](https://github.com/MankhongGarden/binance-futures-algo-endpoint-migration)를 따릅니다.
+### 지표 선정 근거(초기 가설)
+> 아래는 초기 6개 알파를 설계할 때의 **가설**입니다. 실데이터에서 이 조합의 1~5분 스캘핑은 비용을 넘지 못했고, 출하 알파는 1시간봉으로 다시 설계되었습니다. 검증 결과는 [docs/RESEARCH.md](docs/RESEARCH.md)를 보세요.
+
+단타에서 반복적으로 유효성이 보고되는 조합을 초기 후보로 삼았습니다: 빠른 EMA(9/21) 구조 + RSI 단기 극단 + ATR 기반 동적 손절(약 1.5 ATR), 세션 VWAP 밴드, 볼린저-켈트너 스퀴즈 후 돌파, 거래량·테이커 플로우 확인, 펀딩비/미결제약정 과밀 신호(청산 캐스케이드 전후 평균회귀). 참고: [Mudrex – 선물 지표](https://mudrex.com/learn/professional-crypto-futures-trading-indicators/), [Tadonomics – 스캘핑 지표](https://tadonomics.com/best-indicators-for-scalping/), [Lunefi – 백테스트 승률](https://lunefi.com/blog/best-tradingview-indicators-2026-backtested-win-rates), [Cointester – 크립토 백테스팅](https://medium.com/@cointesterio/crypto-backtesting-in-2026-the-definitive-guide-to-building-profitable-strategies-9be131b38c31), [펀딩비 설계 논문(arXiv 2506.08573)](https://arxiv.org/abs/2506.08573), [Amberdata – 레버리지 청산](https://blog.amberdata.io/leverage-liquidations-the-31b-deleveraging). Binance 조건부 주문의 Algo Order API 이전(2025-12-09, 오류 -4120)은 [공식 변경 로그](https://developers.binance.com/docs/derivatives/change-log) 및 [마이그레이션 가이드](https://github.com/MankhongGarden/binance-futures-algo-endpoint-migration)를 따릅니다.
 
 ---
 
 ## 학습 루프(자기 강화)
 
 1. **밴딧(즉시)**: 거래 종료마다 (알파, 레짐) 암의 Beta 사후분포를 R-배수로 갱신. 라이브 거래는 1.5배 가중. 감쇠(0.985)로 오래된 증거는 잊음. 신뢰도가 떨어진 알파는 자연스럽게 진입 임계값을 넘지 못해 비활성화되고, 탐색 샘플링으로 가끔 재시도.
-2. **리서치 사이클(4시간, 별도 프로세스)**: 저장된 1분봉 30일로 알파별 후보 10개(현재값 섭동 + 무작위 + AI 시드)를 선별 평가한 뒤, 상위 후보를 **3개 연속 검증 구간**에서 재측정. 점수 = 0.25×학습 목적함수 + 0.75×(구간 목적함수 평균 − 0.5×표준편차) − 1.5×파라미터 이동거리. 꺼진 알파가 구간 대부분에서 양수면 켠 챌린저, 켜진 알파가 모든 구간에서 손실이면 끈 챌린저를 제안합니다.
+2. **리서치 사이클(4시간, 별도 프로세스)**: 저장된 1분봉 30일로 알파별 후보 10개(현재값 섭동 + 무작위 + AI 시드)를 선별 평가한 뒤, 상위 후보를 **3개 연속 검증 구간**에서 재측정. 점수 = 0.25×학습 목적함수 + 0.75×(구간 목적함수 평균 − 0.5×표준편차) − 1.5×파라미터 이동거리. 꺼진 알파도 매번 평가해, 최적 후보(현재 파라미터 그대로인 경우 포함)가 더 엄격한 기준(검증 평균R ≥ 0.05, n ≥ 15, 구간 대부분 양수)을 통과하면 켠 챌린저를, 켜진 알파가 모든 구간에서 손실이면 끈 챌린저를 제안합니다. 저장된 챔피언은 알파 설계 지문과 함께 기록되므로, 코드에서 알파가 재설계·재검증되면 옛 설계용 값과 on/off 플래그는 출하 기본값으로 자동 초기화됩니다.
 3. **챌린저(실시간 페이퍼)**: 개선 후보는 챔피언 전체 파라미터에서 해당 알파만 바꾼 세트로 챌린저 슬롯(기본 2개)에서 실시간 거래. 25건 이상에서 챔피언보다 목적함수·평균R이 높고 낙폭이 나쁘지 않으면 **승격**, 열위면 은퇴. 15건에 avgR < −0.5 면 조기 탈락.
 4. **챔피언 승격**: 라이브/페이퍼 챔피언 엔진이 즉시 새 파라미터로 전환(기존 포지션은 원래 규칙으로 관리). 모든 버전은 DB 에 기록(`/params`, 웹 `/api/research`).
 5. **자동 알파 발굴(매일)**: 오실레이터·ATR 거리·변동성 순위·체결 흐름·포지셔닝·시각 피처의 임계 조건 1~3개 조합을 빔 서치로 수만 개 검사합니다. 같은 시각 코인들은 독립 표본이 아니므로 **일 단위 군집 t-통계**를, 하락장에서 숏만 하면 이기는 착시를 막기 위해 **같은 달·같은 방향 평균 대비 초과 R**을 씁니다. 학습 구간에서 다중검정 기준 t ≥ max(3, √(2 ln N))을 넘고, 보지 않은 검증 구간에서도 양수인 규칙만 `discovered` 알파의 챌린저로 투입됩니다. 실데이터 첫 실행에서는 학습 구간 t≈9 규칙들이 검증에서 모두 실패해 **전부 거부**되었습니다(과최적화 차단이 동작함).
@@ -119,13 +121,17 @@ heartless backtest --download --days 21 --alpha squeeze_breakout
 heartless research --days 14          # 오프라인 리서치 사이클 (결과 출력)
 heartless params                      # 현재 챔피언 파라미터 JSON
 
-# 실데이터 연구 (Binance 공개 아카이브, API 키·가중치 불필요)
+# 실데이터 연구 (Binance 공개 아카이브, API 키·가중치 불필요) — 결과는 docs/RESEARCH.md
 heartless fetch --days 280 --symbols BTCUSDT,ETHUSDT,SOLUSDT   # 1분봉·펀딩·5분 미결제약정/롱숏비율 다운로드
-heartless lab --split train --alpha trend_pullback             # 심볼별 병렬 백테스트 (train/valid/holdout 분리)
+heartless lab --split train                                    # 활성 알파 앙상블, 심볼별 병렬 백테스트 (train/valid/holdout 분리)
+heartless lab --split train --alpha trend_pullback             # 알파 하나만 단독 평가 (꺼진 알파도 가능)
 heartless lab --split valid --stress                           # 수수료 1.5배·슬리피지 2배 스트레스
+heartless lab --split train --set htf_trend.pull_bars=54 --json --trades-out t.json   # 파라미터 덮어쓰기, JSON/거래 내보내기
 heartless lab --split train --meta                             # 메타 라벨링 필터 효과 측정
 heartless discover --tf 15m                                    # 규칙 자동 발굴 + 다중검정 + 검증 구간
 ```
+
+`lab` 구간: 저장된 이력의 마지막 35일이 HOLDOUT, 그 앞 62일이 VALID, 나머지(12일 워밍업 이후)가 TRAIN 입니다. 탐색·튜닝은 TRAIN 에서만, 후보 선택은 VALID 에서, HOLDOUT 은 최종 구성에 한 번만 쓰세요. `lab` 은 종목별로 따로 돌리고 계정 손실 정지를 끄므로, 동시 보유 한도가 있는 실제 계정보다 성과가 높게 나옵니다(현실 비교는 docs/RESEARCH.md 6절).
 
 연구용 데이터는 별도 폴더에 두는 것을 권합니다: `HEARTLESS_DATA_DIR=data/research heartless fetch ...` (봇 DB 는 `DATA_RETENTION_DAYS` 이후 오래된 캔들을 정리합니다).
 
@@ -166,7 +172,8 @@ heartless/
   learning/           밴딧, 백테스터, 연구 실험실(lab), 워크포워드 최적화, 알파 발굴, 메타 라벨링, 챔피언/챌린저, AI 어드바이저
   notify/             Telegram 봇·포맷터
   web/                FastAPI API + 대시보드
-tests/                pytest (지표, 시뮬레이터, 리스크, 엔진 E2E, REST 서명, 밴딧, Telegram 인증, 오케스트레이터/웹)
+tests/                pytest (지표, 시뮬레이터, 리스크, 엔진 E2E, 알파별·공통 브래킷 불변식, REST 서명, 밴딧, Telegram 인증, 오케스트레이터/웹)
+docs/RESEARCH.md      실데이터 연구·검증 결과(구간, 비용, 알파별 결과, 앙상블, 공동 포트폴리오, HOLDOUT, 한계)
 ```
 
 ## 테스트

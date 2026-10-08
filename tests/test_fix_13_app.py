@@ -392,3 +392,14 @@ async def test_failed_backfill_is_retried_and_repairs_history():
     app._update_health(now_ms())
     assert app.health["backfill_pending"] == [] and "SOLUSDT" not in app.health["short_history"]
     await app.stop()
+
+
+# --- startup: which alphas trade ------------------------------------------------------------------------------
+def test_startup_summary_names_the_enabled_alphas_or_warns_when_none():
+    app, _ = _make_app()
+    active = app.enabled_alphas()
+    assert active == [a for a, on in app.params.enabled.items() if on]
+    assert f"활성 알파: {', '.join(active)}" in app.startup_summary()
+    for a in app.params.enabled:
+        app.params.enabled[a] = False
+    assert app.enabled_alphas() == [] and "활성 알파 없음" in app.startup_summary()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import random
 from dataclasses import dataclass, field
@@ -31,10 +32,38 @@ def _enabled_by_default(alpha: str) -> bool:
 # every registered alpha (heartless/strategy/alphas/*.py) contributes its own param_specs
 ALPHA_SPECS: dict[str, list[ParamSpec]] = _build_alpha_specs()
 
+# entry_threshold 0.50 (was 0.55): the validated alphas emit flat confidences of 0.60-0.70, so the threshold mainly
+# decides how easily the Thompson-sampled bandit weight vetoes a signal. At 0.55 sampling noise alone (w < ~0.85-0.92)
+# dropped trades that were better than average on TRAIN (ensemble lab, 2026-01-13..07-01: 0.55 -> n=662 avgR +0.376,
+# 0.50 -> n=674 +0.386, 0.45 -> n=686 +0.387); at 0.50 the bandit only vetoes arms whose evidence is clearly negative.
+# confluence_bonus is unchanged: the enabled 1h alphas never fired on the same symbol and bar on TRAIN.
 ENSEMBLE_SPECS = [
-    ParamSpec("entry_threshold", 0.55, 0.45, 0.75, 0.01),
+    ParamSpec("entry_threshold", 0.50, 0.45, 0.75, 0.01),
     ParamSpec("confluence_bonus", 0.08, 0.0, 0.2, 0.01),
 ]
+
+
+def _fingerprint(payload) -> str:
+    return hashlib.sha1(json.dumps(payload, default=str, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def _alpha_schema(alpha: str) -> str:
+    """Fingerprint of an alpha's shipped design: its parameter schema (names, defaults, bounds) and enabled_by_default.
+
+    Stored parameter sets carry these fingerprints. When an alpha is redesigned or re-validated in code, values that
+    were tuned for the old design (or an enabled flag set before the alpha failed validation) must not silently
+    override the new shipped defaults; see StrategyParams.from_stored()."""
+    specs = [(s.name, s.default, s.lo, s.hi, s.step, s.choices, s.integer) for s in ALPHA_SPECS.get(alpha, [])]
+    return _fingerprint([specs, _enabled_by_default(alpha)])
+
+
+ENSEMBLE_KEY = "__ensemble__"  # schema key of the ensemble settings
+
+
+def schema_fingerprints() -> dict[str, str]:
+    out = {a: _alpha_schema(a) for a in ALPHA_SPECS}
+    out[ENSEMBLE_KEY] = _fingerprint([(s.name, s.default, s.lo, s.hi, s.step) for s in ENSEMBLE_SPECS])
+    return out
 
 
 def _enforce_order(alpha: str, vals: dict[str, float]) -> dict[str, float]:
@@ -73,7 +102,7 @@ class StrategyParams:
 
     def to_dict(self) -> dict[str, Any]:
         return {"version": self.version, "alphas": self.alphas, "ensemble": self.ensemble, "enabled": self.enabled,
-                "created": self.created, "note": self.note}
+                "created": self.created, "note": self.note, "schema": schema_fingerprints()}
 
     @classmethod
     def from_dict(cls, d: dict) -> "StrategyParams":
@@ -92,6 +121,34 @@ class StrategyParams:
         for a, v in (d.get("enabled") or {}).items():
             p.enabled[a] = bool(v)
         return p
+
+    @classmethod
+    def from_stored(cls, d: dict) -> tuple["StrategyParams", list[str]]:
+        """Load a persisted parameter set (champion / challenger) against the CURRENT alpha designs.
+
+        For every alpha whose design fingerprint differs from the one saved with the set (or that predates
+        fingerprints), the stored values and enabled flag are dropped in favour of the shipped defaults: they were tuned
+        or switched on for a design that no longer exists (e.g. a pre-research champion that still enables an alpha
+        which failed real-data validation, with its old stop/hold values). The ensemble settings are treated the same
+        way. Returns the params and the names of the alphas (or "ensemble") that were reset."""
+        p = cls.from_dict(d)
+        stored = d.get("schema") or {}
+        current = schema_fingerprints()
+        base = cls.default()
+        reset: list[str] = []
+        for a in p.alphas:
+            if stored.get(a) == current[a]:
+                continue
+            if (a in (d.get("alphas") or {}) and d["alphas"][a] != base.alphas[a]) or \
+                    (a in (d.get("enabled") or {}) and bool(d["enabled"][a]) != base.enabled[a]):
+                reset.append(a)
+            p.alphas[a] = copy.deepcopy(base.alphas[a])
+            p.enabled[a] = base.enabled[a]
+        if stored.get(ENSEMBLE_KEY) != current[ENSEMBLE_KEY]:
+            if p.ensemble != base.ensemble:
+                reset.append("ensemble")
+            p.ensemble = copy.deepcopy(base.ensemble)
+        return p, reset
 
     def clone(self, version: str | None = None, note: str = "") -> "StrategyParams":
         c = copy.deepcopy(self)

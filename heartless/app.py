@@ -144,8 +144,22 @@ class Heartless:
         return {s: (t.mark or t.mid or t.last) for s, t in self.tickers.items()}
 
     # --- startup -------------------------------------------------------------------------------
+    def enabled_alphas(self) -> list[str]:
+        return [a for a, on in self.params.enabled.items() if on and a in self.params.alphas]
+
     async def run(self) -> None:
         log.info("Heartless starting (mode=%s, testnet=%s)", self.mode, self.s.binance_testnet)
+        active = self.enabled_alphas()
+        if active:
+            log.info("enabled alphas (champion %s): %s", self.params.version, ", ".join(active))
+        else:
+            log.warning("no validated alpha is enabled (champion %s): the bot runs, collects data and keeps "
+                        "re-validating every alpha in the research cycle, but opens no trades until one passes",
+                        self.params.version)
+        from heartless.strategy.alphas import FAILED_ALPHAS
+
+        for mod, err in FAILED_ALPHAS.items():
+            log.error("alpha module %s failed to import and is unavailable: %s", mod, err)
         await self.rest.sync_time()
         await self._load_symbols()
         await self.refresh_universe(initial=True)
@@ -176,6 +190,9 @@ class Heartless:
         lines = [f"Heartless 시작 — 모드: {'🔴 LIVE' if self.mode == 'live' else '🟢 PAPER'}",
                  f"유니버스 {len(self.universe)}종목: {', '.join(self.universe)}",
                  f"챔피언 파라미터: {self.params.version}", f"챌린저: {', '.join(c.name for c in self.challengers) or '-'}"]
+        active = self.enabled_alphas()
+        lines.append(f"활성 알파: {', '.join(active)}" if active else
+                     "⚠️ 검증을 통과한 활성 알파 없음 — 신규 진입 없이 데이터 수집·재검증만 진행 (리서치 사이클이 통과 알파를 켭니다)")
         if self.mode_notice:
             lines.append(self.mode_notice)
         if self.store.get("paused", False):

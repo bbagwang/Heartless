@@ -70,6 +70,9 @@ def test_execution_plumbing_profits_with_perfect_foresight(monkeypatch):
         orig(self, params, bandit, [oracle], only_alpha)
 
     monkeypatch.setattr(Ensemble, "__init__", patched)
-    res = bt.run(StrategyParams.default())
+    params = StrategyParams.default()
+    # the oracle borrows trend_pullback's name (and parameter slot), which ships disabled after the real-data research
+    params.enabled["trend_pullback"] = True
+    res = bt.run(params)
     assert res.stats["n"] > 20
     assert res.stats["net"] > 0 and res.stats["win_rate"] > 55

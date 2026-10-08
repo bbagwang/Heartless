@@ -156,3 +156,70 @@ def test_run_research_cycle_end_to_end_with_folds(tmp_path):
     assert "discovered" not in out["alphas"]  # rule-driven alpha is left to the discovery engine
     tp = out["alphas"]["trend_pullback"]
     assert tp["n_folds"] == 3 and len(out["window"]["folds"]) == 3 and "folds" in tp["best"]
+
+
+def test_disabled_alpha_whose_current_params_pass_is_enabled_as_is(tmp_path):
+    app = _App(tmp_path)
+    app.params.enabled["mean_reversion"] = False
+    app.params.enabled["funding_fade"] = False
+    rm = ResearchManager(app)
+    result = {"alphas": {
+        # best candidate IS the current parameter set and it passes the stricter gate -> switched on unchanged
+        "mean_reversion": _alpha_result(False, 0.6, 0.6, is_base=True, test_avg=0.15, test_n=40, folds_pos=2),
+        # same, but positive in only one of three confirmation folds -> stays off
+        "funding_fade": _alpha_result(False, 0.6, 0.6, is_base=True, test_avg=0.15, test_n=40, folds_pos=1),
+    }}
+    asyncio.run(rm._apply_results(result))
+    by_src = {src: p for src, p in app.installed}
+    assert set(by_src) == {"mean_reversion"}
+    ch = by_src["mean_reversion"]
+    assert ch.enabled["mean_reversion"] is True
+    assert ch.alphas["mean_reversion"] == app.params.alphas["mean_reversion"]  # parameters untouched
+    assert app.params.enabled["mean_reversion"] is False  # the champion itself is untouched
+
+
+def _legacy_champion() -> dict:
+    """A champion saved before the real-data redesign: no design fingerprints, every alpha on, old 5m-era values."""
+    d = StrategyParams.default().to_dict()
+    d.pop("schema")
+    d["version"] = "v0-default"
+    d["enabled"] = {a: True for a in d["enabled"]}
+    d["alphas"]["mean_reversion"].update({"sl_atr": 1.4, "max_hold": 24, "bb_k": 2.4})
+    d["ensemble"]["entry_threshold"] = 0.55
+    return d
+
+
+def test_from_stored_resets_alphas_saved_for_an_older_design():
+    p, reset = StrategyParams.from_stored(_legacy_champion())
+    base = StrategyParams.default()
+    assert p.enabled == base.enabled  # shipped (validated) on/off state wins over the stale flags
+    assert p.alphas["mean_reversion"] == base.alphas["mean_reversion"]
+    assert p.ensemble == base.ensemble
+    assert {"mean_reversion", "trend_pullback", "ensemble"} <= set(reset)
+    assert "htf_trend" not in reset  # stored flag already equal to the shipped default: nothing to report
+
+
+def test_from_stored_keeps_current_design_tuning_and_flags():
+    cur = StrategyParams.default()
+    cur.alphas["htf_trend"]["sl_atr"] = 3.5
+    cur.enabled["mean_reversion"] = True  # e.g. re-enabled by the research loop after re-validation
+    cur.ensemble["entry_threshold"] = 0.6
+    p, reset = StrategyParams.from_stored(cur.to_dict())
+    assert reset == []
+    assert p.alphas["htf_trend"]["sl_atr"] == 3.5 and p.enabled["mean_reversion"] is True
+    assert p.ensemble["entry_threshold"] == 0.6
+
+
+def test_load_champion_replaces_a_stale_champion_and_persists_it(tmp_path):
+    app = _App(tmp_path)
+    d = _legacy_champion()
+    app.store.save_params_version("v0-default", 1, "champion", "default", "factory defaults", d)
+    app.store.save_params_version("vch1", 2, "challenger", "mean_reversion", "old challenger", d, {"slot": "challenger-1"})
+    rm = ResearchManager(app)
+    p = rm.load_champion()
+    assert p.version != "v0-default" and p.enabled == StrategyParams.default().enabled
+    rows = app.store.load_params_versions(role="champion", limit=5)
+    assert [r["id"] for r in rows] == [p.version]  # the stale one was retired, the reset one is the champion
+    assert StrategyParams.from_stored(rows[0]["params"])[1] == []  # stamped with the current fingerprints
+    assert rm.load_champion().version == p.version  # stable on the next start
+    assert rm.load_challengers() == []  # a challenger built on the old designs is retired, not resumed

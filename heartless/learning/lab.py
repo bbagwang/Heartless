@@ -259,7 +259,12 @@ def main_cli(settings, args) -> None:
             params = StrategyParams.from_dict(json.load(f))
     else:
         rows = store.load_params_versions(role="champion", limit=1)
-        params = StrategyParams.from_dict(rows[0]["params"]) if rows else StrategyParams.default()
+        params = StrategyParams.default()
+        if rows:
+            params, reset = StrategyParams.from_stored(rows[0]["params"])
+            if reset:
+                print(f"note: stored champion {rows[0]['id']} predates the current design of {', '.join(reset)}; "
+                      f"shipped defaults are used for them")
     store.close()
     params = apply_overrides(params, args.set)
     extra_settings = dict(STRESS_SETTINGS) if getattr(args, "stress", False) else {}
