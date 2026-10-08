@@ -32,7 +32,9 @@ class Ensemble:
         for a in self.alphas:
             if self.only_alpha and a.name != self.only_alpha:
                 continue
-            if not self.params.enabled.get(a.name, True):
+            # an explicitly requested alpha (lab / optimizer isolation runs) is evaluated even when it is switched
+            # off for trading; otherwise a disabled alpha could never be re-validated and re-enabled
+            if not self.only_alpha and not self.params.enabled.get(a.name, True):
                 continue
             if not view.closed(a.timeframe):
                 continue

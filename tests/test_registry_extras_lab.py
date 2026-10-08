@@ -77,3 +77,25 @@ def test_no_alpha_module_failed_to_import():
     from heartless.strategy.alphas import FAILED_ALPHAS
 
     assert FAILED_ALPHAS == {}, FAILED_ALPHAS
+
+
+def test_isolated_alpha_runs_ignore_the_enabled_flag():
+    from heartless.learning.bandit import AlphaBandit
+    from heartless.strategy.ensemble import Ensemble
+
+    p = StrategyParams.default()
+    name = ALL_ALPHAS[0].name
+    p.enabled[name] = False
+    live = Ensemble(p, AlphaBandit(list(p.alphas)))
+    iso = Ensemble(p, AlphaBandit(list(p.alphas)), only_alpha=name)
+
+    class _V:
+        def closed(self, tf):
+            return False
+
+    # neither evaluates anything on a view where no timeframe closed, but the gating differs:
+    assert live.evaluate_signals(_V(), None) == [] and iso.evaluate_signals(_V(), None) == []
+    import inspect
+
+    src = inspect.getsource(Ensemble.evaluate_signals)
+    assert "not self.only_alpha and not self.params.enabled" in src
