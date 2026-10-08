@@ -80,22 +80,27 @@ def test_no_alpha_module_failed_to_import():
 
 
 def test_isolated_alpha_runs_ignore_the_enabled_flag():
+    from types import SimpleNamespace
+
+    from heartless.core.models import Side, Signal
     from heartless.learning.bandit import AlphaBandit
     from heartless.strategy.ensemble import Ensemble
 
+    calls = []
+
+    class Probe(Alpha):
+        name = ALL_ALPHAS[0].name
+        timeframe = "5m"
+
+        def evaluate(self, view, ctx, p):
+            calls.append(ctx.symbol)
+            return Signal(self.name, ctx.symbol, Side.LONG, 0.9, "probe", 99.0, 102.0, None)
+
     p = StrategyParams.default()
-    name = ALL_ALPHAS[0].name
-    p.enabled[name] = False
-    live = Ensemble(p, AlphaBandit(list(p.alphas)))
-    iso = Ensemble(p, AlphaBandit(list(p.alphas)), only_alpha=name)
-
-    class _V:
-        def closed(self, tf):
-            return False
-
-    # neither evaluates anything on a view where no timeframe closed, but the gating differs:
-    assert live.evaluate_signals(_V(), None) == [] and iso.evaluate_signals(_V(), None) == []
-    import inspect
-
-    src = inspect.getsource(Ensemble.evaluate_signals)
-    assert "not self.only_alpha and not self.params.enabled" in src
+    p.enabled[Probe.name] = False
+    view = SimpleNamespace(closed=lambda tf: True)
+    ctx = SimpleNamespace(symbol="X")
+    live = Ensemble(p, AlphaBandit(list(p.alphas)), alphas=[Probe()])
+    iso = Ensemble(p, AlphaBandit(list(p.alphas)), alphas=[Probe()], only_alpha=Probe.name)
+    assert live.evaluate_signals(view, ctx) == [] and calls == []  # disabled: never traded
+    assert len(iso.evaluate_signals(view, ctx)) == 1 and calls == ["X"]  # isolated research run: evaluated
