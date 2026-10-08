@@ -828,6 +828,36 @@ class Heartless:
         await self.pause("kill switch")
         return n
 
+    async def set_credentials(self, api_key: str, api_secret: str, testnet: bool | None = None) -> str:
+        """Owner supplied Binance keys (web settings / Telegram). Verify them, persist them, keep the mode unchanged."""
+        from heartless.core.secrets import save_secrets
+        from heartless.exchange.binance_rest import BinanceRest
+
+        api_key, api_secret = (api_key or "").strip(), (api_secret or "").strip()
+        if not api_key or not api_secret:
+            return "API 키와 시크릿을 모두 입력해야 합니다"
+        if self.mode == "live":
+            return "라이브 모드 중에는 키를 바꿀 수 없습니다. 먼저 /mode paper 로 전환하세요"
+        tn = self.s.binance_testnet if testnet is None else bool(testnet)
+        probe = BinanceRest(api_key, api_secret, tn)
+        try:
+            await probe.sync_time()
+            acc = await probe.account()
+        except Exception as e:  # noqa: BLE001
+            await probe.close()
+            return f"키 검증 실패: {e}"
+        await probe.close()
+        if acc.get("canTrade") is False:
+            return "이 키에는 선물 거래 권한이 없습니다 (Binance API 관리에서 Futures 권한을 켜세요)"
+        save_secrets(self.s.data_dir, {"BINANCE_API_KEY": api_key, "BINANCE_API_SECRET": api_secret,
+                                       "BINANCE_TESTNET": "true" if tn else "false"})
+        self.s.binance_api_key, self.s.binance_api_secret, self.s.binance_testnet = api_key, api_secret, tn
+        self.rest.set_credentials(api_key, api_secret, tn)
+        wallet = float(acc.get("totalWalletBalance", 0.0) or 0.0)
+        await self.emit("control", {"message": f"🔑 Binance 키 등록 완료 ({'테스트넷' if tn else '메인넷'}, 지갑 {wallet:,.2f} USDT). "
+                                               "페이퍼 모드 유지 중 — 실거래는 /golive 로 확인 후 전환됩니다"})
+        return f"키 등록 완료 (지갑 {wallet:,.2f} USDT). 실거래 전환은 /golive"
+
     async def set_mode(self, mode: str) -> str:
         if mode == self.mode:
             return f"이미 {mode} 모드입니다"

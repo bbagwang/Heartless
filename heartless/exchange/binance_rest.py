@@ -53,6 +53,21 @@ class BinanceRest:
         self._lock = asyncio.Lock()
         self._last_sync = 0.0
 
+    def set_credentials(self, api_key: str, api_secret: str, testnet: bool | None = None) -> None:
+        """Swap the API key pair at runtime (owner entered new keys)."""
+        self.api_key = api_key
+        self.api_secret = api_secret.encode() if api_secret else b""
+        if api_key:
+            self._client.headers["X-MBX-APIKEY"] = api_key
+        else:
+            self._client.headers.pop("X-MBX-APIKEY", None)
+        if testnet is not None:
+            base = TEST_REST if testnet else PROD_REST
+            if base != self.base:
+                self.base = base
+                self.ws_base = TEST_WS if testnet else PROD_WS
+                self._client.base_url = base
+
     async def close(self) -> None:
         await self._client.aclose()
 

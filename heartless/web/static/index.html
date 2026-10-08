@@ -115,6 +115,23 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(
   </div>
 </div>
 
+<div class="card" style="margin-top:12px" id="settingsCard">
+  <h2>설정 (소유자 전용)</h2>
+  <div class="small muted" id="keyStatus">…</div>
+  <div class="row" style="margin-top:8px">
+    <input id="apiKey" class="sel" placeholder="Binance API Key" autocomplete="off" style="min-width:220px;flex:1">
+    <input id="apiSecret" class="sel" type="password" placeholder="Binance API Secret" autocomplete="off" style="min-width:220px;flex:1">
+    <label class="small"><input id="testnet" type="checkbox"> 테스트넷</label>
+    <button id="btnKeys">키 등록·검증</button>
+  </div>
+  <div class="small muted" style="margin-top:6px">선물 거래 권한만, 출금 권한 없이, 가능하면 IP 제한. 키는 서버 데이터 폴더에 0600 권한으로 저장되며 HTTPS 또는 로컬 접속에서만 입력됩니다. 등록 후에도 페이퍼 모드는 유지되고, 실거래 전환은 상단 버튼이나 텔레그램 /golive 로 확인합니다.</div>
+  <div class="row" style="margin-top:10px">
+    <input id="tgToken" class="sel" type="password" placeholder="Telegram Bot Token (선택)" autocomplete="off" style="min-width:220px;flex:1">
+    <button id="btnTg" class="ghost">텔레그램 토큰 저장</button>
+  </div>
+  <div class="small" id="settingsMsg" style="margin-top:6px"></div>
+</div>
+
 <script>
 const SERIES=['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'];
 const ALPHA_ORDER=['trend_pullback','squeeze_breakout','mean_reversion','momentum_burst','funding_fade','sweep_reversal'];
@@ -231,6 +248,16 @@ document.getElementById('btnMode').onclick=async()=>{const to=status.mode==='liv
 document.getElementById('eqRange').onchange=loadEquity;
 window.addEventListener('resize',()=>{drawEquity();if(status)renderAlphaChart(status.alphas||[])});
 async function tick(){try{await refresh();await loadTrades();await loadEvents()}catch(e){console.error(e)}}
+
+async function loadSettings(){const st=await api('/api/settings');if(!st)return;const el=document.getElementById('keyStatus');
+  el.textContent=`Binance 키: ${st.binance_api_key?st.binance_api_key+(st.testnet?' (테스트넷)':' (메인넷)'):'미등록'} · 텔레그램: ${st.telegram?'연결됨':'미설정'} · 모드: ${st.mode}`;
+  document.getElementById('testnet').checked=!!st.testnet}
+document.getElementById('btnKeys').onclick=async()=>{const m=document.getElementById('settingsMsg');m.textContent='검증 중…';
+  const r=await post('/api/settings/keys',{api_key:document.getElementById('apiKey').value,api_secret:document.getElementById('apiSecret').value,testnet:document.getElementById('testnet').checked});
+  m.textContent=(r&&(r.message||r.detail))||'실패';document.getElementById('apiSecret').value='';loadSettings();refresh()};
+document.getElementById('btnTg').onclick=async()=>{const m=document.getElementById('settingsMsg');
+  const r=await post('/api/settings/telegram',{token:document.getElementById('tgToken').value});m.textContent=(r&&(r.message||r.detail))||'실패';document.getElementById('tgToken').value=''};
+loadSettings();
 tick();loadEquity();setInterval(tick,5000);setInterval(loadEquity,60000);
 </script>
 </body>

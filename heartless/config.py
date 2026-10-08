@@ -104,5 +104,8 @@ class Settings(BaseSettings):
 def load_settings(**overrides) -> Settings:
     s = Settings(**overrides)
     s.data_dir.mkdir(parents=True, exist_ok=True)
+    from heartless.core.secrets import apply_to_settings, load_secrets
+
+    apply_to_settings(s, load_secrets(s.data_dir))
     os.environ.setdefault("TZ", "UTC")
     return s

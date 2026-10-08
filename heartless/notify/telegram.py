@@ -26,7 +26,7 @@ COMMANDS = [
     ("params", "현재 파라미터"), ("trades", "최근 거래"), ("universe", "거래 종목"), ("health", "시스템 상태"),
     ("pause", "신규 진입 중지"), ("resume", "거래 재개"), ("close", "포지션 청산: /close BTCUSDT | all"),
     ("mode", "모드 전환: /mode paper|live"), ("golive", "실거래 전환"), ("kill", "전량 청산 + 정지"),
-    ("web", "웹 대시보드 링크"), ("report", "일일 리포트 즉시 전송"), ("optimize", "리서치 사이클 즉시 실행"), ("discover", "알파 자동 발굴 즉시 실행"),
+    ("web", "웹 대시보드 링크"), ("report", "일일 리포트 즉시 전송"), ("optimize", "리서치 사이클 즉시 실행"), ("discover", "알파 자동 발굴 즉시 실행"), ("setkeys", "Binance API 키 등록 (메시지 자동 삭제)"),
     ("help", "도움말"),
 ]
 
@@ -186,6 +186,11 @@ class TelegramBot:
                 self.send("✅ 페어링 완료. 이제 이 계정만 Heartless 를 제어할 수 있습니다.\n\n" + self.app.startup_summary())
                 self.send(self._help())
             return  # silently ignore strangers
+        if text.split()[0].lower().split("@")[0] == "/setkeys":
+            # the message carries secrets: remove it from the chat history before doing anything else
+            mid = msg.get("message_id")
+            if mid is not None:
+                await self.api("deleteMessage", chat_id=chat_id, message_id=mid)
         await self._handle_command(text, chat_id)
 
     # --- commands ------------------------------------------------------------------------------
@@ -262,6 +267,15 @@ class TelegramBot:
             self._confirm("golive", f"🔴 실제 자금으로 거래를 시작합니다.{warn}\n계속할까요?")
         elif cmd == "/kill":
             self._confirm("kill", "🛑 모든 포지션을 청산하고 봇을 일시정지합니다. 계속할까요?")
+        elif cmd == "/setkeys":
+            if len(args) < 2:
+                self.send("사용법: <code>/setkeys API키 시크릿 [testnet]</code>\n"
+                          "메시지는 즉시 삭제됩니다. 출금 권한 없는 선물 전용 키를 쓰고, 가능하면 IP 제한을 거세요. "
+                          "더 안전한 방법은 웹 대시보드의 설정 화면(HTTPS)입니다.")
+            else:
+                testnet = (args[2].lower() in ("testnet", "test", "1", "true")) if len(args) > 2 else None
+                self.send("🔑 키 확인 중...")
+                self.send(F.esc(await app.set_credentials(args[0], args[1], testnet)))
         elif cmd == "/web":
             self.send(f"웹 대시보드 토큰: <code>{app.web_token}</code>\n"
                       f"접속: http://&lt;서버주소&gt;:{self.s.web_port}/?token={app.web_token}")

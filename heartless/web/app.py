@@ -169,6 +169,33 @@ class WebServer:
             asyncio.create_task(app.research.cycle(force=True))
             return {"ok": True}
 
+        @api.get("/api/settings")
+        async def get_settings(_: bool = auth):
+            from heartless.core.secrets import mask
+
+            return {"binance_api_key": mask(app.s.binance_api_key), "has_secret": bool(app.s.binance_api_secret),
+                    "testnet": app.s.binance_testnet, "telegram": bool(app.s.telegram_bot_token), "mode": app.mode,
+                    "live_capable": app.s.live_capable}
+
+        @api.post("/api/settings/keys")
+        async def set_keys(payload: dict, request: Request, _: bool = auth):
+            if request.headers.get("x-forwarded-proto", request.url.scheme) != "https" and request.client and \
+                    request.client.host not in ("127.0.0.1", "::1", "localhost"):
+                raise HTTPException(400, "API 키는 HTTPS 또는 로컬 접속에서만 입력할 수 있습니다")
+            msg = await app.set_credentials(str(payload.get("api_key", "")), str(payload.get("api_secret", "")),
+                                            payload.get("testnet"))
+            return {"ok": msg.startswith("키 등록 완료"), "message": msg}
+
+        @api.post("/api/settings/telegram")
+        async def set_telegram(payload: dict, request: Request, _: bool = auth):
+            from heartless.core.secrets import save_secrets
+
+            token = str(payload.get("token", "")).strip()
+            if ":" not in token:
+                raise HTTPException(400, "올바른 텔레그램 봇 토큰이 아닙니다")
+            save_secrets(app.s.data_dir, {"TELEGRAM_BOT_TOKEN": token})
+            return {"ok": True, "message": "저장했습니다. 봇을 재시작하면 텔레그램이 연결되고, 로그의 페어링 코드로 /start 하세요"}
+
         @api.post("/api/report")
         async def report(_: bool = auth):
             asyncio.create_task(app.daily_report())
