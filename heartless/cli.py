@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> None:
     lb.add_argument("--set", action="append", default=[], help="override, e.g. trend_pullback.adx_min=24")
     lb.add_argument("--workers", type=int, default=None)
     lb.add_argument("--stress", action="store_true", help="1.5x fees and 2x slippage")
+    lb.add_argument("--meta", action="store_true", help="enable the walk-forward meta-labeling filter")
     lb.add_argument("--json", action="store_true")
     lb.add_argument("--trades-out", default=None)
     dc = sub.add_parser("discover", help="mine rule-based alphas on stored history (TRAIN) and validate them (VALID)")

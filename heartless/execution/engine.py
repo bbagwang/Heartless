@@ -53,8 +53,10 @@ class TradingEngine:
     def __init__(self, name: str, account: Account, params: StrategyParams, settings: Settings, symbols: dict[str, SymbolInfo],
                  store: Store | None = None, bus: EventBus | None = None, bandit: AlphaBandit | None = None,
                  only_alpha: str | None = None, clock: Callable[[], int] | None = None, persist: bool = True,
-                 notify: bool = False):
+                 notify: bool = False, meta=None, meta_learn: bool = True):
         self.name = name
+        self.meta = meta  # MetaLabeler or None (heartless/learning/metalabel.py)
+        self.meta_learn = meta_learn
         self.account = account
         self.params = params
         self.s = settings
@@ -179,6 +181,16 @@ class TradingEngine:
         if t.spread_bps > 12:  # illiquid moment
             self.stats.skipped["spread"] = self.stats.skipped.get("spread", 0) + 1
             return
+        meta_x = None
+        if self.meta is not None:
+            meta_x = self._meta_vector(view, ctx, d)
+            allow, mult, er = self.meta.decide(sig.alpha, meta_x)
+            if not allow:
+                self.stats.skipped["meta veto"] = self.stats.skipped.get("meta veto", 0) + 1
+                return
+            d.size_mult *= mult
+            if er is not None:
+                d.reason += f" | 메타모델 기대 {er:+.2f}R"
         open_notional = sum(p.notional for p in self.open_positions())
         sz = self.risk.size(d, equity, info, entry_ref, open_notional)
         if sz.qty <= 0:
@@ -214,6 +226,8 @@ class TradingEngine:
                        expected_profit=(abs((tp or entry_ref + d.side.sign * d.expected_r * r_unit) - entry_ref) * sz.qty),
                        extra={"tp1_frac": self.params.alphas.get(sig.alpha, {}).get("tp1_frac", 0.5), "tags": sig.tags,
                               "size_mult": d.size_mult, "risk_pct": sz.risk_pct})
+        if meta_x is not None:
+            pos.extra["meta_x"] = [None if not (v == v) else float(v) for v in meta_x]
         self.positions[d.symbol] = pos
         self._save(pos)
         sent = False  # becomes True once an order call was reached (it may have been accepted despite an exception)
@@ -409,6 +423,26 @@ class TradingEngine:
         except Exception as e:  # noqa: BLE001
             log.error("[%s] failed to restore stop for %s: %s", self.name, pos.symbol, e)
             await self._emit("error", {"message": f"{pos.symbol} 손절 재설정 실패 ({e}). 봇 내부 백스톱으로 보호 중"})
+
+    def _meta_vector(self, view: MarketView, ctx: Context, d: Decision) -> list[float]:
+        """Market context at signal time for the meta-labeler (same feature code as the discovery engine)."""
+        import numpy as _np
+
+        from heartless.learning.discovery import features_at
+        from heartless.learning.metalabel import META_FEATURES, meta_vector
+
+        feats: dict = {}
+        try:
+            arr = features_at(view.frames, None, _np.array([int(view.cursor_time)], dtype=_np.int64))
+            feats = {n: float(arr[n][0]) for n in META_FEATURES if n in arr}
+        except Exception:  # noqa: BLE001
+            pass
+        ex = ctx.extras or {}
+        if ex and not ex.get("stale"):
+            for n in META_FEATURES:
+                if n.startswith("x.") and isinstance(ex.get(n[2:]), (int, float)):
+                    feats[n] = float(ex[n[2:]])
+        return meta_vector(feats, d.score, d.side.sign)
 
     async def on_algo_event(self, event: dict) -> None:
         """The exchange reports a conditional order's status. If our protective stop was rejected or expired
@@ -900,6 +934,11 @@ class TradingEngine:
         if net < 0:
             self.risk.register_loss(pos.symbol, ts)
         self.bandit.update(pos.alpha, pos.regime, pos.r_multiple, live=not self.account.is_paper)
+        if self.meta is not None and self.meta_learn and pos.extra.get("meta_x"):
+            try:
+                self.meta.update(pos.alpha, [float("nan") if v is None else v for v in pos.extra["meta_x"]], pos.r_multiple)
+            except Exception:  # noqa: BLE001
+                log.exception("[%s] meta-label update failed", self.name)
         self._equity_cache = (0, 0.0)
         await self._emit("position_closed", {"position": pos, "trade": rec, "symbol": pos.symbol})
 

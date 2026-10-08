@@ -57,6 +57,11 @@ class Heartless:
         self.regimes: dict[str, tuple[Regime, dict]] = {}
         self.bandit = AlphaBandit(list(StrategyParams.default().alphas), store=self.store, engine="shared")
         self.research = ResearchManager(self)
+        self.meta = None
+        if settings.meta_label:
+            from heartless.learning.metalabel import MetaLabeler
+
+            self.meta = MetaLabeler(min_samples=settings.meta_min_samples, store=self.store, key="metalabel")
         self.params: StrategyParams = self.research.load_champion()
         self.challengers: list[ChallengerSlot] = []
         self.engines: dict[str, TradingEngine] = {}
@@ -346,7 +351,7 @@ class Heartless:
             pa.funding_paid = float(saved.get("funding", 0.0))
         self.paper_accounts["paper"] = pa
         self.engines["paper"] = TradingEngine("paper", pa, self.params, self.s, self.symbols, self.store, self.bus,
-                                              self.bandit, notify=(self.mode != "live"))
+                                              self.bandit, notify=(self.mode != "live"), meta=self.meta)
         self._apply_persisted_pause(self.engines["paper"])
         await self._restore_paper_positions(self.engines["paper"])
         await self.engines["paper"].start()
@@ -412,7 +417,8 @@ class Heartless:
         # while mode/status still say paper.
         acc = LiveAccount(self.rest, "live", self.s.taker_fee)
         acc.set_symbols(self.symbols)
-        eng = TradingEngine("live", acc, self.params, self.s, self.symbols, self.store, self.bus, self.bandit, notify=True)
+        eng = TradingEngine("live", acc, self.params, self.s, self.symbols, self.store, self.bus, self.bandit, notify=True,
+                            meta=self.meta)
         self._apply_persisted_pause(eng)
         try:
             await acc.start()
@@ -450,8 +456,9 @@ class Heartless:
             self.store.delete_equity(slot.name)
             self.store.set(f"{slot.name}.risk", None)
         self.paper_accounts[slot.name] = pa
+        # challengers consult the shared meta model (fair comparison with the champion) but do not train it
         eng = TradingEngine(slot.name, pa, slot.params, self.s, self.symbols, self.store, self.bus,
-                            AlphaBandit(list(slot.params.alphas), store=None), notify=False)
+                            AlphaBandit(list(slot.params.alphas), store=None), notify=False, meta=self.meta, meta_learn=False)
         self._apply_persisted_pause(eng)
         if restore:
             await self._restore_paper_positions(eng)

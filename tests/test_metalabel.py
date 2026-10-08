@@ -55,3 +55,52 @@ def test_missing_values_and_persistence(tmp_path):
     ml2 = MetaLabeler(min_samples=50, store=st)
     x, _ = _sample(rng)
     assert ml2.predict("a", x) is not None and abs(ml2.predict("a", x) - ml.predict("a", x)) < 1e-6
+
+
+def test_engine_meta_veto_and_learning_path(tmp_path):
+    """With META_LABEL on, the engine stores the context vector at entry and trains the model on close."""
+    import asyncio
+
+    from heartless.config import Settings
+    from heartless.core.models import Decision, EntryStyle, Regime, Side, Signal, SymbolInfo, Ticker
+    from heartless.data.candles import CandleArrays
+    from heartless.data.features import MarketView
+    from heartless.exchange.paper import PaperAccount
+    from heartless.execution.engine import TradingEngine
+    from heartless.strategy.base import Context
+    from heartless.strategy.params import StrategyParams
+    from synth import synth_candles
+
+    info = SymbolInfo("BTCUSDT", "BTC", "USDT", 0.01, 0.001, 0.001, 5, 2, 3)
+    ca = synth_candles(3000, seed=4)
+    view = MarketView("BTCUSDT")
+    view.rebuild(ca, live=False)
+    t = int(ca.close_time[ca.n - 1])
+    view.seek(t)
+    px = float(ca.close[ca.n - 1])
+    ml = MetaLabeler(min_samples=5)
+    acc = PaperAccount("t", 10_000, slippage_bps=0, impact_bps_per_10k=0, spread_bps=0)
+    eng = TradingEngine("t", acc, StrategyParams.default(), Settings(_env_file=None), {"BTCUSDT": info}, persist=False,
+                        clock=lambda: t, meta=ml)
+
+    async def one(exit_px):
+        await acc.on_ticker(Ticker("BTCUSDT", bid=px, ask=px, mark=px, last=px, ts=t))
+        sig = Signal("trend_pullback", "BTCUSDT", Side.LONG, 0.8, "t", px * 0.99, px * 1.02, None, EntryStyle.MARKET, None, 0, 0.0,
+                     px * 0.004, "15m", {"ref_price": px})
+        d = Decision("BTCUSDT", Side.LONG, 0.8, 0.8, ["trend_pullback"], sig, "t", Regime.RANGE, 1.0, 2.0)
+        await eng._open(d, view, Context("BTCUSDT", info, acc.tickers["BTCUSDT"], Regime.RANGE), 10_000)
+        pos = eng.positions.get("BTCUSDT")
+        if pos is None:
+            return None
+        x = list(pos.extra["meta_x"])
+        await acc.on_ticker(Ticker("BTCUSDT", bid=exit_px, ask=exit_px, mark=exit_px, last=exit_px, ts=t))
+        return x
+
+    async def run():
+        xs = [await one(px * 0.985) for _ in range(5)]  # identical context, always stopped out
+        assert all(x is not None and len(x) == len(xs[0]) for x in xs)
+        assert len(ml.models["trend_pullback"].r) == 5 and ml.models["trend_pullback"].beta is not None
+        # the model has only seen losses in this context: the next identical signal is vetoed
+        assert await one(px) is None and eng.stats.skipped.get("meta veto") == 1
+
+    asyncio.run(run())

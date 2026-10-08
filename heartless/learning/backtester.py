@@ -111,6 +111,13 @@ class Backtester:
             if rows:
                 self._fund_idx[sym] = np.array([r[0] for r in rows], dtype=np.int64)
 
+    def _make_meta(self):
+        if not getattr(self.s, "meta_label", False):
+            return None
+        from heartless.learning.metalabel import MetaLabeler
+
+        return MetaLabeler(min_samples=getattr(self.s, "meta_min_samples", 120))  # starts empty: walk-forward
+
     def _extras(self, sym: str, t: int) -> dict:
         """Positioning snapshot at t, recomputed only when a new 5-minute metrics row becomes usable."""
         ms = self.metrics.get(sym)
@@ -180,7 +187,7 @@ class Backtester:
         account.set_symbols(self.symbols)
         engine = TradingEngine("bt", account, params, self.s, self.symbols, store=None, bus=None,
                                bandit=bandit or AlphaBandit(list(params.alphas), seed=7), only_alpha=only_alpha,
-                               clock=lambda: self.now, persist=False)
+                               clock=lambda: self.now, persist=False, meta=self._make_meta())
         self.now = int(tl[lo])
         await engine.start()
         # per-symbol cursors into candle arrays

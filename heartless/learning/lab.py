@@ -263,6 +263,8 @@ def main_cli(settings, args) -> None:
     store.close()
     params = apply_overrides(params, args.set)
     extra_settings = dict(STRESS_SETTINGS) if getattr(args, "stress", False) else {}
+    if getattr(args, "meta", False):
+        extra_settings["META_LABEL"] = True
     res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers,
                    settings=extra_settings)
     if args.json:
