@@ -10,14 +10,16 @@ Research notes (TRAIN 2026-01-13..07-01, 12 symbols; event studies on 1m paths +
 * The one reversion effect found is after LARGE multi-hour stretches: a 1h close >= 4.5 1h-ATRs away from the close
   8 hours earlier, on the first 1h bar that closes against the move, reverts ~0.5-1 ATR over the next 4-12h. With a
   2 ATR stop / 2 ATR target / 12h hold it made +0.167R on TRAIN (n=120, t 2.5, PF 1.62, 10/12 symbols, 5/6 months,
-  +0.127R under stress) -- but ONLY when run under another alpha name, i.e. without the engine's regime-flip exit.
+  +0.127R under stress) -- but ONLY without the engine's regime-flip exit (at the time: run under another alpha
+  name; now: exit_on_regime_change=False).
   The edge grows monotonically with the stretch (>= 4.0: +0.06R, >= 5.0: +0.24R). On VALID that variant was
   negative (n=39, -0.08R, PF 0.72), so it is not a validated edge either way.
-* The engine closes "mean_reversion" positions in loss whenever 15m ADX > 32 with the 15m slope against them. After
-  such a stretch the 15m ADX is > 32 on every signal (median ~57) and the slope is against the trade on ~90%, so
-  ~85% of the trades are scratched within ~1h: TRAIN -0.04R (n=180, PF 0.68). Variants that are "safe" from that
-  exit (enter only once 15m ADX <= 32 or the 15m slope turned) lose the edge (-0.11..+0.10R, and the positive
-  ones come only from shorts in a bear market: longs -0.08..-0.18R).
+* The signal opts into the engine's regime-flip exit (Signal.exit_on_regime_change), which closes the position in
+  loss whenever 15m ADX > 32 with the 15m slope against it. After such a stretch the 15m ADX is > 32 on every signal
+  (median ~57) and the slope is against the trade on ~90%, so ~85% of the trades are scratched within ~1h: TRAIN
+  -0.04R (n=180, PF 0.68). Variants that are "safe" from that exit (enter only once 15m ADX <= 32 or the 15m slope
+  turned) lose the edge (-0.11..+0.10R, and the positive ones come only from shorts in a bear market: longs
+  -0.08..-0.18R).
 * VERDICT: no edge. Shipped disabled; the defaults are the best-found stretch-exhaustion configuration.
 """
 from __future__ import annotations
@@ -87,4 +89,5 @@ class MeanReversion(Alpha):
                       take_profit=tp, tp1=None, entry_style=EntryStyle.LIMIT if maker else EntryStyle.MARKET,
                       limit_price=(touch or entry) if maker else None,
                       max_hold_bars=self.bars_to_1m(int(p["max_hold"]), "1h"), trail_atr_mult=0.0, atr=atr,
-                      timeframe="1h", tags={"ref_price": entry, "stretch_atr": stretch, "lookback": lb})
+                      timeframe="1h", tags={"ref_price": entry, "stretch_atr": stretch, "lookback": lb},
+                      exit_on_regime_change=True)  # a fade: a strong counter-trend invalidates it (see module notes)

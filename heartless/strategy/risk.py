@@ -209,21 +209,37 @@ class RiskManager:
         return True, ""
 
     # --- sizing --------------------------------------------------------------------------------
+    def budget_pct(self, size_mult: float) -> float:
+        """Per-trade risk budget in % of equity for a decision's size multiplier (weekly risk scale applied)."""
+        risk_pct = self.s.risk_per_trade_pct * size_mult * self.state.risk_scale
+        return max(0.1, min(self.s.max_risk_per_trade_pct, risk_pct))
+
     def size(self, decision: Decision, equity: float, info: SymbolInfo, entry_price: float,
              open_notional: float = 0.0) -> SizeResult:
-        sig = decision.primary
-        dist = abs(entry_price - sig.stop)
+        return self.size_at(decision.primary.stop, entry_price, equity, info, self.budget_pct(decision.size_mult),
+                            open_notional)
+
+    def size_at(self, stop: float, entry_price: float, equity: float, info: SymbolInfo, risk_pct: float,
+                open_notional: float = 0.0, filled_risk: float = 0.0, filled_notional: float = 0.0,
+                lift_to_min: bool = True) -> SizeResult:
+        """Order size for an entry at `entry_price` with a protective stop at `stop`, risking `risk_pct` of equity.
+
+        The single sizing rule shared by new entries and re-quotes. `open_notional` is the notional of the OTHER open
+        positions (gross leverage cap). `filled_risk` / `filled_notional` describe the already filled part of the
+        same trade (a re-quoted remainder): it consumes the risk budget and the notional caps first, and the result
+        sizes the remainder only. With `lift_to_min=False` a size below the exchange minimum is never lifted to it
+        (the lift may exceed the budget); the result is then qty 0 ("below min notional")."""
+        dist = abs(entry_price - stop)
         if dist <= 0 or equity <= 0 or entry_price <= 0:
             return SizeResult(0, 0, 0, 0, self.s.exchange_leverage, "invalid stop distance")
-        risk_pct = self.s.risk_per_trade_pct * decision.size_mult * self.state.risk_scale
-        risk_pct = max(0.1, min(self.s.max_risk_per_trade_pct, risk_pct))
         risk_amount = equity * risk_pct / 100
         # size so that a stop-out *including* round-trip fees and slippage costs exactly risk_amount
         cost_per_unit = entry_price * (2 * self.s.taker_fee + 0.0003)
-        qty = risk_amount / (dist + cost_per_unit)
+        qty = max(risk_amount - filled_risk, 0.0) / (dist + cost_per_unit)
         max_notional = equity * self.s.max_position_leverage
         remaining_gross = equity * self.s.max_gross_leverage - open_notional
         max_notional = min(max_notional, max(remaining_gross, 0.0), equity * self.s.exchange_leverage * 0.8)
+        max_notional = max(max_notional - filled_notional, 0.0)
         if qty * entry_price > max_notional:
             qty = max_notional / entry_price
         q = norm_qty(info, qty)
@@ -232,8 +248,8 @@ class RiskManager:
             # lifting to the exchange minimum may exceed the per-trade budget, but never the configured hard cap
             # (max_risk_per_trade_pct) nor 2.5x the budget, both measured as the realised stop-out loss incl. costs
             hard_cap = equity * self.s.max_risk_per_trade_pct / 100
-            min_loss = min_q * (dist + cost_per_unit)
-            if min_q * entry_price <= max_notional and min_loss <= min(hard_cap, risk_amount * 2.5):
+            min_loss = filled_risk + min_q * (dist + cost_per_unit)
+            if lift_to_min and min_q * entry_price <= max_notional and min_loss <= min(hard_cap, risk_amount * 2.5):
                 q = min_q
                 risk_pct = min_loss / equity * 100  # report the risk actually taken
             else:
