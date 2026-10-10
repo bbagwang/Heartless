@@ -536,7 +536,7 @@ def _discover(settings, args) -> None:
             symbols = universe_symbols(args.universe, store)
         else:
             symbols = [x.strip().upper() for x in args.symbols.split(",")] if args.symbols else store.candle_symbols()
-        grids = D._grids(getattr(args, "grid", None) or args.tf)
+        grids = D.parse_grids(getattr(args, "grid", None) or args.tf)
         if getattr(args, "tag", None) is not None and not tag:
             raise ValueError("--tag needs a family name")
         sp = store_splits(store, symbols) if not (args.train and args.valid) else {}
@@ -589,6 +589,11 @@ def _discover(settings, args) -> None:
         n_fam = trials.family_tests(tag)
         print(f"trial ledger: {tag} search {trial['config_hash']} with {res['tested']} rules recorded; family N={n_fam}, "
               f"TRAIN bar t >= {trials.threshold(n_fam):.2f}", file=sys.stderr)
+    else:
+        from heartless.learning.trials import period_of
+
+        if period_of(*train) == "TRAIN":
+            print("note: not recorded in the P2 trial ledger (no --tag FAMILY)", file=sys.stderr)
     rows = res.get("rows", {})
     print(f"tested {res['tested']} rules on {rows.get('train', 0)} TRAIN rows ({res.get('tf', ','.join(grids))}); "
           f"family-wise t bar {res['t_bar']:.2f}" + (f" (N={res['n_tests']})" if res.get("n_tests") else "")
@@ -618,6 +623,8 @@ def _context(settings, args) -> None:
     universe = settings.context_universe_list
     src = Store(settings.db_path)
     ctx_path = settings.context_db_path
+    if str(ctx_path) != str(settings.db_path):
+        ctx_path.parent.mkdir(parents=True, exist_ok=True)
     dst = src if str(ctx_path) == str(settings.db_path) else Store(ctx_path)
     try:
         if args.action == "status":

@@ -746,12 +746,76 @@ def year_chunks(start: int, end: int) -> list[tuple[int, int]]:
     return out
 
 
+GRID_STEP = {"15m": 900_000, "1h": 3_600_000, "1d": DAY_MS}
+
+
+def grid_bound(grid: str, a: int, b: int) -> int:
+    """Upper bound of a grid's decision times in [a, b] (closes fall at k * step - 1)."""
+    step = GRID_STEP[grid]
+    return max(0, (b + 1) // step - (-(-(a + 1) // step)) + 1)
+
+
+class _Assembler:
+    """Fills (symbol, chunk) parts into preallocated column-major arrays as they arrive (each part sits at the offset
+    of its job, sized by grid_bound) and compacts the gaps at the end, so the build never holds all parts and the
+    merged copy at once: peak memory is the dataset plus the parts in flight."""
+
+    def __init__(self, jobs: list[dict], names: list[str], keys: list[tuple]):
+        self.jobs, self.names, self.keys = jobs, names, keys
+        self.bounds = [grid_bound(j["tf"], j["start"], j["end"]) for j in jobs]
+        self.offsets = np.concatenate(([0], np.cumsum(self.bounds))).astype(np.int64)
+        n = int(self.offsets[-1])
+        self.X = np.empty((n, len(names)), order="F")
+        self.times = np.zeros(n, dtype=np.int64)
+        self.month = np.zeros(n, dtype=np.int64)
+        self.entry = np.full(n, -1, dtype=np.int64)
+        self.R = {k: np.empty(n) for k in keys}
+        self.EXIT = {k: np.empty(n, dtype=np.int64) for k in keys}
+        self.counts = [0] * len(jobs)
+
+    def put(self, i: int, part: SymbolData | None) -> None:
+        if part is None or not len(part.times):
+            return
+        m, a = len(part.times), int(self.offsets[i])
+        if m > self.bounds[i] or part.names != self.names:
+            raise RuntimeError(f"unexpected dataset part for {part.symbol}: {m} rows (bound {self.bounds[i]})")
+        self.X[a:a + m] = part.X
+        self.times[a:a + m] = part.times
+        self.month[a:a + m] = part.month
+        self.entry[a:a + m] = part.entry_t
+        for k in self.keys:
+            self.R[k][a:a + m] = part.R[k]
+            self.EXIT[k][a:a + m] = part.EXIT[k]
+        self.counts[i] = m
+
+    def dataset(self, tf: str, templates: tuple) -> Dataset:
+        syms = list(dict.fromkeys(j["symbol"] for j, c in zip(self.jobs, self.counts) if c))
+        if not syms:
+            raise RuntimeError("no data to build a discovery dataset")
+        sid = {s: i for i, s in enumerate(syms)}
+        sym_id = np.zeros(len(self.times), dtype=np.int64)
+        dst = 0
+        for i, (job, m) in enumerate(zip(self.jobs, self.counts)):
+            if not m:
+                continue
+            a = int(self.offsets[i])
+            if a != dst:  # close the gap left by a shorter part (numpy handles the overlapping move)
+                self.X[dst:dst + m] = self.X[a:a + m]
+                for arr in (self.times, self.month, self.entry, *self.R.values(), *self.EXIT.values()):
+                    arr[dst:dst + m] = arr[a:a + m]
+            sym_id[dst:dst + m] = sid[job["symbol"]]
+            dst += m
+        return Dataset(tf, syms, self.X[:dst], self.times[:dst].copy(), sym_id[:dst].copy(), self.month[:dst].copy(),
+                       {k: v[:dst].copy() for k, v in self.R.items()}, {k: v[:dst].copy() for k, v in self.EXIT.items()},
+                       self.entry[:dst].copy(), list(self.names), templates)
+
+
 def build_dataset(db_path: str, symbols: list[str], start: int, end: int, tf: str = "15m", workers: int = 2,
                   cost: dict | None = None, unseal=(), templates="classic", context_db: str | None = None) -> Dataset:
     """Decision rows of [start, end] for every symbol, built as (symbol, calendar year) jobs. Raises SealedError for
     a window touching a sealed period. `context_db` adds the market-context features (FEATURES_X)."""
     import multiprocessing
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     from heartless.learning import seal
 
@@ -763,16 +827,23 @@ def build_dataset(db_path: str, symbols: list[str], start: int, end: int, tf: st
     jobs = [{"db_path": db_path, "symbol": s, "start": a, "end": b, "tf": tf, "cost": cost or {},
              "unseal": sorted(unseal or ()), "templates": tmpls, "context_db": context_db}
             for s in symbols for a, b in year_chunks(int(start), int(end))]
+    asm = _Assembler(jobs, list(FEATURES_X if context_db else FEATURES), [(t, sd) for t in tmpls for sd in (1, -1)])
     if workers <= 1:
-        parts = [_build_job(j) for j in jobs]
+        for i, j in enumerate(jobs):
+            asm.put(i, _build_job(j))
     else:
         with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
                                  max_tasks_per_child=1 if len(jobs) > len(symbols) else None) as pool:
-            parts = list(pool.map(_build_job, jobs))
-    return merge(parts)
+            futs = {pool.submit(_build_job, j): i for i, j in enumerate(jobs)}
+            # as_completed drops its own reference to a yielded future and the dict entry is popped, so each part is
+            # freed once it has been copied in
+            for fut in as_completed(futs):
+                asm.put(futs.pop(fut), fut.result())
+                del fut
+    return asm.dataset(tf, tmpls)
 
 
-def _grids(tf) -> list[str]:
+def parse_grids(tf) -> list[str]:
     out = [g.strip() for g in (tf.split(",") if isinstance(tf, str) else tf) if g.strip()]
     bad = [g for g in out if g not in GRIDS]
     if bad or not out:
@@ -795,17 +866,16 @@ def mine(db_path: str, symbols: list[str], train: tuple[int, int], valid: tuple[
 
     seal.check_window(int(train[0]), int(train[1]), unseal)
     seal.check_window(int(valid[0]), int(valid[1]), unseal)
-    grids = _grids(tf)
+    grids = parse_grids(tf)
     t0 = _t.time()
     ctx_db = None
     if context:
         from heartless.data import context as C
 
-        lo, hi = min(train[0], valid[0]), max(train[1], valid[1])
-        if train[1] < valid[0] - 1 or valid[1] < train[0] - 1:  # disjoint windows: never build the gap between them
-            ctx_db = C.prepare(db_path, context, train[0], train[1]) and C.prepare(db_path, context, valid[0], valid[1])
-        else:
-            ctx_db = C.prepare(db_path, context, lo, hi)
+        # each window plus the hour close before it (decisions before its first hour close read that snapshot); two
+        # separate builds, so the gap between TRAIN and VALID (the sealed year) is never computed
+        ctx_db = (C.prepare(db_path, context, train[0] - C.MS_H, train[1])
+                  and C.prepare(db_path, context, valid[0] - C.MS_H, valid[1]))
         if ctx_db is None:
             raise RuntimeError("market context requested but not available (run `heartless context build`)")
     tested, results, rules_all, rows = 0, [], [], {}

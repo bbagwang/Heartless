@@ -205,3 +205,19 @@ def test_context_columns_follow_the_last_hour_close(planted_db):
     assert cols["c.ret_24h_rank"][0] == v["ret_24h_rank"] == cols["c.ret_24h_rank"][1]  # mid-hour: last close
     assert cols["m.n"][0] == len(SYMS) and np.isnan(cols["m.n"][3])  # before the built window: unknown
     assert len(D.FEATURES_X) == len(D.FEATURES) + len(C.SYMBOL_FEATURES) + len(C.MARKET_FEATURES)
+
+
+def test_assembled_dataset_equals_merged_parts(planted_db):
+    """build_dataset fills parts into preallocated arrays as they arrive; the result equals merging the parts."""
+    a, b = START + 20 * DAY, START + 150 * DAY - 1
+    ds = D.build_dataset(planted_db, ["BBBUSDT", "AAAUSDT"], a, b, "1h", workers=1, templates=(1, 4))
+    jobs = [{"db_path": planted_db, "symbol": s, "start": x, "end": y, "tf": "1h", "templates": (1, 4)}
+            for s in ("BBBUSDT", "AAAUSDT") for x, y in D.year_chunks(a, b)]
+    ref = D.merge([D._build_job(j) for j in jobs])
+    assert len(jobs) == 4 and ds.symbols == ref.symbols == ["BBBUSDT", "AAAUSDT"] and ds.presorted
+    for name in ("times", "sym_id", "month", "entry_t"):
+        assert np.array_equal(getattr(ds, name), getattr(ref, name)), name
+    assert np.array_equal(ds.X, ref.X, equal_nan=True)
+    for k in ref.R:
+        assert np.array_equal(ds.R[k], ref.R[k], equal_nan=True) and np.array_equal(ds.EXIT[k], ref.EXIT[k])
+    assert D.grid_bound("1h", a, b) == 130 * 24 and D.grid_bound("1d", a, b) == 130

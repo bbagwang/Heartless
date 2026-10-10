@@ -405,12 +405,13 @@ def _group(trades: list[dict], key) -> dict:
     return {k: summarize(v) for k, v in _bucket(trades, key).items()}
 
 
-def prepare_context(db_path: str, context: dict, start: int, end: int, unseal=()) -> str | None:
-    """Build the missing market-context years for [start, end] (the simulated span, capped at a sealed period like
-    every other look-ahead read) and return the path of the store that holds them, or None when unavailable."""
+def prepare_context(db_path: str, context: dict, start: int, end: int) -> str | None:
+    """Build the missing market-context years of the evaluated window [start, end] (already seal-checked; burn-in and
+    run-off of interior chunks stay inside it) and return the path of the store holding them, or None. The hour close
+    just before `start` is included: bars before the first hour close of the window read that snapshot."""
     from heartless.data import context as C
 
-    return C.prepare(db_path, context, start, seal.readable_until(start, end, unseal) if end > start else end)
+    return C.prepare(db_path, context, start - C.MS_H, end)
 
 
 def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, only_alpha: str | None = None,
@@ -425,8 +426,8 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
     BURN_IN_MS. Raises SealedError when [start, end] overlaps a sealed period that is not in `unseal`.
 
     `context` = {"db": market_context store path, "universe": [...], "build": bool} attaches the market context:
-    the rows of the simulated span are built first when missing (and `build`), then every worker reads its symbol's
-    rows. None runs without it (ctx.market stays empty)."""
+    the rows of the window are built first when missing (and `build`), then every worker reads its symbol's rows.
+    None runs without it (ctx.market stays empty)."""
     seal.check_window(int(start), int(end), unseal)
     unseal = seal.opened(int(start), int(end), unseal)  # an unseal the window does not need opens nothing
     t0 = time.time()
@@ -439,8 +440,7 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
             return ""
         return str(datetime.fromtimestamp(a / 1000, tz=timezone.utc).year) if chunk_days is None else _iso(a)[:10]
 
-    ctx_db = prepare_context(str(db_path), context, int(start) - burn_in_ms, int(end) + runoff_ms, unseal) \
-        if context else None
+    ctx_db = prepare_context(str(db_path), context, int(start), int(end)) if context else None
     jobs = [{"db_path": str(db_path), "symbol": s, "start": a, "end": b, "params": pdict, "only_alpha": only_alpha,
              "settings": settings or {}, "info": (infos or {}).get(s), "label": label(a), "first": k == 0,
              "final": k == len(windows) - 1, "unseal": sorted(unseal or ()), "warmup_ms": warmup_ms,
@@ -532,12 +532,6 @@ def apply_overrides(params, overrides: list[str], notes: list | None = None):
             if before[k] != v:
                 warn(f"{scope}.{k}", before[k], v, "must stay below tp_r")
     return p
-
-
-def trials_period(start: int, end: int) -> str:
-    from heartless.learning.trials import period_of
-
-    return period_of(start, end)
 
 
 def git_dirty(paths: tuple[str, ...] = ("heartless",)) -> bool | None:
@@ -637,10 +631,10 @@ def main_cli(settings, args) -> None:
     res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers,
                    settings=extra_settings, chunk_days=chunk_days, unseal=[p for p in unseal if p in touched],
                    context=context)
+    from heartless.learning import trials
+
     trial = None
     if tag:
-        from heartless.learning import trials
-
         cfg = trials.lab_config(params.to_dict(), args.alpha, symbols, meta=bool(getattr(args, "meta", False)))
         s = res.summary()
         trial = trials.record("lab", tag, cfg, (start, end), n=s["n"], avg_r=s["avg_r"], t_day=s["t_day"],
@@ -648,7 +642,7 @@ def main_cli(settings, args) -> None:
         n_fam = trials.family_tests(tag)
         print(f"trial ledger: {tag} config {trial['config_hash']} recorded; family N={n_fam}, TRAIN bar t_day >= "
               f"{trials.threshold(n_fam):.2f}", file=sys.stderr)
-    elif trials_period(start, end) == "TRAIN":
+    elif trials.period_of(start, end) == "TRAIN":
         print("note: not recorded in the P2 trial ledger (no --tag FAMILY)", file=sys.stderr)
     if args.json:
         print(json.dumps(_clean({"summary": res.summary(), "summary_excl_boundary": res.summary_excl_boundary(),

@@ -268,3 +268,26 @@ def test_store_table_is_lazy_and_build_resumes(db, tmp_path):
     assert not C.ensure(st, out, START, START + 40 * DAY, SYMS[:4], auto_build=False)
     st.close()
     out.close()
+
+
+def test_context_cli_build_and_status(hist, tmp_path, monkeypatch, capsys):
+    import heartless.cli as cli
+
+    data = tmp_path / "data"
+    data.mkdir()
+    st = Store(data / "heartless.db")
+    for sym in SYMS[:3]:
+        st.save_candles(sym, hist[sym]["bars"][: 3 * 1440])
+    st.close()
+    monkeypatch.setenv("HEARTLESS_DATA_DIR", str(data))
+    monkeypatch.setenv("CONTEXT_DB", str(tmp_path / "derived" / "ctx.db"))
+    monkeypatch.setenv("CONTEXT_UNIVERSE", ",".join(SYMS))
+    cli.main(["context", "build"])
+    out = capsys.readouterr().out
+    assert "72 hours" in out and "3/6 universe symbols stored" in out
+    cli.main(["context", "build"])
+    assert "0 hours" in capsys.readouterr().out  # resumed: nothing left to build
+    cli.main(["context", "status"])
+    out = capsys.readouterr().out
+    assert "72 hours" in out and "current" in out
+    assert not Store(data / "heartless.db").has_market_context()  # the candle database was only read

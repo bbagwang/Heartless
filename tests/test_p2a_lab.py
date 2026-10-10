@@ -186,3 +186,32 @@ def test_lab_cli_universe_and_tag_append_to_the_trial_ledger(db, tmp_path, monke
                                  set=["trend_pullback.adx_min=20"]))
     assert trials.family_tests("probe_family") == 2
     assert "family N=2" in capsys.readouterr().err
+
+
+def test_context_for_a_window_right_after_the_seal_builds_only_what_it_reads(tmp_path, probe):
+    """A VALID-style window starting 2026-01-01: the 2025 history is read as warm-up only; the one 2025 row written
+    is the snapshot at 2025-12-31 23:59:59.999 that the window's first bars see."""
+    from heartless.learning import seal
+
+    s25_end = seal.SEALED["2025"][1]
+    db = tmp_path / "s.db"
+    st = Store(db)
+    rng = np.random.default_rng(4)
+    t0 = s25_end - 40 * DAY
+    n = 50 * 1440
+    for k, sym in enumerate(SYMS):
+        close = (10 + k) * np.exp(np.cumsum(rng.normal(0, 0.0007, n)))
+        st.save_candles(sym, [Candle(t0 + i * 60_000, float(close[i]), float(close[i]) * 1.0002,
+                                     float(close[i]) * 0.9998, float(close[i]), 1.0, float(close[i]), 1, 0.5,
+                                     t0 + i * 60_000 + 59_999) for i in range(n)])
+    st.close()
+    ctx_db = tmp_path / "ctx.db"
+    with pytest.raises(seal.SealedError):
+        lab.evaluate(_params(), ["AAAUSDT"], s25_end - DAY, s25_end + DAY, str(db), pool=INLINE,
+                     context={"db": str(ctx_db), "universe": list(SYMS)})
+    assert not ctx_db.exists()
+    lab.evaluate(_params(), ["AAAUSDT"], s25_end, s25_end + 5 * DAY - 1, str(db), pool=INLINE, warmup_ms=12 * DAY,
+                 context={"db": str(ctx_db), "universe": list(SYMS)})
+    stats = Store(ctx_db).market_context_stats()
+    assert stats["first"] == s25_end - 1 and stats["last"] >= s25_end + 5 * DAY - 1
+    assert probe.seen and probe.seen[0][2]["ts"] >= s25_end - 1 and all(len(m) for _, _, m in probe.seen)

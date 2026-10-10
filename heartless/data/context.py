@@ -39,6 +39,7 @@ from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from types import MappingProxyType
 
 import numpy as np
@@ -641,6 +642,8 @@ def prepare(db_path: str, cfg: dict, start: int, end: int) -> str | None:
 
     ctx_path = str(cfg.get("db") or db_path)
     src = Store(db_path)
+    if ctx_path != str(db_path):
+        Path(ctx_path).parent.mkdir(parents=True, exist_ok=True)
     dst = src if ctx_path == str(db_path) else Store(ctx_path)
     try:
         ok = ensure(src, dst, int(start), int(end), cfg.get("universe") or DEFAULT_UNIVERSE,
@@ -736,8 +739,6 @@ class MarketContextTracker:
         """Feed the stored history needed for exact snapshots from the next hour close on (1m candles, funding and
         metrics of the last WARMUP_HOURS before `now`) and finalise up to the last hour close <= now. Returns the
         number of candles fed."""
-        from heartless.core.models import Candle
-
         h_end = hour_of(now)
         lo = (h_end - WARMUP_HOURS) * MS_H
         fed = 0
