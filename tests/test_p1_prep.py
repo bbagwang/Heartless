@@ -205,7 +205,8 @@ def test_backtest_window_runs_one_shared_account_with_production_risk(tmp_path, 
     assert doc["rejected"].get("max same-direction positions", 0) >= sm["n"] // 4
     assert doc["seal"]["clean"] and "git_commit" in doc and "git_dirty" in doc
     assert sum(m["n"] for m in doc["by_month"].values()) == sm["n"] and start <= lab.parse_when(doc["first_entry"]) <= end
-    assert doc["drawdown_pause"] is None and min(doc["equity_daily"]) == "2023-03-02"
+    assert doc["drawdown_pause"] == {"latched": False, "refused_signals": 0, "hourly_crossing": None}
+    assert min(doc["equity_daily"]) == "2023-03-02"
     assert "Joint backtest" in printed and "rejected" in printed and "4/5 symbols" in printed
 
 
@@ -229,7 +230,9 @@ def test_backtest_window_reports_when_the_drawdown_pause_latched(tmp_path, monke
     cli.main(["backtest", "--start", "2023-03-02", "--end", "2023-03-04", "--params", str(pfile), "--json"])
     doc = json.loads(capsys.readouterr().out)
     assert doc["risk_settings"]["max_drawdown_halt_pct"] == 0.3 and doc["rejected"].get("paused", 0) > 0
-    assert doc["drawdown_pause"] is not None and doc["last_entry"] <= doc["drawdown_pause"]
+    dp = doc["drawdown_pause"]
+    assert dp["latched"] and dp["refused_signals"] == doc["rejected"]["paused"]
+    assert dp["hourly_crossing"] is None or doc["last_entry"] <= dp["hourly_crossing"]
 
 
 def test_backtest_window_without_params_uses_shipped_defaults_read_only(tmp_path, monkeypatch, capsys):

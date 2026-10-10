@@ -348,8 +348,9 @@ async def _backtest_window(settings, args) -> None:
     st, trades = res.stats, res.trades
     loaded = sorted(bt.candles)
     risk = {k: getattr(run_settings, k) for k in JOINT_RISK_KEYS}
-    # when the account's drawdown pause latched (it waits for an owner /resume, so nothing trades after it); read off
-    # the hourly equity curve, the engine itself checks every bar
+    # The drawdown pause latches until an owner /resume, so nothing trades after it: in a backtest every signal refused
+    # as "paused" comes after it. Its time is read off the hourly equity curve; the engine checks every bar, so a
+    # crossing between two hourly samples leaves it unknown (the last entry still bounds it).
     peak, pause_at, daily = run_settings.paper_initial_balance, None, {}
     for ts, eq in res.equity_curve:
         peak = max(peak, eq)
@@ -373,7 +374,9 @@ async def _backtest_window(settings, args) -> None:
            "by_month": {k: lab.group_stats(v) for k, v in sorted(lab._bucket(trades, lab._month).items())},
            "rejected": dict(sorted(res.skipped.items(), key=lambda kv: -kv[1])),
            "first_entry": _iso(entries[0]) if entries else None, "last_entry": _iso(entries[-1]) if entries else None,
-           "drawdown_pause": _iso(pause_at) if pause_at is not None else None, "equity_daily": daily,
+           "drawdown_pause": {"latched": res.skipped.get("paused", 0) > 0, "refused_signals": res.skipped.get("paused", 0),
+                              "hourly_crossing": _iso(pause_at) if pause_at is not None else None},
+           "equity_daily": daily,
            "seconds": round(time.time() - t0, 1), "git_commit": commit, "git_dirty": dirty,
            "seal": seal.status(start, end), "argv": list(getattr(args, "argv", None) or sys.argv),
            "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
@@ -394,9 +397,12 @@ async def _backtest_window(settings, args) -> None:
         for a, g in doc["by_alpha"].items():
             print(f"  alpha {a:18s} n={g['n']:5d} avgR={g['avg_r']:+.3f} PF={g['profit_factor']:5.2f} net={g['net']:+.1f}")
         print("  rejected / skipped entries: " + (", ".join(f"{k} {v}" for k, v in doc["rejected"].items()) or "none"))
-        if pause_at is not None:
-            print(f"  drawdown pause (-{risk['max_drawdown_halt_pct']}% from the peak) latched about {doc['drawdown_pause']} UTC; "
-                  f"it waits for an owner /resume, last entry {doc['last_entry']} UTC")
+        dp = doc["drawdown_pause"]
+        if dp["latched"]:
+            when = f"first seen on the hourly equity curve {dp['hourly_crossing']} UTC" if dp["hourly_crossing"] else \
+                "between two hourly equity samples"
+            print(f"  drawdown pause (-{risk['max_drawdown_halt_pct']}% from the peak) latched, {when}; it waits for an "
+                  f"owner /resume: {dp['refused_signals']} signals refused, last entry {doc['last_entry']} UTC")
     if args.out:
         out = os.path.abspath(args.out)
         os.makedirs(os.path.dirname(out), exist_ok=True)
