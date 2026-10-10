@@ -316,6 +316,9 @@ class _Run:
                 await checker.check_minute()
             pre_flatten = self._engine_stats(app)
             if cfg.final_flatten and not crashed:
+                # the flatten runs just after the window end (after midnight for a date-bounded window) and calls the
+                # engines directly: roll the reporting day first, as every app entry point that reaches an engine does
+                app._roll_day(now_ms())
                 for eng in list(app.engines.values()):
                     await eng.close_all("리플레이 종료(replay end)")
                 await asyncio.sleep(1)

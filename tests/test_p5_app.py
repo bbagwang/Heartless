@@ -253,3 +253,94 @@ async def _open_long(app, Ticker, Signal, Decision, EntryStyle, Regime, Side, Co
     await eng._open(d, _View(), Context(symbol="BTCUSDT", info=app.symbols["BTCUSDT"], ticker=tk, regime=Regime.RANGE,
                                         now=START), await eng.equity())
     assert eng.positions["BTCUSDT"].status.value == "OPEN"
+
+
+async def _long(eng, sym: str, px: float) -> None:
+    """Open a MARKET long on `eng` (its account a PaperAccount) at `px`, stop 2 % below."""
+    from heartless.core.models import Decision, EntryStyle, Regime, Side, Signal, Ticker
+    from heartless.strategy.base import Context
+    from heartless.util.timeutil import now_ms
+
+    tk = Ticker(sym, bid=px * 0.9999, ask=px * 1.0001, mark=px, last=px, ts=now_ms())
+    await eng.account.on_ticker(tk)
+    sig = Signal(alpha="htf_trend", symbol=sym, side=Side.LONG, confidence=0.7, reason="t", stop=px * 0.98,
+                 take_profit=None, tp1=None, entry_style=EntryStyle.MARKET, atr=px * 0.02, timeframe="1h")
+    d = Decision(symbol=sym, side=Side.LONG, score=0.7, confidence=0.7, alphas=["htf_trend"], primary=sig, reason="t",
+                 regime=Regime.RANGE)
+
+    class _View:
+        frames: dict = {}
+        price = px
+
+    await eng._open(d, _View(), Context(symbol=sym, info=eng.symbols[sym], ticker=tk, regime=Regime.RANGE,
+                                        now=now_ms()), await eng.equity())
+    assert eng.positions[sym].status.value == "OPEN"
+
+
+def _around_midnight(body) -> None:
+    """Run `body(app, loop)` on the replay's virtual clock from 23:59:56 of day 1 (UTC), with the parts of the
+    scheduler pass that would reach the network or start a research worker stubbed out."""
+    from synth import synth_symbols
+
+    from heartless.replay.clock import run_virtual
+
+    async def main(loop):
+        app = _app(TIMEZONE="UTC")
+        app.symbols = synth_symbols(["BTCUSDT", "ETHUSDT"])
+
+        async def nothing(*a, **k):
+            return None
+
+        app.refresh_universe = nothing
+        app.research.due = app.research.discovery_due = lambda now: False
+        await app._create_engines()
+        try:
+            await body(app, loop)
+        finally:
+            for t in app.tasks:
+                t.cancel()
+
+    run_virtual(main, START + MS_DAY - 4_000)
+
+
+def _today(app, engine: str) -> float:
+    return sum(t["pnl"] for t in app.store.load_trades(engine=engine, since=START + MS_DAY))
+
+
+def test_a_trade_the_scheduler_books_after_midnight_counts_for_the_new_day():
+    """The scheduler rolled the day late in its pass, after the paper reconcile (which books trades): a position
+    finalized there in the first pass after midnight went into the old day's counter and was wiped."""
+    async def body(app, loop):
+        paper = app.engines["paper"]
+        await _long(paper, "BTCUSDT", 100.0)
+        app.paper_accounts["paper"].positions["BTCUSDT"].qty = 0.0  # gone from the simulator: the reconcile books it
+        app.tasks.append(asyncio.create_task(app._scheduler()))
+        await loop.sleep_until_ms(START + MS_DAY + 2_000)  # the first pass runs at 00:00:01
+        assert "BTCUSDT" not in paper.positions
+        assert _today(app, "paper") < 0 and paper.stats.realized_today == _today(app, "paper")
+
+    _around_midnight(body)
+
+
+def test_a_mode_switch_flatten_after_midnight_counts_for_the_new_day():
+    """/mode paper flattens the live engine directly (not through close_all): right after midnight its closes went into
+    the old day's counter, which the next scheduler pass then wiped."""
+    from heartless.exchange.paper import PaperAccount
+    from heartless.execution.engine import TradingEngine
+
+    async def body(app, loop):
+        acc = PaperAccount("live", 10_000.0)
+        acc.set_symbols(app.symbols)
+        live = TradingEngine("live", acc, app.params, app.s, app.symbols, app.store, app.bus, app.bandit, notify=True)
+        await live.start()
+        app.engines["live"], app.mode = live, "live"
+        await _long(live, "ETHUSDT", 200.0)
+        await live.close_position("ETHUSDT", "t")  # a trade on day 1
+        await _long(live, "ETHUSDT", 200.0)
+        app.tasks.append(asyncio.create_task(app._scheduler()))  # its first pass (00:00:01) rolls the day
+        await loop.sleep_until_ms(START + MS_DAY + 500)
+        assert await app.set_mode("paper") == "페이퍼 모드로 전환했습니다"  # flattens at 00:00:00.5
+        assert _today(app, "live") < 0 and live.stats.realized_today == _today(app, "live")
+        assert live.stats.trades_today == 1
+
+    _around_midnight(body)

@@ -752,6 +752,7 @@ class Heartless:
         while True:
             now = now_ms()
             try:
+                self._roll_day(now)  # first: the reconcile and challenger checks below can book trades
                 if now - self._last_equity_tick >= 30_000:
                     self._last_equity_tick = now
                     for eng in list(self.engines.values()):
@@ -782,7 +783,6 @@ class Heartless:
                 if now >= self._next_report_ts:
                     self._next_report_ts = next_local_time(self.s.daily_report_hour, 0, self.s.timezone, now)
                     asyncio.create_task(self.daily_report())
-                self._roll_day(now)
                 if now - self._last_prune >= 6 * MS_HOUR:
                     self._last_prune = now
                     self.store.prune_candles(now - (max(self.s.history_days, self.s.data_retention_days) + 5) * MS_DAY)
@@ -1008,6 +1008,7 @@ class Heartless:
         eng = self.engines.get("live")
         n = 0
         if eng:
+            self._roll_day(now_ms())  # the flatten below reaches the engine directly, not through close_all
             eng.entries_enabled = False
             err = ""
             remaining: set[str] = set()

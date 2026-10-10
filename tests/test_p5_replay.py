@@ -269,6 +269,37 @@ def test_a_work_dir_holding_the_source_is_refused(tmp_path):
     assert (tmp_path / "src.db").exists()
 
 
+def test_a_window_ending_at_midnight_flattens_into_the_new_day(tmp_path, small_frames):
+    """The final flatten runs just after the window end, i.e. after midnight for a date-bounded window, and closed the
+    positions through the engines directly, before any tick or scheduler pass had rolled the day: their close messages
+    reported the previous day's counter as "today" and a consistent bot failed pnl_reports."""
+    from heartless.core.models import Decision, EntryStyle, Regime, Side, Signal
+    from heartless.util.timeutil import now_ms
+
+    async def close_one_keep_one(app):
+        eng = app.engines["paper"]
+        for sym in SYMS:
+            ctx = app._context(sym, now_ms())
+            px = ctx.ticker.mark
+            sig = Signal(alpha="htf_trend", symbol=sym, side=Side.LONG, confidence=0.7, reason="t", stop=px * 0.97,
+                         take_profit=None, tp1=None, entry_style=EntryStyle.MARKET, atr=px * 0.01, timeframe="1h")
+            await eng._open(Decision(symbol=sym, side=Side.LONG, score=0.7, confidence=0.7, alphas=["htf_trend"],
+                                     primary=sig, reason="t", regime=Regime.RANGE), app.views[sym], ctx,
+                            await eng.equity())
+        assert all(eng.positions[s].status.value == "OPEN" for s in SYMS)
+        await app.close_symbol(SYMS[0])  # one trade on the last day; the other position is still open at the end
+
+    quiet = StrategyParams.default()
+    quiet.enabled = {a: False for a in quiet.enabled}  # no organic entries: only the two above
+    start = START + 23 * MS_HOUR
+    s = run_replay(ReplayConfig(source_db=build_source(tmp_path / "src.db", 2), start_ms=start,
+                                end_ms=START + MS_DAY - 1, work_dir=str(tmp_path / "bot"), seed_days=SEED_DAYS,
+                                settings=NO_LEARNING, commands=[], params=quiet.to_dict(),
+                                inject=[(start + 30 * MS_MINUTE, close_one_keep_one)]))
+    assert s["engines"]["paper"]["exit_reasons"] == {"수동 청산(owner)": 1, "리플레이 종료(replay end)": 1}
+    assert s["passed"] and s["invariants"]["checks"]["pnl_reports"]["runs"] == 2, s["report"]
+
+
 def test_output_files_may_go_to_new_folders(tmp_path, small_frames):
     """The messages / trades dumps are written when the run is over: a missing folder raised then and lost the run."""
     out = tmp_path / "runs" / "a"
