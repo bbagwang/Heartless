@@ -32,6 +32,7 @@ include = ["heartless*"]
 
 [tool.setuptools.package-data]
 "heartless.web" = ["static/*"]
+"heartless.strategy" = ["evidence.json"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

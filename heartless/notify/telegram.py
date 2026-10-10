@@ -66,7 +66,8 @@ class TelegramBot:
         bus = app.bus
         for topic in ("position_opened", "position_closed", "partial_tp", "entry_cancelled", "risk_event", "error",
                       "research_started", "research_done", "promotion", "graduation_ready", "daily_report", "mode_changed",
-                      "control", "started", "universe", "advisor_review", "reconcile", "challenger_retired"):
+                      "control", "started", "universe", "advisor_review", "reconcile", "challenger_retired",
+                      "kill_switch"):
             bus.subscribe(topic, self._make_handler(topic))
 
     # --- transport -----------------------------------------------------------------------------
@@ -216,7 +217,8 @@ class TelegramBot:
             period = args[0] if args and args[0] in ("today", "week", "month", "all") else "today"
             self.send(F.fmt_pnl(app.pnl_report(period), tz))
         elif cmd == "/alphas":
-            self.send(F.fmt_alphas(app.bandit.snapshot(), app.params))
+            ks = app.killswitch.champion_state() if getattr(app, "killswitch", None) is not None else None
+            self.send(F.fmt_alphas(app.bandit.snapshot(), app.params, ks))
         elif cmd == "/research":
             self.send(F.fmt_research(app.research.last_summary, tz) + "\n\n" + F.fmt_discovery(app.store.get("discovery.last"), tz))
         elif cmd == "/optimize":
@@ -375,7 +377,7 @@ class TelegramBot:
             self.send(f"🔬 {F.esc(p.get('message', ''))}")
         elif topic == "research_done":
             self.send(f"🔬 <b>리서치 완료</b> ({p.get('seconds') or 0:.0f}s)\n{F.esc(p.get('message', ''))}")
-        elif topic == "promotion":
+        elif topic in ("promotion", "kill_switch"):
             self.send(F.esc(p.get("message", "")))
         elif topic == "graduation_ready":
             self.send(f"🎓 <b>페이퍼 졸업 기준 충족</b>\n14일: {p['n']}건, PF {p['profit_factor']:.2f}, MDD {p['max_dd_pct']:.1f}%, "
@@ -404,13 +406,21 @@ class TelegramBot:
             return "활성 챌린저가 없습니다 (다음 리서치 사이클에서 생성)"
         lines = ["<b>챌린저</b>"]
         from heartless.execution.stats import summarize
+        from heartless.learning.research import describe_decision
 
         champ = summarize(app.store.load_trades(engine="paper", since=min(c.started for c in app.challengers)))
         lines.append(f"챔피언(paper) n={champ['n']} avgR {champ['avg_r']:+.2f} net {champ['net']:+.1f}")
         for c in app.challengers:
             st = summarize(app.store.load_trades(engine=c.name, since=c.started))
             lines.append(f"<code>{F.esc(c.name)}</code> [{F.esc(c.source)}] {F.esc(c.params.version)} · 시작 {fmt_ts(c.started, self.s.timezone, '%m-%d %H:%M')}\n"
-                         f"  n={st['n']}/{self.s.promotion_min_trades} avgR {st['avg_r']:+.2f} PF {min(st['profit_factor'], 99):.2f} net {st['net']:+.1f}")
+                         f"  n={st['n']} avgR {st['avg_r']:+.2f} PF {min(st['profit_factor'], 99):.2f} net {st['net']:+.1f}")
+            d = app.research.last_decisions.get(c.name)
+            if d:
+                lines.append(f"  판정 {F.esc(d.get('verdict'))} ({F.esc(d.get('rule'))}, "
+                             f"{fmt_ts(d.get('at'), self.s.timezone, '%m-%d %H:%M')})\n  "
+                             + F.esc(describe_decision(d)).replace("\n", "\n  "))
+            else:
+                lines.append(f"  판정 대기 (매시간 평가, 슬롯 보호 {app.research.trial_days(c)}일)")
         return "\n".join(lines)
 
     def _params_text(self, alpha: str | None) -> str:

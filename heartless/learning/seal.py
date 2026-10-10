@@ -60,10 +60,13 @@ def check_window(start_ms: int, end_ms: int, unseal=()) -> None:
     hit = overlapping(int(start_ms), int(end_ms), unseal)
     if hit:
         spans = ", ".join(f"{n} ({_iso(SEALED[n][0])} .. {_iso(SEALED[n][1] - 1)} UTC)" for n in hit)
+        # the wording must hold for every caller: only `heartless lab` and `heartless discover` take --unseal (the
+        # backtest / replay commands and the automated loops deliberately have no way to open a sealed period)
         raise SealedError(f"evaluation window {_iso(int(start_ms))} .. {_iso(int(end_ms))} UTC overlaps sealed period "
                           f"{spans}. It is reserved for the one-time final exam (docs/ROADMAP.md section 1). Pick a "
-                          f"window outside it, or open it deliberately with `--unseal {hit[0]}` (recorded in "
-                          f"docs/results/seal_ledger.jsonl).")
+                          f"window outside it. Only `heartless lab` and `heartless discover` can open it, deliberately, "
+                          f"with `--unseal {hit[0]}` (recorded in docs/results/seal_ledger.jsonl); other commands "
+                          f"have no unseal option.")
 
 
 def clip_window(start_ms: int, end_ms: int, unseal=()) -> tuple[int, int] | None:

@@ -62,10 +62,12 @@ class Settings(BaseSettings):
 
     # --- learning ----------------------------------------------------------------------------
     research_interval_minutes: int = Field(default=240, alias="RESEARCH_INTERVAL_MINUTES")
-    research_lookback_days: int = Field(default=30, alias="RESEARCH_LOOKBACK_DAYS")
+    # 120 days (was 30): a 30-day window holds too few independent days for 1h alphas (docs/SELF_IMPROVEMENT.md)
+    research_lookback_days: int = Field(default=120, alias="RESEARCH_LOOKBACK_DAYS")
     research_folds: int = Field(default=3, alias="RESEARCH_FOLDS")  # walk-forward confirmation windows
     # history kept in the database for research / discovery (live feature views only use HISTORY_DAYS)
-    data_retention_days: int = Field(default=90, alias="DATA_RETENTION_DAYS")
+    # (candles, funding, metrics and equity rows; 180 days (was 90) keep the 120-day research window plus margin)
+    data_retention_days: int = Field(default=180, alias="DATA_RETENTION_DAYS")
     discovery_interval_hours: int = Field(default=24, alias="DISCOVERY_INTERVAL_HOURS")
     discovery_min_days: int = Field(default=45, alias="DISCOVERY_MIN_DAYS")
     # meta-labeling: learn per alpha which contexts its signals win in and veto/scale accordingly (off until validated)
@@ -78,6 +80,23 @@ class Settings(BaseSettings):
     graduation_min_profit_factor: float = Field(default=1.25, alias="GRADUATION_MIN_PF")
     graduation_max_drawdown_pct: float = Field(default=8.0, alias="GRADUATION_MAX_DD_PCT")
     daily_report_hour: int = Field(default=9, alias="DAILY_REPORT_HOUR")  # local hour (timezone above)
+
+    # --- self-improvement hardening (ROADMAP P4, docs/SELF_IMPROVEMENT.md) ----------------------
+    # promotion / retirement are judged on day-clustered statistics: a challenger needs PROMOTION_MIN_TRADES closed
+    # trades on at least PROMOTION_MIN_DAYS distinct UTC exit days (the absolute-path bar constants live in
+    # heartless/learning/research.py next to the rule they belong to)
+    promotion_min_days: int = Field(default=14, alias="PROMOTION_MIN_DAYS")
+    # per-alpha kill switch on live (paper or real) closed trades: one-sided lower CUSUM of (R - expected) with slack k
+    # crossing -h, or the sum of the alpha's last `window` trades below window_r. Disabling never needs a challenger.
+    kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
+    kill_switch_k: float = Field(default=0.25, alias="KILL_SWITCH_K")
+    kill_switch_h: float = Field(default=5.0, alias="KILL_SWITCH_H")
+    kill_switch_window: int = Field(default=30, alias="KILL_SWITCH_WINDOW")
+    kill_switch_window_r: float = Field(default=-8.0, alias="KILL_SWITCH_WINDOW_R")
+    # execution-quality monitor: rolling window of fills per engine, and the taker-fill count from which the reports
+    # suggest raising BACKTEST_SLIPPAGE_BPS (when realized slippage exceeds twice the model; never changed automatically)
+    exec_quality_window: int = Field(default=200, alias="EXEC_QUALITY_WINDOW")
+    exec_quality_min_fills: int = Field(default=50, alias="EXEC_QUALITY_MIN_FILLS")
 
     @field_validator("telegram_owner_id", mode="before")
     @classmethod

@@ -3,42 +3,148 @@
 * Every `research_interval_minutes` a worker process runs walk-forward optimisation per alpha.
 * Improvements become *challengers*: full parameter sets traded by dedicated paper engines on the
   live data feed, side by side with the champion.
-* A challenger that beats the champion on real-time paper results (enough trades, better
-  objective, no worse drawdown) is promoted; the live engine hot-swaps to the new champion.
+* Challengers are judged on day-clustered statistics (trades clustered by UTC exit day). While the champion trades
+  enough to compare with, a challenger must beat it on the paired daily-R difference (relative path); while it does
+  not (e.g. no alpha enabled) a challenger must clear an absolute bar on its own record (absolute path), a stricter
+  one when it switches on an alpha that failed out of sample (evidence registry). The live engine hot-swaps to a
+  promoted champion. Retirement uses the same statistics.
+* A per-alpha kill switch watches every engine's live (paper or real) closed trades and switches a losing alpha off
+  in the champion at once (or retires a challenger); switching back on only happens through a promotion.
 * In paper mode the champion's live-feed record is also checked against the graduation criteria,
   and the owner is offered a one-tap "go live" on Telegram.
+
+The exact rules are in docs/SELF_IMPROVEMENT.md.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import multiprocessing
+import os
+import threading
+import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 
-from heartless.execution.stats import objective, summarize
+from heartless.execution.stats import cusum_lower, paired_daily_diff, r_stats, summarize
 from heartless.learning import seal
 from heartless.learning.optimizer import run_research_cycle
+from heartless.strategy import evidence
 from heartless.strategy.params import StrategyParams
 from heartless.util.ids import short_id
 from heartless.util.timeutil import MS_DAY, now_ms
 
 log = logging.getLogger(__name__)
 
+# --- promotion / retirement rules (ROADMAP P4; docs/SELF_IMPROVEMENT.md) ------------------------------------------
+# Relative path (the champion closed >= PROMOTION_MIN_TRADES trades since the challenger started): the challenger needs
+# PROMOTION_MIN_TRADES trades on >= PROMOTION_MIN_DAYS exit days, a paired daily-R difference vs the champion with
+# t >= REL_MIN_PAIRED_T, a higher mean R and an R drawdown <= REL_DD_MULT x the champion's + REL_DD_SLACK_R.
+REL_MIN_PAIRED_T = 1.0
+REL_DD_MULT = 1.2
+REL_DD_SLACK_R = 2.0
+# Absolute path (the champion closed fewer trades than that, e.g. no alpha enabled): the challenger's own record must
+# show max(PROMOTION_MIN_TRADES, ABS_MIN_TRADES) trades on >= PROMOTION_MIN_DAYS days, mean R > 0, day-clustered
+# t >= ABS_MIN_T_DAY, PF (in R) >= ABS_MIN_PF_R and an R drawdown <= ABS_MAX_DD_R.
+ABS_MIN_TRADES = 30
+ABS_MIN_T_DAY = 1.5
+ABS_MIN_PF_R = 1.15
+ABS_MAX_DD_R = 10.0
+# ... and when it switches on (beyond the champion) an alpha the evidence registry marks 'failed' out of sample, the
+# paper evidence has to be stronger: FAILED_MIN_DAYS exit days and t >= FAILED_MIN_T_DAY
+FAILED_MIN_DAYS = 30
+FAILED_MIN_T_DAY = 2.0
+# Retirement: the early drop of a clearly bleeding challenger, else after 2x the path's minimum trades and days when
+# the path's statistic (absolute: day-clustered t; relative: paired-difference t) is <= RETIRE_T
+EARLY_DROP_TRADES = 15
+EARLY_DROP_AVG_R = -0.5
+RETIRE_T = -1.0
 
-def _max_dd_r(trades: list[dict]) -> float:
-    """Max drawdown of cumulative R multiples ordered by exit time.
 
-    Scale-free, unlike the USDT `max_dd` from summarize(): challenger paper accounts restart at
-    paper_initial_balance while the champion wallet carries its full history, and position sizes scale
-    with equity, so absolute drawdowns of the two accounts are not comparable.
-    """
-    cum = peak = dd = 0.0
-    for t in sorted(trades, key=lambda t: t.get("exit_time") or 0):
-        cum += float(t.get("r_multiple") or 0.0)
-        peak = max(peak, cum)
-        dd = max(dd, peak - cum)
-    return dd
+def promotion_bar(settings, path: str, failed: list[str] | tuple = ()) -> dict:
+    """The thresholds a challenger must meet on `path` ('relative' | 'absolute'); `failed` = the alphas it enables
+    beyond the champion that failed out of sample (absolute path only)."""
+    if path == "relative":
+        return {"min_trades": settings.promotion_min_trades, "min_days": settings.promotion_min_days,
+                "min_paired_t": REL_MIN_PAIRED_T, "dd_mult": REL_DD_MULT, "dd_slack_r": REL_DD_SLACK_R}
+    bar = {"min_trades": max(settings.promotion_min_trades, ABS_MIN_TRADES), "min_days": settings.promotion_min_days,
+           "min_avg_r": 0.0, "min_t_day": ABS_MIN_T_DAY, "min_pf_r": ABS_MIN_PF_R, "max_dd_r": ABS_MAX_DD_R}
+    if failed:
+        bar.update(min_days=max(FAILED_MIN_DAYS, settings.promotion_min_days), min_t_day=FAILED_MIN_T_DAY,
+                   failed_alphas=list(failed))
+    return bar
+
+
+def _round(d: dict) -> dict:
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, float):
+            out[k] = 99.0 if v == float("inf") else round(v, 4)
+        else:
+            out[k] = v
+    return out
+
+
+def judge_challenger(ch_trades: list[dict], champ_trades: list[dict], settings, start_ms: int, now: int,
+                     new_alphas: list[str] | tuple = ()) -> dict:
+    """Promotion / retirement verdict for one challenger over [start_ms, now] (both records since it started).
+
+    Returns the decision with every input, threshold and check, so it can be stored and shown as is: `verdict` is
+    'promote' | 'retire' | 'hold', `path` 'relative' | 'absolute' (docs/SELF_IMPROVEMENT.md)."""
+    ch, champ = r_stats(ch_trades), r_stats(champ_trades)
+    path = "relative" if champ["n"] >= settings.promotion_min_trades else "absolute"
+    failed = evidence.failed(new_alphas) if path == "absolute" else []
+    bar = promotion_bar(settings, path, failed)
+    d: dict = {"path": path, "since": int(start_ms), "at": int(now), "challenger": _round(ch), "champion": _round(champ),
+               "new_alphas": list(new_alphas), "failed_alphas": failed, "bar": bar}
+    checks: dict[str, bool] = {f"n >= {bar['min_trades']}": ch["n"] >= bar["min_trades"],
+                               f"days >= {bar['min_days']}": ch["days"] >= bar["min_days"]}
+    if path == "relative":
+        pdiff = paired_daily_diff(ch_trades, champ_trades, start_ms, now)
+        d["paired"] = _round({"days": pdiff["days"], "mean": pdiff["mean"], "t": pdiff["t"]})
+        dd_cap = REL_DD_MULT * champ["max_dd_r"] + REL_DD_SLACK_R
+        checks[f"paired t >= {REL_MIN_PAIRED_T:g}"] = pdiff["t"] >= REL_MIN_PAIRED_T
+        checks["avgR > champion"] = ch["avg_r"] > champ["avg_r"]
+        checks[f"DD <= {dd_cap:.2f}R"] = ch["max_dd_r"] <= dd_cap + 1e-9
+        retire_stat = pdiff["t"]
+    else:
+        checks["avgR > 0"] = ch["avg_r"] > 0
+        checks[f"t_day >= {bar['min_t_day']:g}"] = ch["t_day"] >= bar["min_t_day"]
+        checks[f"PF >= {ABS_MIN_PF_R:g}"] = ch["pf_r"] >= ABS_MIN_PF_R
+        checks[f"DD <= {ABS_MAX_DD_R:g}R"] = ch["max_dd_r"] <= ABS_MAX_DD_R + 1e-9
+        retire_stat = ch["t_day"]
+    d["checks"] = checks
+    d["retire_stat"] = round(retire_stat, 4)
+    if ch["n"] >= EARLY_DROP_TRADES and ch["avg_r"] < EARLY_DROP_AVG_R:
+        d["verdict"], d["rule"] = "retire", f"early drop: avgR < {EARLY_DROP_AVG_R:g} after >= {EARLY_DROP_TRADES} trades"
+    elif all(checks.values()):
+        d["verdict"], d["rule"] = "promote", f"{path} bar met"
+    elif (ch["n"] >= 2 * bar["min_trades"] and ch["days"] >= 2 * bar["min_days"] and retire_stat <= RETIRE_T):
+        what = "paired t" if path == "relative" else "t_day"
+        d["verdict"], d["rule"] = "retire", f"{what} <= {RETIRE_T:g} after 2x the minimum trades and days"
+    else:
+        d["verdict"], d["rule"] = "hold", "bar not met yet"
+    return d
+
+
+def describe_decision(d: dict) -> str:
+    """Korean one-to-three-line rendering of a decision's inputs for Telegram, logs and version notes."""
+    ch, champ, bar = d.get("challenger", {}), d.get("champion", {}), d.get("bar", {})
+    rec = (f"챌린저 n={ch.get('n', 0)} (청산일 {ch.get('days', 0)}일), 평균 {ch.get('avg_r', 0):+.3f}R, "
+           f"t_day {ch.get('t_day', 0):+.2f}, PF {min(ch.get('pf_r', 0), 99):.2f}, 낙폭 {ch.get('max_dd_r', 0):.1f}R")
+    if d.get("path") == "relative":
+        pr = d.get("paired", {})
+        head = (f"상대 경로: 일별 차이 t {pr.get('t', 0):+.2f} ({pr.get('days', 0)}일, 평균 {pr.get('mean', 0):+.3f}R/일) · "
+                f"챔피언 n={champ.get('n', 0)} 평균 {champ.get('avg_r', 0):+.3f}R 낙폭 {champ.get('max_dd_r', 0):.1f}R")
+        need = (f"기준 n≥{bar.get('min_trades')}·{bar.get('min_days')}일, 차이 t≥{bar.get('min_paired_t', 0):g}, "
+                f"평균R>챔피언, 낙폭≤{bar.get('dd_mult', 0):g}×챔피언+{bar.get('dd_slack_r', 0):g}R")
+    else:
+        head = f"절대 경로 (챔피언 거래 {champ.get('n', 0)}건 < 비교 최소치)"
+        need = (f"기준 n≥{bar.get('min_trades')}·{bar.get('min_days')}일, 평균R>0, t_day≥{bar.get('min_t_day', 0):g}, "
+                f"PF≥{bar.get('min_pf_r', 0):g}, 낙폭≤{bar.get('max_dd_r', 0):g}R")
+        if d.get("failed_alphas"):
+            need += f" (OOS 탈락 알파 {', '.join(d['failed_alphas'])}: 강화 기준)"
+    return f"{head}\n{rec}\n{need}"
 
 
 @dataclass
@@ -63,6 +169,9 @@ class ResearchManager:
         self.history: list[dict] = []
         self.research_failures: int = 0
         self.last_error: str = ""
+        # slot name -> the latest promotion / retirement decision (inputs, thresholds, verdict) for /challengers
+        self.last_decisions: dict[str, dict] = {}
+        self.stopped = False  # set by shutdown(): a cycle whose worker was terminated ends quietly
 
     # --- champion persistence ------------------------------------------------------------------
     def load_champion(self) -> StrategyParams:
@@ -114,7 +223,7 @@ class ResearchManager:
         self.store.set("research.last_cycle", now)
         try:
             if self.pool is None:
-                self.pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+                self.pool = _new_pool()
             loop = asyncio.get_running_loop()
             settings_dict = {k: v for k, v in self.s.model_dump(by_alias=True).items()
                              if k not in ("BINANCE_API_KEY", "BINANCE_API_SECRET", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY")}
@@ -126,15 +235,13 @@ class ResearchManager:
                                                 self.s.research_candidates, now % 100_000, None,
                                                 self.store.get("advisor.seeds", {}) or {}, self.s.research_folds)
         except Exception as e:  # noqa: BLE001
+            if self.stopped:  # the worker was terminated by shutdown(): not a failure
+                self.running = False
+                return None
             log.exception("research cycle failed")
             # A crashed worker (OOM kill, os._exit) leaves the executor permanently broken: every later
             # submit() raises BrokenProcessPool immediately. Discard it so the next cycle recreates one.
-            if self.pool is not None:
-                try:
-                    self.pool.shutdown(wait=False, cancel_futures=True)
-                except Exception:  # noqa: BLE001
-                    log.debug("research pool shutdown after failure raised", exc_info=True)
-                self.pool = None
+            self._discard_pool()
             self.research_failures += 1
             self.last_error = f"{now}: {e}"
             await self.app.emit("error", {"message": f"리서치 사이클 실패: {e}"})
@@ -207,7 +314,7 @@ class ResearchManager:
         for _, alpha, challenger, text in proposals[: self.s.challengers]:
             slot = await self.app.install_challenger(challenger, source=alpha)
             if slot:
-                lines.append(f"• {text} → {slot.name}")
+                lines.append(f"• {text} → {slot.name} ({self.bar_note(slot)})")
         summary = {a: {"best_score": round(r["best"]["score"], 2), "base_score": round(r["base"]["score"], 2),
                        "test_n": r["best"]["test"].get("n", 0), "test_avg_r": r["best"]["test"].get("avg_r", 0.0),
                        "folds_pos": r["best"].get("folds_pos", 0), "enabled": r.get("enabled", True)}
@@ -247,19 +354,17 @@ class ResearchManager:
         self.running = True
         try:
             if self.pool is None:
-                self.pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+                self.pool = _new_pool()
             loop = asyncio.get_running_loop()
             await self.app.emit("research_started", {"message": f"알파 발굴 시작 ({len(syms)}종목, {days:.0f}일 이력)"})
             result = await loop.run_in_executor(self.pool, _discovery_worker, str(self.s.db_path), syms, (start, split - 1),
                                                 (split, last))
         except Exception as e:  # noqa: BLE001
+            if self.stopped:
+                self.running = False
+                return None
             log.exception("discovery cycle failed")
-            if self.pool is not None:
-                try:
-                    self.pool.shutdown(wait=False, cancel_futures=True)
-                except Exception:  # noqa: BLE001
-                    pass
-                self.pool = None
+            self._discard_pool()
             self.running = False
             await self.app.emit("error", {"message": f"알파 발굴 실패: {e}"})
             return None
@@ -276,7 +381,8 @@ class ResearchManager:
                 ch.alphas.setdefault("discovered", {})["rules"] = rules
                 ch.enabled["discovered"] = True
                 slot = await self.app.install_challenger(ch, source="discovered")
-                msg = f"알파 발굴: {result['tested']}개 규칙 검사, {len(fresh)}개 신규 규칙이 검증 통과 → 챌린저 {slot.name if slot else '-'}"
+                msg = (f"알파 발굴: {result['tested']}개 규칙 검사, {len(fresh)}개 신규 규칙이 검증 통과 → 챌린저 "
+                       f"{slot.name if slot else '-'}" + (f" ({self.bar_note(slot)})" if slot else ""))
             else:
                 msg = f"알파 발굴: 검증 통과 규칙이 이미 배포된 규칙과 동일 ({len(passed)}개)"
         else:
@@ -285,35 +391,61 @@ class ResearchManager:
         return result
 
     # --- promotion -----------------------------------------------------------------------------
+    def new_alphas(self, params: StrategyParams) -> list[str]:
+        """Alphas `params` switches on that the current champion has off (what a promotion would switch on)."""
+        champ = self.app.params.enabled
+        return [a for a, on in params.enabled.items() if on and not champ.get(a, False) and a in params.alphas]
+
+    def bar_note(self, slot: ChallengerSlot) -> str:
+        """Short Korean note of the promotion bar a freshly installed challenger faces (shown when it is installed).
+        The path is decided later by the champion's trades over the comparison period; its trade count over the last
+        PROMOTION_MIN_DAYS days is the forecast."""
+        champ_n = len(self.store.load_trades(engine="paper", since=now_ms() - self.s.promotion_min_days * MS_DAY))
+        if champ_n >= self.s.promotion_min_trades:
+            return f"상대 경로: 챔피언 대비 일별 차이 t≥{REL_MIN_PAIRED_T:g}, {self.s.promotion_min_days}일 이상"
+        failed = evidence.failed(self.new_alphas(slot.params))
+        bar = promotion_bar(self.s, "absolute", failed)
+        note = (f"승격 기준: 절대 경로 n≥{bar['min_trades']}·{bar['min_days']}일, t_day≥{bar['min_t_day']:g}, "
+                f"PF≥{bar['min_pf_r']:g}, 낙폭≤{bar['max_dd_r']:g}R")
+        return note + (f"; OOS 탈락 알파 {', '.join(failed)} 강화 기준" if failed else "")
+
+    def trial_days(self, slot: ChallengerSlot) -> int:
+        """Exit days a challenger needs before it can be promoted: PROMOTION_MIN_DAYS, or FAILED_MIN_DAYS when it
+        switches on an alpha that failed out of sample. Its slot is protected from replacement until then."""
+        if evidence.failed(self.new_alphas(slot.params)):
+            return max(FAILED_MIN_DAYS, self.s.promotion_min_days)
+        return self.s.promotion_min_days
+
     async def evaluate_challengers(self, force: bool = False) -> None:
+        """Hourly: judge every challenger on its record since it started (judge_challenger) and act on the verdict.
+        Every decision is logged; a promotion or retirement stores its inputs with the parameter versions involved and
+        shows them in the Telegram message."""
         now = now_ms()
         if not force and now - self.last_promotion_check < 60 * 60_000:
             return
         self.last_promotion_check = now
-        champ_engine = self.app.engines.get("paper")
-        if champ_engine is None:
+        if self.app.engines.get("paper") is None:
             return
         for slot in list(self.app.challengers):
-            eng = self.app.engines.get(slot.name)
-            if eng is None:
+            if self.app.engines.get(slot.name) is None:
                 continue
             ch_trades = self.store.load_trades(engine=slot.name, since=slot.started)
             champ_trades = self.store.load_trades(engine="paper", since=slot.started)
-            if len(ch_trades) < self.s.promotion_min_trades or len(champ_trades) < max(10, self.s.promotion_min_trades // 2):
-                # retire a challenger that is clearly bleeding before it reaches the trade count
-                if len(ch_trades) >= 15 and summarize(ch_trades)["avg_r"] < -0.5:
-                    await self.app.retire_challenger(slot, reason="조기 탈락 (avgR < -0.5)")
-                continue
-            st_ch, st_champ = summarize(ch_trades), summarize(champ_trades)
-            # drawdown compared in R units: the two paper accounts have different equity bases
-            st_ch["max_dd_r"], st_champ["max_dd_r"] = _max_dd_r(ch_trades), _max_dd_r(champ_trades)
-            o_ch, o_champ = objective(st_ch, 10), objective(st_champ, 10)
-            better = (o_ch > o_champ + 0.5 and st_ch["avg_r"] > st_champ["avg_r"] + 0.05
-                      and st_ch["max_dd_r"] <= st_champ["max_dd_r"] * 1.2 + 1e-9 and st_ch["net"] > 0)
-            if better:
-                await self.app.promote(slot, st_ch, st_champ)
-            elif len(ch_trades) >= self.s.promotion_min_trades * 2 and o_ch < o_champ:
-                await self.app.retire_challenger(slot, reason="챔피언 대비 열위 (충분한 표본)")
+            d = judge_challenger(ch_trades, champ_trades, self.s, slot.started, now, self.new_alphas(slot.params))
+            d.update(slot=slot.name, version=slot.params.version, source=slot.source,
+                     champion_version=self.app.params.version)
+            self.last_decisions[slot.name] = d
+            log.info("challenger %s (%s) %s path: %s (%s) n=%d days=%d avgR %+.3f t_day %+.2f%s", slot.name,
+                     slot.params.version, d["path"], d["verdict"], d["rule"], d["challenger"]["n"],
+                     d["challenger"]["days"], d["challenger"]["avg_r"], d["challenger"]["t_day"],
+                     f" paired t {d['paired']['t']:+.2f}" if "paired" in d else "")
+            if d["verdict"] == "promote":
+                await self.app.promote(slot, d)
+                break  # the other challengers are judged against the new champion at the next check
+            if d["verdict"] == "retire":
+                label = "조기 탈락 (avgR < -0.5)" if d["rule"].startswith("early") else (
+                    "챔피언 대비 열위 (일별 차이 t ≤ -1)" if d["path"] == "relative" else "절대 기준 열위 (t_day ≤ -1)")
+                await self.app.retire_challenger(slot, reason=f"{label}\n{describe_decision(d)}", decision=d)
 
     # --- graduation (paper -> live offer) -------------------------------------------------------
     def graduation_status(self) -> dict:
@@ -346,10 +478,221 @@ class ResearchManager:
             self.store.set("research.graduation_day", day)
             await self.app.emit("graduation_ready", gs)
 
+    def _discard_pool(self, terminate: bool = False) -> None:
+        pool, self.pool = self.pool, None
+        if pool is None:
+            return
+        # the worker processes, read before shutdown() forgets them (a private attribute of the executor, guarded)
+        procs = list((getattr(pool, "_processes", None) or {}).values()) if terminate else []
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # noqa: BLE001
+            log.debug("research pool shutdown raised", exc_info=True)
+        for p in procs:
+            try:
+                if p.is_alive():
+                    p.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        deadline = time.monotonic() + 5.0
+        for p in procs:
+            try:
+                p.join(timeout=max(0.0, deadline - time.monotonic()))
+                if p.is_alive():
+                    p.kill()
+                    p.join(timeout=2.0)
+            except Exception:  # noqa: BLE001
+                pass
+
     def shutdown(self) -> None:
-        if self.pool is not None:
-            self.pool.shutdown(wait=False, cancel_futures=True)
-            self.pool = None
+        """Stop the research / discovery worker for good. shutdown(wait=False) alone leaves a worker that is busy with
+        a cycle running for minutes after the bot stopped (an orphan after SIGTERM, and interpreter exit then waits for
+        it): it is terminated (killed if it does not exit within 5 s)."""
+        self.stopped = True
+        self._discard_pool(terminate=True)
+
+
+CHAMPION_ENGINES = ("paper", "live")  # engines that trade the champion's parameters
+
+
+class AlphaKillSwitch:
+    """Per-alpha guard on live (paper or real) results: switches a losing alpha off at once (ROADMAP P4).
+
+    For every engine (the paper champion, the live engine, each challenger) and every alpha it has switched on, the
+    alpha's closed trades since its epoch are tracked: a one-sided lower CUSUM of (R - expected) with slack
+    KILL_SWITCH_K, expected = the evidence-registry mean R if the alpha PASSED out of sample else 0, and the sum of its
+    last KILL_SWITCH_WINDOW trades (all of them while fewer). A CUSUM at or below -KILL_SWITCH_H, or a window sum below
+    KILL_SWITCH_WINDOW_R, trips it:
+
+    * a champion engine (paper / live) -> a new champion version with the alpha off, a Telegram alert, a log line.
+      Switching off is the safe direction, so it needs no challenger; switching back on only happens through a
+      promotion;
+    * a challenger -> it is retired.
+
+    The state is recomputed from the stored trades on every check, so a restart resumes exactly where the process
+    stopped. The champion's epoch of an alpha (kv `killswitch.epoch`) is when it was last switched on or re-tuned in
+    the champion (its live record before that judged other settings); a challenger's epoch is its start."""
+
+    EPOCH_KEY = "killswitch.epoch"
+
+    def __init__(self, app):
+        self.app = app
+        self.s = app.s
+        self.store = app.store
+        self.epochs: dict[str, int] = {k: int(v) for k, v in (self.store.get(self.EPOCH_KEY, {}) or {}).items()}
+        self.state: dict[tuple[str, str], dict] = {}  # (engine, alpha) -> latest evaluation
+        self.trips: list[dict] = []  # trips since start (newest last)
+        self._acting: set[tuple[str, str]] = set()
+
+    # --- epochs ------------------------------------------------------------------------------------
+    def _save_epochs(self) -> None:
+        self.store.set(self.EPOCH_KEY, self.epochs)
+
+    def sync_champion(self, params: StrategyParams, default_epoch: int | None = None) -> None:
+        """Every alpha the champion has on gets an epoch (the champion version's creation for one without), alphas
+        it has off lose theirs."""
+        changed = False
+        for a, on in params.enabled.items():
+            if on and a in params.alphas and a not in self.epochs:
+                self.epochs[a] = int(default_epoch if default_epoch is not None else (params.created or now_ms()))
+                changed = True
+            elif (not on or a not in params.alphas) and a in self.epochs:
+                del self.epochs[a]
+                changed = True
+        if changed:
+            self._save_epochs()
+
+    def on_new_champion(self, old: StrategyParams, new: StrategyParams, now: int) -> None:
+        """A promotion: an alpha the new champion switches on, or runs with other parameters, starts a fresh record;
+        alphas that stay as they were keep theirs."""
+        for a, on in new.enabled.items():
+            if on and a in new.alphas and (not old.enabled.get(a, False) or old.alphas.get(a) != new.alphas.get(a)):
+                self.epochs[a] = int(now)
+        self.sync_champion(new, now)
+        self._save_epochs()
+
+    # --- evaluation --------------------------------------------------------------------------------
+    def _target(self, engine: str) -> dict[str, int] | None:
+        """{alpha: since} for the alphas `engine` has switched on, None for an unknown engine."""
+        if engine in CHAMPION_ENGINES:
+            p = self.app.params
+            return {a: int(self.epochs.get(a, p.created or 0)) for a, on in p.enabled.items() if on and a in p.alphas}
+        slot = next((c for c in self.app.challengers if c.name == engine), None)
+        if slot is None:
+            return None
+        return {a: int(slot.started) for a, on in slot.params.enabled.items() if on and a in slot.params.alphas}
+
+    def evaluate(self, engine: str, alpha: str, since: int) -> dict:
+        trades = sorted(self.store.load_trades(engine=engine, since=since, alpha=alpha),
+                        key=lambda t: t.get("exit_time") or 0)
+        rs = [float(t.get("r_multiple") or 0.0) for t in trades]
+        s = self.s
+        exp = evidence.expected_r(alpha)
+        cusum, low = cusum_lower(rs, exp, s.kill_switch_k)
+        win = rs[-s.kill_switch_window:] if s.kill_switch_window > 0 else rs
+        wsum = sum(win)
+        by_cusum = bool(rs) and cusum <= -s.kill_switch_h
+        by_window = bool(rs) and wsum < s.kill_switch_window_r
+        rule = " + ".join(x for x, hit in ((f"CUSUM <= -{s.kill_switch_h:g}R", by_cusum),
+                                           (f"last {len(win)} sum < {s.kill_switch_window_r:g}R", by_window)) if hit)
+        st = {"engine": engine, "alpha": alpha, "since": int(since), "n": len(rs), "sum_r": sum(rs),
+              "avg_r": sum(rs) / len(rs) if rs else 0.0, "expected": exp, "verdict": evidence.verdict(alpha),
+              "cusum": cusum, "cusum_low": low, "k": s.kill_switch_k, "h": s.kill_switch_h, "window": s.kill_switch_window,
+              "window_n": len(win), "window_sum": wsum, "window_r": s.kill_switch_window_r,
+              "tripped": by_cusum or by_window, "rule": rule, "at": now_ms()}
+        self.state[(engine, alpha)] = st
+        return st
+
+    async def check(self, engine: str, alpha: str | None = None) -> list[dict]:
+        """Evaluate `engine` (one alpha or all it has on) and act on a trip. Returns the trips."""
+        if not self.s.kill_switch or engine not in self.app.engines:
+            return []
+        since = self._target(engine)
+        if not since:
+            return []
+        trips = []
+        for a in ([alpha] if alpha else list(since)):
+            if a not in since or (engine, a) in self._acting:
+                continue  # not switched on in this engine (or already being acted on)
+            st = self.evaluate(engine, a, since[a])
+            if not st["tripped"]:
+                continue
+            self._acting.add((engine, a))
+            try:
+                await self._act(engine, a, st)
+            finally:
+                self._acting.discard((engine, a))
+            trips.append(st)
+            if engine not in CHAMPION_ENGINES:
+                break  # the challenger is retired
+        return trips
+
+    async def check_all(self) -> list[dict]:
+        """Startup: re-derive every engine's state from the stored trades (a trip the previous process did not get
+        to act on, e.g. a crash right after the trade was stored, is acted on now)."""
+        out: list[dict] = []
+        for name in list(self.app.engines):
+            out += await self.check(name)
+        return out
+
+    async def on_trade(self, payload: dict) -> None:
+        """Bus handler for position_closed."""
+        trade, engine = payload.get("trade"), payload.get("engine")
+        alpha = getattr(trade, "alpha", None) if trade is not None else None
+        if engine and alpha:
+            await self.check(engine, alpha)
+
+    async def _act(self, engine: str, alpha: str, st: dict) -> None:
+        d = {"kind": "kill_switch", **_round(st)}
+        self.trips.append(d)
+        log.warning("kill switch: %s on %s tripped (%s): n=%d sum %+.2fR CUSUM %+.2fR last %d sum %+.2fR expected "
+                    "%+.3fR", alpha, engine, st["rule"], st["n"], st["sum_r"], st["cusum"], st["window_n"],
+                    st["window_sum"], st["expected"])
+        if engine in CHAMPION_ENGINES:
+            await self.app.kill_alpha(alpha, d)
+        else:
+            slot = next((c for c in self.app.challengers if c.name == engine), None)
+            if slot is not None:
+                await self.app.retire_challenger(slot, reason=f"킬 스위치\n{describe_kill(d)}", decision=d)
+
+    def champion_state(self) -> list[dict]:
+        """Latest state of every alpha the champion has on (paper engine, and live when attached)."""
+        since = self._target("paper") or {}
+        out = []
+        for eng in CHAMPION_ENGINES:
+            if eng not in self.app.engines:
+                continue
+            for a in since:
+                st = self.state.get((eng, a))
+                if st is None or st.get("since") != since[a]:
+                    st = self.evaluate(eng, a, since[a])
+                out.append(st)
+        return out
+
+
+def describe_kill(d: dict) -> str:
+    """Korean rendering of a kill-switch evaluation (its inputs and thresholds)."""
+    return (f"{d.get('alpha')} ({d.get('engine')}): 거래 {d.get('n', 0)}건, 누적 {d.get('sum_r', 0):+.2f}R "
+            f"(평균 {d.get('avg_r', 0):+.3f}R, 기대 {d.get('expected', 0):+.3f}R, {evidence.short(d.get('alpha', ''))})\n"
+            f"CUSUM {d.get('cusum', 0):+.2f}R (기준 -{d.get('h', 0):g}R, k={d.get('k', 0):g}) · 최근 {d.get('window_n', 0)}건 합 "
+            f"{d.get('window_sum', 0):+.2f}R (기준 {d.get('window_r', 0):g}R)")
+
+
+def _watch_parent(ppid: int) -> None:
+    while True:
+        time.sleep(2.0)
+        if os.getppid() != ppid:
+            os._exit(0)  # the bot is gone (killed without a clean stop): never keep researching as an orphan
+
+
+def _worker_init(ppid: int) -> None:
+    """Research / discovery worker initializer: exit as soon as the parent process disappears."""
+    threading.Thread(target=_watch_parent, args=(ppid,), daemon=True, name="parent-watch").start()
+
+
+def _new_pool() -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                               initializer=_worker_init, initargs=(os.getpid(),))
 
 
 def _discovery_worker(db_path: str, symbols: list[str], train: tuple[int, int], valid: tuple[int, int]) -> dict:

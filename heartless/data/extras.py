@@ -54,16 +54,25 @@ class MetricsSeries:
         return int(len(self.ts))
 
     def merge(self, other: "MetricsSeries") -> "MetricsSeries":
+        """Union of two series by bucket; `other` is the newer poll. For a bucket in both, a field takes the newer
+        value only where `other` actually provides one (finite): a poll in which some series lag a bucket behind or
+        answer empty yields partial rows, and replacing whole rows erased the values an earlier poll had (the same
+        partial-row bug the P5 review fixed for the stored metrics in app._store_metrics)."""
         if len(other) == 0:
             return self
         if len(self) == 0:
             return other
         ts = np.concatenate([self.ts, other.ts])
-        cols = [np.concatenate([getattr(self, c), getattr(other, c)]) for c in
-                ("oi", "oi_value", "top_ls_accounts", "top_ls_positions", "ls_accounts", "taker_ls_vol")]
-        uniq, idx = np.unique(ts[::-1], return_index=True)  # keep the newest copy of duplicate buckets
-        keep = len(ts) - 1 - idx
-        return MetricsSeries(ts[keep], *(c[keep] for c in cols))
+        uniq, inv = np.unique(ts, return_inverse=True)
+        n_self = len(self)
+        cols = []
+        for c in ("oi", "oi_value", "top_ls_accounts", "top_ls_positions", "ls_accounts", "taker_ls_vol"):
+            out = np.full(len(uniq), np.nan)
+            for arr, idx in ((getattr(self, c), inv[:n_self]), (getattr(other, c), inv[n_self:])):  # older first
+                ok = np.isfinite(arr)
+                out[idx[ok]] = arr[ok]
+            cols.append(out)
+        return MetricsSeries(uniq.astype(np.int64), *cols)
 
     def tail(self, n: int) -> "MetricsSeries":
         if len(self) <= n:

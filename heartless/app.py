@@ -21,10 +21,12 @@ from heartless.exchange.live import LiveAccount
 from heartless.exchange.paper import PaperAccount
 from heartless.exchange.symbols import parse_exchange_info
 from heartless.execution.engine import TradingEngine
-from heartless.execution.stats import by_alpha, summarize
+from heartless.execution.stats import by_alpha, exec_quality, r_stats, slippage_bps, summarize
+from heartless.learning import research as R
 from heartless.learning.advisor import Advisor
 from heartless.learning.bandit import AlphaBandit
-from heartless.learning.research import ChallengerSlot, ResearchManager
+from heartless.learning.research import AlphaKillSwitch, ChallengerSlot, ResearchManager
+from heartless.strategy import evidence
 from heartless.strategy.base import Context
 from heartless.strategy.params import StrategyParams
 from heartless.strategy.regime import detect_regime
@@ -33,9 +35,6 @@ from heartless.util.timeutil import MS_DAY, MS_HOUR, MS_MINUTE, local_day_start,
 
 log = logging.getLogger(__name__)
 
-# a challenger keeps its slot at least this long unless it already has a promotion-sized trade sample: research runs
-# every few hours and would otherwise evict the youngest slots before any challenger can reach promotion_min_trades
-CHALLENGER_MIN_AGE_MS = 2 * MS_DAY
 # how often the scheduler re-runs the history fetch for symbols whose backfill failed
 BACKFILL_RETRY_MS = 5 * MS_MINUTE
 # 1m history kept in memory per symbol: the longest live frame (1h x LIVE_WINDOW["1h"] = 21.7 days) plus margin. Older
@@ -48,6 +47,8 @@ LIVE_HISTORY_DAYS = math.ceil(LIVE_WINDOW["1h"] / 24) + 2
 UNIVERSE_KEEP_FRACTION = 0.8
 # how often the scheduler stores the funding settlements published since the last stored one
 FUNDING_REFRESH_MS = MS_HOUR
+# truthful status line while the champion has no alpha switched on (startup message, /status, daily report)
+NO_ALPHA_TEXT = "⚠️ 활성 알파 없음(0개): 거래하지 않고 연구·발굴·챌린저 검증만 진행"
 
 
 class Heartless:
@@ -77,6 +78,13 @@ class Heartless:
 
             self.meta = MetaLabeler(min_samples=settings.meta_min_samples, store=self.store, key="metalabel")
         self.params: StrategyParams = self.research.load_champion()
+        # per-alpha kill switch on live closed trades (ROADMAP P4); its state is derived from the stored trades
+        self.killswitch = AlphaKillSwitch(self)
+        self.killswitch.sync_champion(self.params)
+        self.bus.subscribe("position_closed", self.killswitch.on_trade)
+        # execution-quality monitor: rolling fill rows per engine (slippage vs the decision reference, fee vs model)
+        self.fill_rows: dict[str, deque] = {}
+        self._entry_refs: dict[str, float] = {}  # position id -> reference price of its first entry fill
         self.challengers: list[ChallengerSlot] = []
         self.engines: dict[str, TradingEngine] = {}
         self.paper_accounts: dict[str, PaperAccount] = {}
@@ -150,7 +158,8 @@ class Heartless:
         payload.setdefault("engine", "system")
         payload.setdefault("notify", True)
         await self.bus.publish(topic, payload)
-        if topic in ("risk_event", "error", "mode_changed", "promotion", "research_done", "graduation_ready", "universe"):
+        if topic in ("risk_event", "error", "mode_changed", "promotion", "research_done", "graduation_ready", "universe",
+                     "kill_switch", "challenger_retired"):
             self.store.log_event(payload["ts"], "INFO", topic, {k: v for k, v in payload.items() if k not in ("result",)})
 
     @property
@@ -171,9 +180,9 @@ class Heartless:
         if active:
             log.info("enabled alphas (champion %s): %s", self.params.version, ", ".join(active))
         else:
-            log.warning("no validated alpha is enabled (champion %s): the bot runs, collects data and keeps "
-                        "re-validating every alpha in the research cycle, but opens no trades until one passes",
-                        self.params.version)
+            log.warning("no alpha is enabled (champion %s): the bot opens no trades; it collects data and runs research, "
+                        "discovery and challenger validation, and starts trading only when a challenger clears the "
+                        "absolute promotion bar on live paper results (docs/SELF_IMPROVEMENT.md)", self.params.version)
         from heartless.strategy.alphas import FAILED_ALPHAS
 
         for mod, err in FAILED_ALPHAS.items():
@@ -184,6 +193,8 @@ class Heartless:
         await self._backfill(self.universe)
         self._build_views(self.universe)
         await self._create_engines()
+        if self.s.archive_backfill:
+            self.tasks.append(asyncio.create_task(self._backfill_metrics(list(self.universe)), name="metrics-backfill"))
         self.market.set_symbols(self.universe)
         self.tasks.append(asyncio.create_task(self.market.run(), name="market-stream"))
         self.tasks.append(asyncio.create_task(self._kline_worker(), name="kline-worker"))
@@ -201,19 +212,49 @@ class Heartless:
 
             self.web = WebServer(self)
             self.tasks.append(asyncio.create_task(self.web.run(), name="web"))
+        # a kill-switch trip the previous process stored the trade for but did not get to act on is acted on now (after
+        # the Telegram bot subscribed, so the owner is told; the engines' parameters change before anything can yield)
+        await self.killswitch.check_all()
         await self.emit("started", {"message": self.startup_summary()})
         try:
             await asyncio.gather(*self.tasks)
         except asyncio.CancelledError:
             pass
 
+    def learning_status(self) -> dict:
+        """What the self-improvement loop is doing and what has to happen for trading to start (startup message,
+        /status, daily report). The criteria are the promotion rules themselves (heartless/learning/research.py)."""
+        active = self.enabled_alphas()
+        bar = R.promotion_bar(self.s, "absolute")
+        failed_days = max(R.FAILED_MIN_DAYS, self.s.promotion_min_days)
+        criteria = (f"챌린저가 실시간 페이퍼에서 절대 기준을 넘으면 승격되어 그 알파로 거래를 시작합니다: 거래 "
+                    f"{bar['min_trades']}건 이상·청산일 {bar['min_days']}일 이상, 평균R > 0, 일 단위 t ≥ {bar['min_t_day']:g}, "
+                    f"PF ≥ {bar['min_pf_r']:g}, 최대낙폭 ≤ {bar['max_dd_r']:g}R (OOS 탈락 알파를 켜는 챌린저는 "
+                    f"{failed_days}일·t ≥ {R.FAILED_MIN_T_DAY:g})")
+        judged = [a for a in self.params.alphas if evidence.entry(a) is not None]
+        counts = evidence.summary(judged)
+        ev = (f"OOS 판정: {len(judged)}개 중 탈락 {counts['failed']}, 통과 {counts['passed']}"
+              + (" (docs/OOS_2022_2024.md)" if judged else ""))
+        return {"active": active, "no_alpha": not active, "headline": NO_ALPHA_TEXT if not active else
+                f"활성 알파 {len(active)}개: {', '.join(active)}", "criteria": criteria if not active else "",
+                "evidence": ev, "evidence_counts": counts,
+                "active_evidence": {a: evidence.verdict(a) for a in active},
+                "kill_switch": (f"킬 스위치 {'켜짐' if self.s.kill_switch else '꺼짐'} (알파별 CUSUM k={self.s.kill_switch_k:g}, "
+                                f"-{self.s.kill_switch_h:g}R / 최근 {self.s.kill_switch_window}건 합 < "
+                                f"{self.s.kill_switch_window_r:g}R)")}
+
     def startup_summary(self) -> str:
         lines = [f"Heartless 시작 — 모드: {'🔴 LIVE' if self.mode == 'live' else '🟢 PAPER'}",
                  f"유니버스 {len(self.universe)}종목: {', '.join(self.universe)}",
                  f"챔피언 파라미터: {self.params.version}", f"챌린저: {', '.join(c.name for c in self.challengers) or '-'}"]
-        active = self.enabled_alphas()
-        lines.append(f"활성 알파: {', '.join(active)}" if active else
-                     "⚠️ 검증을 통과한 활성 알파 없음 — 신규 진입 없이 데이터 수집·재검증만 진행 (리서치 사이클이 통과 알파를 켭니다)")
+        ls = self.learning_status()
+        if ls["active"]:
+            lines.append(f"활성 알파: {', '.join(ls['active'])}")
+            tags = [f"{a} {evidence.short(a)}" for a in ls["active"]]
+            lines.append("알파 증거: " + "; ".join(tags))
+        else:
+            lines += [NO_ALPHA_TEXT, "거래 시작 조건: " + ls["criteria"]]
+        lines += [ls["evidence"], ls["kill_switch"]]
         if self.mode_notice:
             lines.append(self.mode_notice)
         if self.store.get("paused", False):
@@ -283,6 +324,8 @@ class Heartless:
             if added:
                 await self._backfill(added)
                 self._build_views(added)
+                if self.s.archive_backfill:
+                    asyncio.create_task(self._backfill_metrics(added))
             for s in removed:
                 self.views.pop(s, None)
                 self.candles.pop(s, None)
@@ -369,6 +412,40 @@ class Heartless:
         self._backfill_failed |= failed
         return failed
 
+    async def _backfill_metrics(self, symbols: list[str]) -> None:
+        """Fill the 5-minute positioning metrics of the retention window from the public archive (daily files), in the
+        background: the bot otherwise only stores what it polls from its own start on, so the research cycle's
+        120-day window evaluated the metrics alphas (positioning, funding_fade) on days of data. Holes of more than two
+        days before the oldest / after the newest stored row are fetched; failures are logged and left for the next
+        start (never raised: this task runs next to the trading loop)."""
+        now = now_ms()
+        since = now - max(self.s.history_days, self.s.data_retention_days) * MS_DAY
+        for sym in symbols:
+            try:
+                lo, hi = self.store.metrics_range(sym)
+                ranges: list[tuple[int, int]] = []
+                if hi is None or hi < since:
+                    ranges.append((since, now))
+                else:
+                    if lo - since > 2 * MS_DAY:
+                        ranges.append((since, lo - 5 * MS_MINUTE))
+                    if now - hi > 2 * MS_DAY:
+                        ranges.append((hi + 5 * MS_MINUTE, now))
+                for a, b in ranges:
+                    if self.archive is None:
+                        from heartless.data.archive import BinanceArchive
+
+                        self.archive = BinanceArchive()
+                    rows = await self.archive.metrics(sym, a, b, now)
+                    if rows:
+                        self.store.save_metrics(sym, rows)
+                        log.info("metrics archive backfill %s: %d rows", sym, len(rows))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.info("metrics archive backfill %s unavailable: %s", sym, e)
+            await asyncio.sleep(0)
+
     async def _retry_backfill(self) -> None:
         """Re-run the history fetch for symbols whose startup/universe backfill failed and rebuild their views."""
         self._backfill_failed &= set(self.universe)
@@ -407,8 +484,10 @@ class Heartless:
             pa.fees_paid = float(saved.get("fees", 0.0))
             pa.funding_paid = float(saved.get("funding", 0.0))
         self.paper_accounts["paper"] = pa
+        watch = self._watch_fills(pa, "paper")  # before the engine: fill handlers run in registration order
         self.engines["paper"] = TradingEngine("paper", pa, self.params, self.s, self.symbols, self.store, self.bus,
                                               self.bandit, notify=(self.mode != "live"), meta=self.meta)
+        watch["engine"] = self.engines["paper"]
         self._apply_persisted_pause(self.engines["paper"])
         await self._restore_paper_positions(self.engines["paper"])
         await self.engines["paper"].start()
@@ -474,8 +553,10 @@ class Heartless:
         # while mode/status still say paper.
         acc = LiveAccount(self.rest, "live", self.s.taker_fee)
         acc.set_symbols(self.symbols)
+        watch = self._watch_fills(acc, "live")
         eng = TradingEngine("live", acc, self.params, self.s, self.symbols, self.store, self.bus, self.bandit, notify=True,
                             meta=self.meta)
+        watch["engine"] = eng
         self._apply_persisted_pause(eng)
         try:
             await acc.start()
@@ -507,15 +588,20 @@ class Heartless:
                 pa.fees_paid = float(saved.get("fees", 0.0))
                 pa.funding_paid = float(saved.get("funding", 0.0))
         else:
-            # a fresh challenger reuses a slot name: it must not inherit the retired one's record or its risk halts
+            # a fresh challenger reuses a slot name: it must not inherit the retired one's record or its risk halts. The
+            # finished run's trades are archived under "<slot>@<its params version>" (kept for the record), not deleted
             self.store.delete_positions(slot.name)
-            self.store.delete_trades(slot.name)
+            archived = self.store.archive_trades(slot.name)
+            if archived:
+                log.info("archived %d trades of the previous %s run", archived, slot.name)
             self.store.delete_equity(slot.name)
             self.store.set(f"{slot.name}.risk", None)
         self.paper_accounts[slot.name] = pa
+        watch = self._watch_fills(pa, slot.name, since=slot.started)
         # challengers consult the shared meta model (fair comparison with the champion) but do not train it
         eng = TradingEngine(slot.name, pa, slot.params, self.s, self.symbols, self.store, self.bus,
                             AlphaBandit(list(slot.params.alphas), store=None), notify=False, meta=self.meta, meta_learn=False)
+        watch["engine"] = eng
         self._apply_persisted_pause(eng)
         if restore:
             await self._restore_paper_positions(eng)
@@ -526,9 +612,97 @@ class Heartless:
         if slot not in self.challengers:
             self.challengers.append(slot)
 
+    # --- execution quality ---------------------------------------------------------------------------
+    def _watch_fills(self, acc, name: str, since: int | None = None) -> dict:
+        """Execution-quality monitor for one engine: every entry / exit fill is compared with the reference price the
+        engine decided on (slippage in bps, positive = cost) and its fee with the fee model. The observer is registered
+        on the account BEFORE the engine, so it runs first and sees the position as the engine left it: an entry's
+        decision price is still in pos.entry_price. Returns a holder the caller fills with the engine once built."""
+        holder: dict = {}
+        rows = self.store.load_fill_quality(name, self.s.exec_quality_window)
+        if since is not None:
+            rows = [r for r in rows if (r.get("ts") or 0) >= since]
+        self.fill_rows[name] = deque(rows, maxlen=max(1, self.s.exec_quality_window))
+
+        async def observe(fill) -> None:
+            try:  # never let the monitor break the fill dispatch to the engine
+                eng = holder.get("engine")
+                if eng is None or fill.kind == "FUNDING" or fill.qty <= 0 or fill.price <= 0:
+                    return
+                pos = eng.positions.get(fill.symbol)
+                if pos is None:
+                    return
+                row = self._fill_row(name, pos, fill)
+                if row is not None:
+                    self.fill_rows.setdefault(name, deque(maxlen=max(1, self.s.exec_quality_window))).append(row)
+                    self.store.save_fill_quality(row)
+            except Exception:  # noqa: BLE001
+                log.debug("fill-quality observer failed for %s", name, exc_info=True)
+
+        acc.on_fill(observe)
+        return holder
+
+    def _fill_row(self, name: str, pos, fill) -> dict | None:
+        """Reference price per fill kind: an entry -> the limit price of a post-only entry, else the touch the engine
+        decided at (pos.entry_price before the first fill); a stop -> its trigger; a take-profit -> the nearer of TP1 /
+        TP; a market close -> the touch on the closing side when the fill is processed (synchronous for paper; for live
+        it includes the user-stream latency)."""
+        if pos.status is PositionStatus.CLOSED:
+            return None
+        opens = fill.order_side == pos.side.order_side and not fill.reduce_only
+        kind = "ENTRY" if opens else (fill.kind if fill.kind in ("SL", "TP") else "CLOSE")
+        if opens:
+            if pos.entry_style == "LIMIT" and pos.limit_price:
+                ref = float(pos.limit_price)
+            elif pos.filled_qty <= 0:
+                ref = float(pos.entry_price)
+            else:
+                ref = self._entry_refs.get(pos.id, float(pos.entry_price))
+            if len(self._entry_refs) > 2000:
+                self._entry_refs.clear()
+            self._entry_refs.setdefault(pos.id, ref)
+        elif kind == "SL":
+            ref = float(pos.stop)
+        elif kind == "TP":
+            cands = [x for x in ((pos.tp1 if not pos.tp1_done else None), pos.take_profit) if x]
+            ref = float(min(cands, key=lambda x: abs(x - fill.price))) if cands else 0.0
+        else:
+            t = self.tickers.get(fill.symbol)
+            ref = float(((t.bid if fill.order_side == "SELL" else t.ask) if t else 0.0) or pos.extra.get("last_mark") or 0.0)
+        if ref <= 0:
+            return None
+        notional = fill.qty * fill.price
+        model_fee = notional * (self.s.maker_fee if fill.maker else self.s.taker_fee)
+        return {"engine": name, "ts": int(fill.ts or now_ms()), "symbol": fill.symbol, "position_id": pos.id,
+                "kind": kind, "side": fill.order_side, "maker": bool(fill.maker), "qty": fill.qty, "price": fill.price,
+                "ref": ref, "notional": notional, "slip_bps": slippage_bps(fill.order_side, fill.price, ref),
+                "fee": float(fill.fee or 0.0), "model_fee": model_fee}
+
+    def exec_quality(self) -> dict[str, dict]:
+        """Rolling execution-quality aggregates per engine (engines without fills omitted)."""
+        out = {}
+        for name, rows in self.fill_rows.items():
+            if rows and (name in self.engines or name in ("paper", "live")):
+                out[name] = exec_quality(list(rows), self.s.backtest_slippage_bps, self.s.exec_quality_min_fills)
+        return out
+
     # --- challenger / champion management ------------------------------------------------------
+    def challenger_trial_ms(self, slot: ChallengerSlot) -> int:
+        """How long a challenger keeps its slot before a new candidate may replace it: the exit days it needs to be
+        promotable at all (PROMOTION_MIN_DAYS, or 30 days when it switches on an alpha that failed out of sample).
+        Research runs every few hours; evicting younger slots would churn challengers before any could qualify."""
+        return self.research.trial_days(slot) * MS_DAY
+
     async def install_challenger(self, params: StrategyParams, source: str) -> ChallengerSlot | None:
-        """Place a new challenger into a free slot, or replace the weakest one."""
+        """Place a new challenger into a free slot, or replace the weakest one that has had its fair trial. A candidate
+        identical to a running challenger (same alpha values, switches and ensemble) is not installed: the research
+        cycle proposes the same re-enable every few hours, and a copy would restart a trial already under way."""
+        for c in self.challengers:
+            if c.params.alphas == params.alphas and c.params.enabled == params.enabled and \
+                    c.params.ensemble == params.ensemble:
+                log.info("challenger candidate from %s is identical to %s (%s); not installed", source, c.name,
+                         c.params.version)
+                return None
         names = [f"challenger-{i + 1}" for i in range(self.s.challengers)]
         used = {c.name: c for c in self.challengers}
         free = [n for n in names if n not in used]
@@ -536,8 +710,7 @@ class Heartless:
             name = free[0]
         else:
             # replace the worst-performing challenger (by net pnl since start) among those that have had a fair
-            # trial: a promotion-sized sample, or an age of CHALLENGER_MIN_AGE_MS. Evicting younger slots at every
-            # research cycle would churn them before any challenger can reach promotion_min_trades.
+            # trial (challenger_trial_ms), or that are losing on a promotion-sized sample
             now = now_ms()
 
             def trades(slot: ChallengerSlot) -> list[dict]:
@@ -547,8 +720,11 @@ class Heartless:
                 st = summarize(trades(slot))
                 return st["net"] if st["n"] else -1e-9
 
-            eligible = [c for c in self.challengers
-                        if len(trades(c)) >= self.s.promotion_min_trades or now - c.started >= CHALLENGER_MIN_AGE_MS]
+            def losing(slot: ChallengerSlot) -> bool:
+                st = r_stats(trades(slot))
+                return st["n"] >= self.s.promotion_min_trades and st["avg_r"] <= 0
+
+            eligible = [c for c in self.challengers if now - c.started >= self.challenger_trial_ms(c) or losing(c)]
             if not eligible:
                 log.info("no challenger slot for %s candidate: all %d challengers are still in their trial period",
                          source, len(self.challengers))
@@ -562,33 +738,92 @@ class Heartless:
         await self._start_challenger(slot)
         return slot
 
-    async def retire_challenger(self, slot: ChallengerSlot, reason: str, silent: bool = False) -> None:
+    async def retire_challenger(self, slot: ChallengerSlot, reason: str, silent: bool = False,
+                                decision: dict | None = None) -> None:
         eng = self.engines.pop(slot.name, None)
         if eng:
             await eng.close_all("챌린저 종료")
         self.paper_accounts.pop(slot.name, None)
         if slot in self.challengers:
             self.challengers.remove(slot)
-        self.store.set_params_role(slot.params.version, "retired")
+        self.research.last_decisions.pop(slot.name, None)
+        if decision is not None:
+            # the decision's inputs stay with the retired version (params_versions.metrics.decisions + its note)
+            self.store.record_params_decision(slot.params.version, {**decision, "reason": reason}, role="retired",
+                                              note=f"{slot.params.note} | {self._decision_note(decision)}")
+        else:
+            self.store.set_params_role(slot.params.version, "retired")
         if not silent:
-            await self.emit("challenger_retired", {"message": f"챌린저 {slot.name} 종료: {reason}", "notify": True})
+            await self.emit("challenger_retired", {"message": f"챌린저 {slot.name} 종료: {reason}", "notify": True,
+                                                   "slot": slot.name, "version": slot.params.version})
 
-    async def promote(self, slot: ChallengerSlot, st_ch: dict, st_champ: dict) -> None:
+    @staticmethod
+    def _decision_note(d: dict) -> str:
+        """One-line English summary of a promotion / retirement / kill-switch decision for a version note."""
+        if d.get("kind") == "kill_switch":
+            return (f"kill switch {d.get('alpha')} ({d.get('rule')}): n={d.get('n', 0)} sum {d.get('sum_r', 0):+.2f}R "
+                    f"CUSUM {d.get('cusum', 0):+.2f}R last {d.get('window_n', 0)} {d.get('window_sum', 0):+.2f}R")
+        ch = d.get("challenger") or {}
+        return (f"{d.get('verdict')} via the {d.get('path')} path ({d.get('rule')}): n={ch.get('n', 0)} "
+                f"days={ch.get('days', 0)} avgR {ch.get('avg_r', 0):+.3f} t_day {ch.get('t_day', 0):+.2f}"
+                + (f" paired t {d['paired']['t']:+.2f}" if d.get("paired") else "")
+                + f" champion n={(d.get('champion') or {}).get('n', 0)}")
+
+    async def promote(self, slot: ChallengerSlot, decision: dict) -> None:
+        """Make a challenger the champion. `decision` is the verdict of research.judge_challenger: its inputs are
+        stored with the new champion version (note + metrics) and shown in the Telegram message."""
         old = self.params
-        new = slot.params.clone(version=short_id("v"), note=f"promoted from {slot.name} ({slot.source})")
+        path = decision.get("path", "?")
+        ch = decision.get("challenger", {})
+        note = (f"promoted from {slot.name} ({slot.source}) via the {path} path: n={ch.get('n', 0)} days={ch.get('days', 0)} "
+                f"avgR {ch.get('avg_r', 0):+.3f} t_day {ch.get('t_day', 0):+.2f}"
+                + (f" paired t {decision['paired']['t']:+.2f}" if "paired" in decision else "")
+                + f" champion n={(decision.get('champion') or {}).get('n', 0)} (was {old.version})")
+        new = slot.params.clone(version=short_id("v"), note=note)
+        now = now_ms()
         self.store.set_params_role(old.version, "retired")
         self.store.save_params_version(new.version, new.created, "champion", slot.source, new.note, new.to_dict(),
-                                       {"challenger": st_ch, "champion": st_champ})
+                                       {"decisions": [decision], "challenger": slot.params.version})
         self.params = new
         for name in ("live", "paper"):
             if name in self.engines:
                 self.engines[name].set_params(new)
-        await self.retire_challenger(slot, reason="챔피언으로 승격", silent=True)
+        self.killswitch.on_new_champion(old, new, now)
+        await self.retire_challenger(slot, reason="챔피언으로 승격", silent=True, decision=decision)
+        switched_on = [a for a, on in new.enabled.items() if on and not old.enabled.get(a, False)]
+        switched_off = [a for a, on in old.enabled.items() if on and not new.enabled.get(a, False)]
+        log.warning("promotion: %s (%s) -> champion %s via the %s path; on: %s off: %s", slot.name, slot.params.version,
+                    new.version, path, ", ".join(switched_on) or "-", ", ".join(switched_off) or "-")
         msg = (f"🏆 파라미터 승격: {slot.name} → 챔피언 {new.version}\n"
-               f"변경 알파: {slot.source}\n"
-               f"챌린저 n={st_ch['n']} avgR {st_ch['avg_r']:+.2f} PF {st_ch['profit_factor']:.2f} net {st_ch['net']:+.1f}\n"
-               f"기존 챔피언 n={st_champ['n']} avgR {st_champ['avg_r']:+.2f} PF {st_champ['profit_factor']:.2f} net {st_champ['net']:+.1f}")
-        await self.emit("promotion", {"message": msg, "version": new.version})
+               f"변경 알파: {slot.source}" + (f" · 켜짐 {', '.join(switched_on)}" if switched_on else "")
+               + (f" · 꺼짐 {', '.join(switched_off)}" if switched_off else "") + "\n" + R.describe_decision(decision))
+        await self.emit("promotion", {"message": msg, "version": new.version, "path": path})
+
+    async def kill_alpha(self, alpha: str, decision: dict) -> None:
+        """Kill switch on a champion engine: a new champion version with `alpha` switched off, effective at once for
+        the paper and live engines (open positions keep their stops and exits; no new entries from the alpha)."""
+        old = self.params
+        if not old.enabled.get(alpha, False):
+            return
+        new = old.clone(version=short_id("v"),
+                        note=(f"kill switch: {alpha} off ({decision.get('engine')}: {decision.get('rule')}; "
+                              f"n={decision.get('n', 0)} sum {decision.get('sum_r', 0):+.2f}R CUSUM "
+                              f"{decision.get('cusum', 0):+.2f}R last {decision.get('window_n', 0)} "
+                              f"{decision.get('window_sum', 0):+.2f}R; was {old.version})"))
+        new.enabled[alpha] = False
+        self.store.set_params_role(old.version, "retired")
+        self.store.save_params_version(new.version, new.created, "champion", "kill-switch", new.note, new.to_dict(),
+                                       {"decisions": [decision]})
+        self.params = new
+        for name in ("live", "paper"):
+            if name in self.engines:
+                self.engines[name].set_params(new)
+        self.killswitch.sync_champion(new)
+        log.warning("kill switch: %s switched off in the champion -> %s", alpha, new.version)
+        left = self.enabled_alphas()
+        msg = (f"🛑 알파 킬 스위치: {alpha} 끔 → 챔피언 {new.version}\n{R.describe_kill(decision)}\n"
+               f"다시 켜려면 챌린저 승격 경로를 거쳐야 합니다. 남은 활성 알파: {', '.join(left) if left else '없음'}")
+        await self.emit("kill_switch", {"message": msg, "alpha": alpha, "version": new.version})
 
     # --- market data handlers ------------------------------------------------------------------
     async def _on_kline(self, data: dict) -> None:
@@ -785,11 +1020,22 @@ class Heartless:
                     asyncio.create_task(self.daily_report())
                 if now - self._last_prune >= 6 * MS_HOUR:
                     self._last_prune = now
-                    self.store.prune_candles(now - (max(self.s.history_days, self.s.data_retention_days) + 5) * MS_DAY)
+                    self._prune(now)
                 self._update_health(now)
             except Exception:  # noqa: BLE001
                 log.exception("scheduler iteration failed")
             await asyncio.sleep(5)
+
+    def _prune(self, now: int) -> None:
+        """Retention: candles, funding, metrics, equity rows and fill-quality rows older than
+        max(HISTORY_DAYS, DATA_RETENTION_DAYS) + 5 days. Only candles were pruned before; the 5-minute metrics and the
+        per-minute equity rows of every engine grew without bound."""
+        cutoff = now - (max(self.s.history_days, self.s.data_retention_days) + 5) * MS_DAY
+        self.store.prune_candles(cutoff)
+        self.store.prune_funding(cutoff)
+        self.store.prune_metrics(cutoff)
+        self.store.prune_equity(cutoff)
+        self.store.prune_fill_quality(cutoff)
 
     def _roll_day(self, now: int) -> None:
         """Start a new reporting day (the engines' daily counters) once `now` passed the local midnight. Runs before
@@ -1057,11 +1303,23 @@ class Heartless:
                                                                          "running": self.research.running,
                                                                          "failures": self.research.research_failures, "last_error": self.research.last_error,
                                                                          "next_due": self.research.last_cycle_ts + self.s.research_interval_minutes * 60_000},
-                "challengers": [{"name": c.name, "version": c.params.version, "source": c.source, "started": c.started}
-                                for c in self.challengers],
+                "challengers": [self._challenger_status(c) for c in self.challengers],
                 "graduation": self.research.graduation_status() if self.mode != "live" else None,
                 "alphas": self.bandit.snapshot(), "regimes": {s: r[0].value for s, r in self.regimes.items()},
-                "web_token": self.web_token, "started_at": self.started_at, "live_capable": self.s.live_capable}
+                "web_token": self.web_token, "started_at": self.started_at, "live_capable": self.s.live_capable,
+                "learning": self.learning_status(), "exec_quality": self.exec_quality(),
+                "kill_switch": [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in st.items()}
+                                for st in self.killswitch.champion_state()]}
+
+    def _challenger_status(self, c: ChallengerSlot) -> dict:
+        row = {"name": c.name, "version": c.params.version, "source": c.source, "started": c.started,
+               "trial_days": self.research.trial_days(c)}
+        d = self.research.last_decisions.get(c.name)
+        if d:
+            row["decision"] = {"path": d.get("path"), "verdict": d.get("verdict"), "rule": d.get("rule"),
+                               "at": d.get("at"), "challenger": d.get("challenger"), "bar": d.get("bar"),
+                               "paired": d.get("paired"), "checks": d.get("checks")}
+        return row
 
     def pnl_report(self, period: str = "today") -> dict:
         prim = self.primary_engine

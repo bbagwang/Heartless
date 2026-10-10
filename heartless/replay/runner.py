@@ -239,7 +239,9 @@ class _Run:
         self.promotions: list[dict] = []
         self.installed: list[dict] = []
         self.retired: list[dict] = []
-        self.evaluations = {"calls": 0, "compared": 0, "early_checks": 0}
+        self.evaluations = {"calls": 0, "decisions": 0, "by_path": {}, "by_verdict": {}}
+        self.decisions: list[dict] = []  # challenger decisions kept for the summary (see _record_decision)
+        self._decision_days: dict[str, int] = {}
         self.pending_errors: list[str] = []  # violations raised before the checker exists
         self.wall0 = time.perf_counter()
 
@@ -412,7 +414,7 @@ class _Run:
     def _hook(self, app) -> None:
         topics = ("position_opened", "position_closed", "partial_tp", "entry_cancelled", "risk_event", "error",
                   "research_started", "research_done", "promotion", "graduation_ready", "daily_report", "mode_changed",
-                  "control", "started", "universe", "advisor_review", "reconcile", "challenger_retired")
+                  "control", "started", "universe", "advisor_review", "reconcile", "challenger_retired", "kill_switch")
         for t in topics:
             app.bus.subscribe(t, self._make_counter(t))
         research = app.research
@@ -452,19 +454,24 @@ class _Run:
                                        "errors": res.get("errors"), "rows": res.get("rows")})
             return res
 
+        run = self
+
+        class _DecisionLog(dict):
+            """research.last_decisions that also hands every decision to the run (promotions and retirements pop
+            their slot's entry right away, so reading the dict afterwards would miss exactly those)."""
+
+            def __setitem__(self, key, value):
+                super().__setitem__(key, value)
+                run._record_decision(value)
+
+        research.last_decisions = _DecisionLog(research.last_decisions)
+
         async def evaluate_challengers(force: bool = False):
-            # mirror the promotion gate on the same store state to count evaluations that actually compared
-            if force or now_ms() - research.last_promotion_check >= 60 * 60_000:
+            before = research.last_promotion_check
+            res = await orig_eval(force)
+            if research.last_promotion_check != before:
                 self.evaluations["calls"] += 1
-                s = app.s
-                for slot in list(app.challengers):
-                    n_ch = len(app.store.load_trades(engine=slot.name, since=slot.started))
-                    n_champ = len(app.store.load_trades(engine="paper", since=slot.started))
-                    if n_ch >= s.promotion_min_trades and n_champ >= max(10, s.promotion_min_trades // 2):
-                        self.evaluations["compared"] += 1
-                    elif n_ch >= 15:
-                        self.evaluations["early_checks"] += 1
-            return await orig_eval(force)
+            return res
 
         async def install_challenger(params, source):
             slot = await orig_install(params, source)
@@ -472,12 +479,12 @@ class _Run:
                                    "slot": slot.name if slot else None, "version": params.version, "note": params.note})
             return slot
 
-        async def retire_challenger(slot, reason: str, silent: bool = False):
+        async def retire_challenger(slot, reason: str, silent: bool = False, decision: dict | None = None):
             eng = app.engines.get(slot.name)
-            await orig_retire(slot, reason, silent)
+            await orig_retire(slot, reason, silent, decision=decision)
             if eng is not None and self.checker is not None:
                 # its close-out runs after it left app.engines: check the final books before the slot is reused (a
-                # new challenger in the same slot deletes these trades)
+                # new challenger in the same slot archives these trades under another engine name)
                 try:
                     await self.checker.check_engine(slot.name, eng)
                 except Exception as e:  # noqa: BLE001
@@ -487,6 +494,25 @@ class _Run:
         app.install_challenger = install_challenger
         app._start_challenger = start_challenger
         app.retire_challenger = retire_challenger
+
+    def _record_decision(self, d: dict) -> None:
+        """Count every challenger decision; keep the first per challenger version, every promote / retire, and one
+        hold per virtual day per version (an hourly 'hold' for weeks would bloat the summary)."""
+        ev = self.evaluations
+        ev["decisions"] += 1
+        ev["by_path"][d.get("path")] = ev["by_path"].get(d.get("path"), 0) + 1
+        ev["by_verdict"][d.get("verdict")] = ev["by_verdict"].get(d.get("verdict"), 0) + 1
+        key = f"{d.get('slot')}:{d.get('version')}"
+        day = int(d.get("at", now_ms()) // MS_DAY)
+        if d.get("verdict") == "hold" and self._decision_days.get(key) == day:
+            return
+        self._decision_days[key] = day
+        ch = d.get("challenger") or {}
+        self.decisions.append({"time": fmt_ts(d.get("at", now_ms())), "slot": d.get("slot"), "version": d.get("version"),
+                               "source": d.get("source"), "path": d.get("path"), "verdict": d.get("verdict"),
+                               "rule": d.get("rule"), "challenger": ch, "champion_n": (d.get("champion") or {}).get("n"),
+                               "paired": d.get("paired"), "failed_alphas": d.get("failed_alphas"), "bar": d.get("bar"),
+                               "checks": d.get("checks")})
 
     def _make_counter(self, topic: str):
         async def handler(p: dict) -> None:
@@ -565,6 +591,9 @@ class _Run:
             "learning": {"research_cycles": self.research, "discovery_cycles": self.discovery,
                          "challengers_installed": self.installed, "challengers_retired": self.retired,
                          "promotions": self.promotions, "challenger_evaluations": self.evaluations,
+                         "challenger_decisions": self.decisions,
+                         "kill_switch_trips": list(getattr(app.killswitch, "trips", [])),
+                         "champion_enabled": app.enabled_alphas(),
                          "challengers_final": [{"name": c.name, "source": c.source, "version": c.params.version,
                                                 "started": fmt_ts(c.started)} for c in app.challengers],
                          "champion_final": app.params.version},
@@ -622,6 +651,16 @@ def format_report(s: dict) -> str:
         lines.append(f"  challenger {r['time']} {r['slot']} <- {r['source']}: {r['note']}")
     for r in learn["promotions"]:
         lines.append(f"  promotion {r['time']} {r['version']}")
+    for r in learn.get("challenger_decisions", []):
+        ch = r.get("challenger") or {}
+        paired = f" paired t {r['paired']['t']:+.2f}" if r.get("paired") else ""
+        lines.append(f"  decision {r['time']} {r['slot']} {r['version']} [{r['source']}] {r['path']} -> {r['verdict']} "
+                     f"({r['rule']}): n={ch.get('n')} days={ch.get('days')} t_day {ch.get('t_day', 0):+.2f}{paired}, "
+                     f"champion n={r.get('champion_n')}" + (f", failed-alpha bar {r['failed_alphas']}"
+                                                            if r.get("failed_alphas") else ""))
+    for r in learn.get("kill_switch_trips", []):
+        lines.append(f"  kill switch {r.get('alpha')} on {r.get('engine')}: {r.get('rule')} (n={r.get('n')})")
+    lines.append(f"  champion alphas at the end: {', '.join(learn.get('champion_enabled') or []) or 'none'}")
     tg = s["telegram"]
     lines += ["", f"telegram: {tg['messages']} messages; " + ", ".join(f"{k} {v}" for k, v in tg["by_type"].items())]
     for c in tg["commands"]:

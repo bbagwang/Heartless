@@ -385,10 +385,12 @@ def test_learning_loop_runs_for_real_inside_a_replay(tmp_path, small_frames):
         ca = synth_candles((seed_days + 1) * 1440, seed=21 + i, start_ms=t0, price=100.0 * (i + 1), vol=0.0012)
         st.save_candles(sym, [ca.candle_at(k) for k in range(ca.n)])
     st.close()
-    started = START - 3 * MS_DAY
+    # P4: the champion closed 12 trades (< PROMOTION_MIN_TRADES) since the challenger started, so the challenger is
+    # judged on the absolute path; it switches on alphas that failed out of sample, hence the 30-day / t >= 2 bar
+    started = START - 35 * MS_DAY
     challenger = StrategyParams.from_dict(busy_params()).clone(version="vchallenger", note="seeded challenger")
     trades = [_trade("paper", i, 0.5 if i % 2 else -0.6, started + (i + 1) * 3 * MS_HOUR) for i in range(12)]
-    trades += [_trade("challenger-1", i, 1.0 if i % 5 else -0.5, started + (i + 1) * 2 * MS_HOUR) for i in range(26)]
+    trades += [_trade("challenger-1", i, 1.0 if i % 5 else -0.5, started + (i + 1) * 20 * MS_HOUR) for i in range(40)]
     cfg = ReplayConfig(source_db=str(src), start_ms=START, end_ms=START + 2 * MS_HOUR - 1, work_dir=str(tmp_path / "bot"),
                        seed_days=seed_days, commands=[ScriptedCommand(START + MS_HOUR, "/research")],
                        settings={"RESEARCH_CANDIDATES": 1, "RESEARCH_FOLDS": 1, "RESEARCH_LOOKBACK_DAYS": 5,
@@ -400,7 +402,10 @@ def test_learning_loop_runs_for_real_inside_a_replay(tmp_path, small_frames):
     assert len(learn["research_cycles"]) == 1 and learn["research_cycles"][0]["error"] is None
     assert learn["research_cycles"][0]["alphas"]  # every alpha with parameters was walk-forward evaluated
     assert len(learn["discovery_cycles"]) == 1 and learn["discovery_cycles"][0]["tested"] > 0
-    assert learn["challenger_evaluations"]["compared"] >= 1 and len(learn["promotions"]) == 1
+    assert learn["challenger_evaluations"]["by_path"].get("absolute", 0) >= 1 and len(learn["promotions"]) == 1
+    (d,) = [x for x in learn["challenger_decisions"] if x["verdict"] == "promote"]
+    assert d["path"] == "absolute" and d["failed_alphas"] and d["bar"]["min_days"] == 30 and d["bar"]["min_t_day"] == 2.0
+    assert d["challenger"]["n"] >= 40 and d["challenger"]["days"] >= 30 and d["champion_n"] == 12
     assert learn["champion_final"] == learn["promotions"][0]["version"] != "vchallenger"
     assert s["engines"]["paper"]["params_version"] == learn["champion_final"]  # the champion engine hot-swapped
     tg = s["telegram"]["by_type"]

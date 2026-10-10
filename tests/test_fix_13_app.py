@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from heartless.app import CHALLENGER_MIN_AGE_MS, Heartless
+from heartless.app import Heartless
 from heartless.config import Settings
 from heartless.core.models import Position, PositionStatus, Side, Ticker
 from heartless.exchange.binance_rest import BinanceError
@@ -350,18 +350,26 @@ async def test_env_mode_change_wins_but_unchanged_env_keeps_persisted_mode():
 
 # --- challenger eviction needs a fair trial ---------------------------------------------------------------------
 async def test_challenger_eviction_requires_a_fair_trial():
+    # P4: the trial period is the exit-day minimum the challenger needs to be promotable (PROMOTION_MIN_DAYS, 30 days
+    # for one that switches on an alpha that failed out of sample), no longer a flat 2 days; candidates identical to a
+    # running challenger are not installed, so the three candidates differ
     app, candles = _make_app()
     await _bootstrap(app, candles)
     p = app.params
-    s1 = await app.install_challenger(p.clone(note="c1"), source="trend_pullback")
-    s2 = await app.install_challenger(p.clone(note="c2"), source="mean_reversion")
+
+    def variant(note: str, conf: float):
+        return p.with_alpha("trend_pullback", {"min_conf": conf}, note=note)
+
+    s1 = await app.install_challenger(variant("c1", 0.6), source="trend_pullback")
+    s2 = await app.install_challenger(variant("c2", 0.62), source="mean_reversion")
     assert {s1.name, s2.name} == {"challenger-1", "challenger-2"}
     # both slots are fresh (no trades, age ~0): a third candidate must not evict either of them
-    assert await app.install_challenger(p.clone(note="c3"), source="breakout") is None
+    assert await app.install_challenger(variant("c3", 0.64), source="breakout") is None
     assert app.challengers == [s1, s2] and {s1.name, s2.name} <= set(app.engines)
+    assert app.challenger_trial_ms(s1) == app.s.promotion_min_days * 86_400_000
     # once a challenger has had its trial period it may be replaced; the younger one keeps its slot
-    s1.started -= CHALLENGER_MIN_AGE_MS + 1
-    s3 = await app.install_challenger(p.clone(note="c3"), source="breakout")
+    s1.started -= app.challenger_trial_ms(s1) + 1
+    s3 = await app.install_challenger(variant("c3", 0.64), source="breakout")
     assert s3 is not None and s3.name == s1.name
     assert s1 not in app.challengers and s2 in app.challengers and s3 in app.challengers
     await app.stop()

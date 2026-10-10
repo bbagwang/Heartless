@@ -80,6 +80,10 @@ def fmt_status(st: dict, tz: str) -> str:
     ]
     if prim.get("halted"):
         lines.append(f"🚫 {esc(prim.get('halt_reason', ''))}")
+    lines += fmt_learning(st)
+    xq = fmt_exec_quality(st)
+    if xq:
+        lines.append(xq)
     if st.get("graduation"):
         g = st["graduation"]
         lines.append(f"졸업 조건: {g['n']}/{g['need']['trades']}건, PF {g['profit_factor']:.2f}/{g['need']['profit_factor']}, "
@@ -125,11 +129,17 @@ def fmt_pnl(rep: dict, tz: str) -> str:
     return "\n".join(lines)
 
 
-def fmt_alphas(rows: list[dict], params) -> str:
+def fmt_alphas(rows: list[dict], params, kill_switch: list[dict] | None = None) -> str:
+    from heartless.strategy import evidence
+
+    ks = {(k.get("alpha"), k.get("engine")): k for k in (kill_switch or [])}
     lines = ["<b>알파 신뢰도 (Thompson sampling)</b>"]
     for r in rows:
         en = params.enabled.get(r["alpha"], True)
+        k = ks.get((r["alpha"], "live")) or ks.get((r["alpha"], "paper"))
+        guard = (f" · 킬 스위치 CUSUM {k['cusum']:+.2f}/-{k['h']:g}R" if k else "")
         lines.append(f"{'✅' if en else '⛔'} <code>{esc(r['alpha'])}</code> trust {r['trust']:.2f} · n={r['n']} · avgR {r['avg_r']:+.2f}\n"
+                     f"   {esc(evidence.short(r['alpha']))}{guard}\n"
                      f"   추세↑ {r['trend_up']['mean']:.2f}({r['trend_up']['n']}) 추세↓ {r['trend_down']['mean']:.2f}({r['trend_down']['n']}) "
                      f"횡보 {r['range']['mean']:.2f}({r['range']['n']}) 변동 {r['volatile']['mean']:.2f}({r['volatile']['n']})")
     return "\n".join(lines)
@@ -164,8 +174,62 @@ def fmt_daily(today: dict, week: dict, st: dict, tz: str) -> str:
     if ba:
         lines.append("오늘 알파별: " + ", ".join(f"{esc(a)} {fmt_usd(s['net'])}" for a, s in ba.items()))
     lines.append(f"열린 포지션 {len(prim.get('positions', []))} · 챔피언 <code>{esc(st['params_version'])}</code> · 챌린저 {len(st.get('challengers', []))}")
+    lines += fmt_learning(st)
+    xq = fmt_exec_quality(st, suggest=True)
+    if xq:
+        lines.append(xq)
     if st.get("graduation") and st["graduation"].get("ok"):
         lines.append("🎓 페이퍼 성과가 졸업 기준을 충족했습니다. /golive 로 실거래 전환 가능")
+    return "\n".join(lines)
+
+
+def fmt_learning(st: dict) -> list[str]:
+    """What trades and what the learning loop is doing (truthful when no alpha is enabled), the challengers' standing
+    against their promotion bar and the kill-switch state of the champion's alphas."""
+    ls = st.get("learning") or {}
+    if not ls:
+        return []
+    out = [esc(ls.get("headline", ""))]
+    if ls.get("no_alpha") and ls.get("criteria"):
+        out.append("거래 시작 조건: " + esc(ls["criteria"]))
+    for c in st.get("challengers", []):
+        d = c.get("decision")
+        if not d:
+            out.append(f"  <code>{esc(c['name'])}</code> [{esc(c.get('source', ''))}] 판정 대기")
+            continue
+        ch, bar = d.get("challenger") or {}, d.get("bar") or {}
+        path = "상대" if d.get("path") == "relative" else "절대"
+        extra = f", 차이 t {d['paired']['t']:+.2f}" if d.get("paired") else f", t_day {ch.get('t_day', 0):+.2f}/{bar.get('min_t_day', 0):g}"
+        out.append(f"  <code>{esc(c['name'])}</code> [{esc(c.get('source', ''))}] {path} 경로: "
+                   f"{ch.get('n', 0)}/{bar.get('min_trades', 0)}건, {ch.get('days', 0)}/{bar.get('min_days', 0)}일, "
+                   f"평균 {ch.get('avg_r', 0):+.2f}R{extra} → {esc(d.get('verdict', ''))}")
+    for k in st.get("kill_switch") or []:
+        if k.get("engine") != "paper" and k.get("engine") != "live":
+            continue
+        out.append(f"  킬 스위치 <code>{esc(k['alpha'])}</code> ({esc(k['engine'])}): {k.get('n', 0)}건, CUSUM "
+                   f"{k.get('cusum', 0):+.2f}/-{k.get('h', 0):g}R, 최근 {k.get('window_n', 0)}건 합 "
+                   f"{k.get('window_sum', 0):+.2f}/{k.get('window_r', 0):g}R")
+    return out
+
+
+def fmt_exec_quality(st: dict, suggest: bool = False) -> str:
+    """Rolling execution quality of the primary engine (realized slippage vs the decision reference, fees vs the fee
+    model) and, with `suggest`, the BACKTEST_SLIPPAGE_BPS suggestion for any engine whose taker fills slip more than
+    twice the model."""
+    xq = st.get("exec_quality") or {}
+    prim = st.get("primary")
+    lines = []
+    q = xq.get(prim) if prim else None
+    if q:
+        lines.append(f"체결 품질({esc(prim)}, 최근 {q['fills']}체결, 테이커 {q['taker_fills']}): 슬리피지 평균 "
+                     f"{q['slip_bps']:+.1f}bp (p90 {q['slip_p90_bps']:+.1f}bp, 모델 {q['model_slip_bps']:g}bp) · 수수료 "
+                     f"{q['fee_bps']:.1f}bp (모델 {q['model_fee_bps']:.1f}bp)")
+    if suggest:
+        for name, q in sorted(xq.items()):
+            if q.get("suggest"):
+                lines.append(f"⚠️ {esc(name)} 테이커 체결 {q['taker_fills']}건의 평균 슬리피지 {q['slip_bps']:.1f}bp가 "
+                             f"BACKTEST_SLIPPAGE_BPS({q['model_slip_bps']:g}bp)의 2배를 넘습니다. 백테스트 슬리피지를 "
+                             f"{q['slip_bps']:.1f}bp 정도로 올리는 것을 검토하세요 (자동 변경하지 않음)")
     return "\n".join(lines)
 
 

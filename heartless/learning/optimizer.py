@@ -12,7 +12,7 @@ import time
 from dataclasses import asdict, dataclass, field
 
 from heartless.config import Settings
-from heartless.execution.stats import objective
+from heartless.execution.stats import day_clustered_t, objective
 from heartless.learning.backtester import Backtester, load_backtester
 from heartless.strategy.params import ALPHA_SPECS, StrategyParams
 from heartless.util.timeutil import MS_DAY
@@ -86,17 +86,25 @@ def confirm_folds(bt: Backtester, base: StrategyParams, alpha: str, cands: list[
     """Re-measure finalists on several consecutive out-of-sample windows (walk-forward confirmation).
 
     A candidate's final score blends its screening train objective with the mean minus half the dispersion of its
-    per-fold objectives, so a parameter set that only shines in one window does not win."""
+    per-fold objectives, so a parameter set that only shines in one window does not win. The per-fold objective uses
+    the day-clustered t of the fold's trades (`t_day`, trades clustered by UTC exit day) instead of the per-trade t:
+    simultaneous trades on correlated coins are not independent, and the per-trade t overstated the evidence of
+    fold results driven by a few market-wide days."""
     for c in cands:
         trial = base.with_alpha(alpha, c.params, version=f"fold-{alpha}")
         full_stats = []
         for a, b in folds:
             try:
-                full_stats.append(bt.run(trial, a, b, only_alpha=alpha).stats)
+                res = bt.run(trial, a, b, only_alpha=alpha)
+                fs = dict(res.stats)
+                trades = getattr(res, "trades", None)
+                if trades is not None:
+                    fs["t_day"] = day_clustered_t(trades)
+                full_stats.append(fs)
             except Exception:  # noqa: BLE001
                 log.exception("fold run failed for %s", alpha)
                 full_stats.append({"n": 0, "avg_r": 0.0})
-        objs = [objective(fs, min_trades) if fs.get("n", 0) >= min_trades else None for fs in full_stats]
+        objs = [objective(fs, min_trades, t_key="t_day") if fs.get("n", 0) >= min_trades else None for fs in full_stats]
         fold_stats = [_slim(fs) for fs in full_stats]
         vals = [o for o in objs if o is not None and o > -1e8]
         c.folds = fold_stats
@@ -196,5 +204,5 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
 
 
 def _slim(st: dict) -> dict:
-    keys = ("n", "win_rate", "net", "profit_factor", "avg_r", "t_stat", "max_dd_pct", "return_pct", "expectancy")
+    keys = ("n", "win_rate", "net", "profit_factor", "avg_r", "t_stat", "t_day", "max_dd_pct", "return_pct", "expectancy")
     return {k: (round(st[k], 4) if isinstance(st.get(k), float) and st[k] not in (float("inf"),) else st.get(k)) for k in keys if k in st}

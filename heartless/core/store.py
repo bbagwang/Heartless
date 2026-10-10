@@ -57,6 +57,17 @@ CREATE TABLE IF NOT EXISTS research_runs (
 );
 """
 
+# --- P4 (self-improvement hardening) tables ---------------------------------------------------------------
+# fill_quality: one row per entry / exit fill of a persisted engine with the reference price the engine decided on,
+# the signed slippage against it and the fee against the fee model (execution-quality monitor).
+SCHEMA_P4 = """
+CREATE TABLE IF NOT EXISTS fill_quality (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, engine TEXT, ts INTEGER, symbol TEXT, position_id TEXT, kind TEXT,
+    side TEXT, maker INTEGER, qty REAL, price REAL, ref REAL, notional REAL, slip_bps REAL, fee REAL, model_fee REAL
+);
+CREATE INDEX IF NOT EXISTS idx_fill_quality_engine_ts ON fill_quality(engine, ts);
+"""
+
 
 class Store:
     def __init__(self, path: str | Path):
@@ -69,6 +80,7 @@ class Store:
         self._conn.execute("PRAGMA temp_store=MEMORY")
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._conn.executescript(SCHEMA_P4)
 
     # --- generic -----------------------------------------------------------------------------
     def execute(self, sql: str, params: Iterable = ()) -> sqlite3.Cursor:
@@ -357,3 +369,51 @@ class Store:
             d["summary"] = json.loads(d["summary"])
             out.append(d)
         return out
+
+    # --- P4: retention, archived challenger runs, decision records, fill quality ----------------------------
+    def prune_funding(self, before_ts: int) -> None:
+        self.execute("DELETE FROM funding WHERE funding_time<?", (before_ts,))
+
+    def prune_metrics(self, before_ts: int) -> None:
+        self.execute("DELETE FROM metrics WHERE ts<?", (before_ts,))
+
+    def prune_equity(self, before_ts: int) -> None:
+        self.execute("DELETE FROM equity WHERE ts<?", (before_ts,))
+
+    def archive_trades(self, engine: str) -> int:
+        """Keep the trades of a finished challenger run under a unique engine name ("<slot>@<params version>")
+        instead of deleting them when its slot is reused: the record stays auditable, and the next run in the slot
+        (queried by its exact engine name) starts from nothing. Returns the number of rows archived."""
+        cur = self.execute("UPDATE trades SET engine = engine || '@' || COALESCE(NULLIF(params_version, ''), 'run') "
+                           "WHERE engine=?", (engine,))
+        return int(cur.rowcount or 0)
+
+    def record_params_decision(self, vid: str, decision: dict, role: str | None = None, note: str | None = None) -> None:
+        """Attach a promotion / retirement / kill-switch decision (its inputs, thresholds and verdict) to a stored
+        parameter version: merged into its metrics under "decisions", optionally with a new role and note."""
+        rows = self.query("SELECT metrics, note, role FROM params_versions WHERE id=?", (vid,))
+        if not rows:
+            return
+        try:
+            metrics = json.loads(rows[0]["metrics"] or "{}")
+        except Exception:  # noqa: BLE001
+            metrics = {}
+        metrics.setdefault("decisions", []).append(decision)
+        self.execute("UPDATE params_versions SET metrics=?, note=?, role=? WHERE id=?",
+                     (json.dumps(metrics, default=str), note if note is not None else rows[0]["note"],
+                      role or rows[0]["role"], vid))
+
+    def save_fill_quality(self, row: dict) -> None:
+        cols = ("engine", "ts", "symbol", "position_id", "kind", "side", "maker", "qty", "price", "ref", "notional",
+                "slip_bps", "fee", "model_fee")
+        self.execute(f"INSERT INTO fill_quality({','.join(cols)}) VALUES({','.join('?' for _ in cols)})",
+                     [int(row[c]) if c == "maker" else row.get(c) for c in cols])
+
+    def load_fill_quality(self, engine: str, limit: int = 200) -> list[dict]:
+        """The newest `limit` fill rows of an engine in the order they were observed (fill timestamps come from the
+        account and need not be monotonic: a paper stop carries its ticker's time)."""
+        rows = self.query("SELECT * FROM fill_quality WHERE engine=? ORDER BY id DESC LIMIT ?", (engine, limit))
+        return [dict(r) for r in reversed(rows)]
+
+    def prune_fill_quality(self, before_ts: int) -> None:
+        self.execute("DELETE FROM fill_quality WHERE ts<?", (before_ts,))
