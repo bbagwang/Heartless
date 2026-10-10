@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 MS_MINUTE = 60_000
@@ -12,8 +13,21 @@ TF_MS = {"1m": MS_MINUTE, "3m": 3 * MS_MINUTE, "5m": 5 * MS_MINUTE, "15m": 15 * 
          "30m": 30 * MS_MINUTE, "1h": MS_HOUR, "4h": 4 * MS_HOUR, "1d": MS_DAY}
 
 
+# Process-wide clock behind now_ms(). None = the wall clock (production). The replay harness (heartless/replay)
+# installs its virtual clock here so every component that asks "what time is it" sees replayed time.
+_clock: Callable[[], int] | None = None
+
+
 def now_ms() -> int:
-    return int(time.time() * 1000)
+    clock = _clock
+    return int(time.time() * 1000) if clock is None else int(clock())
+
+
+def set_clock(clock: Callable[[], int] | None) -> Callable[[], int] | None:
+    """Install `clock` (epoch ms) behind now_ms(), or restore the wall clock with None. Returns the previous clock."""
+    global _clock
+    prev, _clock = _clock, clock
+    return prev
 
 
 def floor_ms(ts: int, step: int) -> int:

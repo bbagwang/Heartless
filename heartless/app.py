@@ -5,7 +5,7 @@ import asyncio
 import logging
 import math
 from collections import deque
-from typing import Any
+from typing import Any, Callable
 
 from heartless.config import Settings
 from heartless.core.bus import EventBus
@@ -38,6 +38,14 @@ log = logging.getLogger(__name__)
 CHALLENGER_MIN_AGE_MS = 2 * MS_DAY
 # how often the scheduler re-runs the history fetch for symbols whose backfill failed
 BACKFILL_RETRY_MS = 5 * MS_MINUTE
+# 1m history kept in memory per symbol: the longest live frame (1h x LIVE_WINDOW["1h"] = 21.7 days) plus margin. Older
+# bars can never reach a feature frame (each frame is the tail of the resampled history), so dropping them changes no
+# feature, while keeping them grew memory ~1.4 MB/day for 12 symbols and the per-boundary resample cost without bound.
+LIVE_HISTORY_DAYS = math.ceil(LIVE_WINDOW["1h"] / 24) + 2
+# universe hysteresis: a member stays until its 24h quote volume drops below this fraction of the entry threshold. A
+# symbol hovering around UNIVERSE_MIN_QUOTE_VOLUME was otherwise added and removed at hourly refreshes (a 2-day replay
+# of July 2026 flipped AVAXUSDT 6 times), each time reloading its history, rebuilding its views and messaging the owner.
+UNIVERSE_KEEP_FRACTION = 0.8
 
 
 class Heartless:
@@ -81,6 +89,8 @@ class Heartless:
         self._stopping = False
         self.last_bar_ts: dict[str, int] = {}
         self.telegram = None
+        # builds the Telegram bot in run(); None = the production TelegramBot (the replay harness injects its capture bot)
+        self.telegram_factory: Callable[["Heartless"], Any] | None = None
         self.web = None
         self._backfilling: set[str] = set()
         self.archive = None  # BinanceArchive, created lazily for bulk backfill
@@ -171,9 +181,12 @@ class Heartless:
         self.tasks.append(asyncio.create_task(self._kline_worker(), name="kline-worker"))
         self.tasks.append(asyncio.create_task(self._scheduler(), name="scheduler"))
         if self.s.telegram_bot_token:
-            from heartless.notify.telegram import TelegramBot
+            if self.telegram_factory is not None:
+                self.telegram = self.telegram_factory(self)
+            else:
+                from heartless.notify.telegram import TelegramBot
 
-            self.telegram = TelegramBot(self)
+                self.telegram = TelegramBot(self)
             self.tasks.append(asyncio.create_task(self.telegram.run(), name="telegram"))
         if self.s.web_enabled:
             from heartless.web.app import WebServer
@@ -244,6 +257,8 @@ class Heartless:
             return
         new = select_universe(self.symbols, tickers, self.s.universe_size, self.s.universe_min_quote_volume,
                               self.s.always_include_list)
+        if not initial:
+            self._keep_members(new, tickers)
         # keep symbols with open positions
         held = {p.symbol for eng in self.engines.values() for p in eng.open_positions()}
         for sym in held:
@@ -266,6 +281,23 @@ class Heartless:
             self.market.set_symbols(self.universe)
             await self.emit("universe", {"message": f"유니버스 갱신: +{','.join(added) or '-'} / -{','.join(removed) or '-'}",
                                          "added": added, "removed": removed, "universe": self.universe})
+
+    def _keep_members(self, new: list[str], tickers: list[dict]) -> None:
+        """Universe hysteresis (UNIVERSE_KEEP_FRACTION): current members that fell out of `new` only because their 24h
+        volume dipped a little under the entry threshold are kept, best volume first, within the universe size."""
+        vol: dict[str, float] = {}
+        for t in tickers:
+            try:
+                vol[t["symbol"]] = float(t.get("quoteVolume", 0.0) or 0.0)
+            except (KeyError, TypeError, ValueError):
+                continue
+        keep_min = self.s.universe_min_quote_volume * UNIVERSE_KEEP_FRACTION
+        for sym in sorted((s for s in self.universe if s not in new), key=lambda s: -vol.get(s, 0.0)):
+            info = self.symbols.get(sym)
+            if len(new) >= self.s.universe_size:
+                break
+            if info is not None and info.status == "TRADING" and vol.get(sym, 0.0) >= keep_min:
+                new.append(sym)
 
     async def _backfill(self, symbols: list[str]) -> set[str]:
         """Fetch the missing 1m history (and funding) into the store. Returns the symbols whose fetch failed; they
@@ -620,6 +652,10 @@ class Heartless:
             except Exception as e:  # noqa: BLE001
                 log.warning("gap fill %s failed: %s", sym, e)
         ca.append(c)
+        if c.open_time % MS_DAY == 0:
+            # once a day per symbol, here and not in the scheduler: the feature rebuild thread reads `ca` and only this
+            # worker mutates it, between rebuilds
+            self._trim_history(ca, c.open_time)
         self.store.save_candles(sym, [c])
         self.last_bar_ts[sym] = c.close_time
         view = self.views.get(sym)
@@ -650,6 +686,12 @@ class Heartless:
                 log.exception("engine %s on_bar failed for %s", eng.name, sym)
         if sym == "BTCUSDT":
             await self._btc_shock_check(view)
+
+    def _trim_history(self, ca: CandleArrays, now: int) -> None:
+        """Drop 1m bars older than max(HISTORY_DAYS, LIVE_HISTORY_DAYS) days, cut at a UTC midnight so every 5m/15m/1h
+        group that remains is whole."""
+        keep = max(self.s.history_days, LIVE_HISTORY_DAYS) * MS_DAY
+        ca.trim_before(now - now % MS_DAY - keep)
 
     @staticmethod
     def _rebuild_view(view: MarketView, ca: CandleArrays, tfs: list[str]) -> None:

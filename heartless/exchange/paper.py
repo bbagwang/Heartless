@@ -173,12 +173,40 @@ class PaperAccount(Account):
         return out
 
     async def open_orders(self, symbol: str | None = None) -> list[dict]:
-        return [vars(o) if not hasattr(o, "__slots__") else {k: getattr(o, k) for k in o.__slots__}
-                for o in self.orders.values() if o.status in ("NEW", "PARTIALLY_FILLED") and (symbol is None or o.symbol == symbol)]
+        """Working orders in the shape of Binance GET /fapi/v1/openOrders (orderId, clientOrderId, origQty, ...; values
+        as numbers), so code written against the exchange (engine.reconcile) reads a simulated account the same way.
+        The simulator's own field names (order_id, client_id, qty, ...) are kept alongside for existing callers."""
+        return [self._order_row(o) for o in self.orders.values()
+                if o.status in ("NEW", "PARTIALLY_FILLED") and (symbol is None or o.symbol == symbol)]
 
     async def open_algo_orders(self, symbol: str | None = None) -> list[dict]:
-        return [{k: getattr(a, k) for k in a.__slots__} for a in self.algos.values()
+        """Working conditional orders in the shape of Binance GET /fapi/v1/openAlgoOrders (algoId, clientAlgoId,
+        orderType, triggerPrice, closePosition, ...; values as numbers). The order type used to be reported only as
+        `kind`, which engine.reconcile (it reads `orderType`) could not recognise as a stop. The simulator's own field
+        names are kept alongside."""
+        return [self._algo_row(a) for a in self.algos.values()
                 if a.status == "NEW" and (symbol is None or a.symbol == symbol)]
+
+    @staticmethod
+    def _order_row(o: PaperOrder) -> dict:
+        row = {k: getattr(o, k) for k in o.__slots__}
+        row.update(orderId=o.order_id, clientOrderId=o.client_id, symbol=o.symbol, side=o.side, positionSide="BOTH",
+                   type="LIMIT" if o.price is not None else "MARKET", origType="LIMIT" if o.price is not None else "MARKET",
+                   origQty=o.qty, executedQty=o.filled_qty, price=o.price if o.price is not None else 0.0,
+                   avgPrice=o.avg_price, cumQuote=o.filled_qty * o.avg_price, reduceOnly=o.reduce_only,
+                   closePosition=False, stopPrice=0.0, timeInForce="GTX" if o.post_only else "GTC", status=o.status,
+                   time=o.created, updateTime=o.created, workingType="CONTRACT_PRICE")
+        return row
+
+    @staticmethod
+    def _algo_row(a: PaperAlgo) -> dict:
+        row = {k: getattr(a, k) for k in a.__slots__}
+        row.update(algoId=a.algo_id, clientAlgoId=a.client_id, algoType="CONDITIONAL", orderType=a.kind,
+                   symbol=a.symbol, side=a.side, positionSide="BOTH", quantity=a.qty or 0.0, algoStatus=a.status,
+                   triggerPrice=a.trigger, price=0.0, closePosition=a.close_position, reduceOnly=not a.close_position,
+                   workingType="MARK_PRICE", priceProtect=True, timeInForce="GTC", createTime=a.created,
+                   updateTime=a.created)
+        return row
 
     async def prepare_symbol(self, symbol: str, leverage: int) -> None:
         self.leverages[symbol] = leverage

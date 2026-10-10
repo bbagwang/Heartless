@@ -36,12 +36,14 @@ TELEGRAM_API_ATTEMPTS = 4      # one request + up to three re-sends after a 429 
 
 
 class TelegramBot:
-    def __init__(self, app):
+    def __init__(self, app, client: httpx.AsyncClient | None = None):
+        """`client` replaces the HTTP client for the Bot API (the replay harness passes one with a capture transport
+        that records every message and serves scripted owner commands)."""
         self.app = app
         self.s = app.s
         self.token = self.s.telegram_bot_token
         self.base = f"https://api.telegram.org/bot{self.token}"
-        self.client = httpx.AsyncClient(timeout=70)
+        self.client = client or httpx.AsyncClient(timeout=70)
         self.owner_id: int | None = self.s.telegram_owner_id or app.store.get("telegram.owner")
         self.pairing_code: str | None = None
         self._pairing_born = time.monotonic()
@@ -286,7 +288,7 @@ class TelegramBot:
 
     def _confirm(self, action: str, question: str) -> None:
         token = secrets.token_hex(4)
-        self._pending_confirm[token] = (action, time.time())
+        self._pending_confirm[token] = (action, now_ms() / 1000)
         self.send(question, keyboard=[[{"text": "✅ 확인", "callback_data": f"cf:{token}"},
                                        {"text": "취소", "callback_data": "cancel"}]])
 
@@ -300,7 +302,7 @@ class TelegramBot:
         if data.startswith("cf:"):
             token = data[3:]
             item = self._pending_confirm.pop(token, None)
-            if not item or time.time() - item[1] > 300:
+            if not item or now_ms() / 1000 - item[1] > 300:
                 self.send("확인 요청이 만료되었습니다. 다시 시도하세요")
                 return
             action = item[0]
@@ -364,7 +366,7 @@ class TelegramBot:
         elif topic == "risk_event":
             self.send(f"⚠️ <b>리스크</b> {F.esc(p.get('message', ''))}")
         elif topic == "error":
-            now = time.time()
+            now = now_ms() / 1000  # the app clock (virtual in a replay), like every other schedule
             self._error_bucket = [t for t in self._error_bucket if now - t < 600]
             if len(self._error_bucket) < 5:
                 self._error_bucket.append(now)

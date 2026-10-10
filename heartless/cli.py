@@ -76,6 +76,9 @@ def main(argv: list[str] | None = None) -> None:
     dc.add_argument("--valid", default=None, metavar="START:END", help="VALID window as ISO dates (default: stored split)")
     dc.add_argument("--unseal", action="append", default=[], metavar="PERIOD",
                     help="deliberately mine/validate on a sealed period; loud warning + seal ledger entry")
+    from heartless.replay.cli import add_replay_parser
+
+    add_replay_parser(sub)
     sub.add_parser("doctor", help="check configuration and connectivity")
     sub.add_parser("params", help="print the champion parameters")
     args = parser.parse_args(argv)
@@ -99,6 +102,10 @@ def main(argv: list[str] | None = None) -> None:
         main_cli(settings, args)
     elif cmd == "discover":
         _discover(settings, args)
+    elif cmd == "replay":
+        from heartless.replay.cli import main_cli as replay_main
+
+        replay_main(settings, args)
     elif cmd == "doctor":
         asyncio.run(_doctor(settings))
     elif cmd == "params":
