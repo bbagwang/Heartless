@@ -858,12 +858,23 @@ class Heartless:
         """Persist polled positioning rows (archive-shaped, keyed by bucket start). The research worker's backtests read
         metrics from the store like the lab does; with polled rows kept in memory only, every research cycle evaluated
         the metrics alphas (positioning, funding_fade) without data, so they could never pass and be switched back on.
-        A bucket polled while still incomplete is overwritten by the next polls (each re-reads the newest buckets)."""
+        A bucket polled while still incomplete is completed by the next polls (each re-reads the newest buckets). A value
+        missing from this poll keeps the stored one: a bucket that only some series answered (one series lagging a
+        bucket behind the others, or answering empty) would otherwise erase what an earlier poll stored, and with a
+        steady one-bucket lag every bucket would end up holding a single series once it left the poll window."""
         from types import SimpleNamespace
 
         cols = ("oi", "oi_value", "top_ls_accounts", "top_ls_positions", "ls_accounts", "taker_ls_vol")
         try:
-            self.store.save_metrics(sym, [SimpleNamespace(ts=int(r["ts"]), **{c: r.get(c) for c in cols}) for r in rows])
+            if not rows:
+                return
+            ts = [int(r["ts"]) for r in rows]
+            stored = {int(r["ts"]): r for r in self.store.load_metrics(sym, min(ts), max(ts))}
+            out = []
+            for t, r in zip(ts, rows):
+                old = stored.get(t) or {}
+                out.append(SimpleNamespace(ts=t, **{c: r.get(c) if r.get(c) is not None else old.get(c) for c in cols}))
+            self.store.save_metrics(sym, out)
         except Exception as e:  # noqa: BLE001 - persistence must never break the live series
             log.warning("metrics store %s failed: %s", sym, e)
 

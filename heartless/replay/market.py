@@ -43,8 +43,15 @@ def _s(x: float) -> str:
 class ReplaySource:
     """Read-only access to a stored history, chunked per symbol for minute-by-minute emission."""
 
-    def __init__(self, db_path: str, symbols: list[str] | None = None, spread_bps: float = 1.0):
+    def __init__(self, db_path: str, symbols: list[str] | None = None, spread_bps: float = 1.0,
+                 floor_ms: int | None = None, ceil_ms: int | None = None):
+        """Nothing outside [floor_ms, ceil_ms] is ever served (candles, funding, metrics, the funding estimate). The
+        replay passes the span its seal check covered (seed start .. end): the bot asks for HISTORY_DAYS of history on
+        its own, the funding estimate looks at the next settlement, and the source store may hold a sealed period
+        right before or after the window."""
         self.path = str(db_path)
+        self.floor = int(floor_ms) if floor_ms is not None else -(2**62)
+        self.ceil = int(ceil_ms) if ceil_ms is not None else 2**62
         self._conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
         stored = [r[0] for r in self._conn.execute("SELECT DISTINCT symbol FROM candles ORDER BY symbol")]
         want = [s.upper() for s in symbols] if symbols else stored
@@ -59,8 +66,8 @@ class ReplaySource:
         for s in self.symbols:
             r = self._conn.execute("SELECT MIN(open_time) FROM candles WHERE symbol=?", (s,)).fetchone()
             self._first[s] = int(r[0])
-            rows = self._conn.execute("SELECT funding_time, rate, mark FROM funding WHERE symbol=? ORDER BY funding_time",
-                                      (s,)).fetchall()
+            rows = self._conn.execute("SELECT funding_time, rate, mark FROM funding WHERE symbol=? AND funding_time>=? "
+                                      "AND funding_time<=? ORDER BY funding_time", (s, self.floor, self.ceil)).fetchall()
             self._funding[s] = (np.array([r[0] for r in rows], dtype=np.int64), np.array([r[1] for r in rows], dtype=float),
                                 np.array([r[2] or 0.0 for r in rows], dtype=float))
 
@@ -93,32 +100,36 @@ class ReplaySource:
 
     def kline_rows(self, symbol: str, start: int | None, end: int | None, limit: int, now: int) -> list[list]:
         """REST /fapi/v1/klines rows for closed bars only (close_time <= now)."""
+        now = min(now, self.ceil)
         limit = max(1, min(int(limit or 500), 1500))
         hi = now if end is None else min(int(end), now)
         if start is not None:
             rows = self._conn.execute(f"SELECT {_CANDLE_COLS} FROM candles WHERE symbol=? AND open_time>=? AND "
                                       f"open_time<=? AND close_time<=? ORDER BY open_time LIMIT ?",
-                                      (symbol, int(start), hi, now, limit)).fetchall()
+                                      (symbol, max(int(start), self.floor), hi, now, limit)).fetchall()
         else:
-            rows = self._conn.execute(f"SELECT {_CANDLE_COLS} FROM candles WHERE symbol=? AND open_time<=? AND "
-                                      f"close_time<=? ORDER BY open_time DESC LIMIT ?", (symbol, hi, now, limit)).fetchall()
+            rows = self._conn.execute(f"SELECT {_CANDLE_COLS} FROM candles WHERE symbol=? AND open_time>=? AND "
+                                      f"open_time<=? AND close_time<=? ORDER BY open_time DESC LIMIT ?",
+                                      (symbol, self.floor, hi, now, limit)).fetchall()
             rows.reverse()
         return [[int(r[0]), _s(r[1]), _s(r[2]), _s(r[3]), _s(r[4]), _s(r[5]), int(r[9]), _s(r[6]), int(r[7] or 0),
                  _s(r[8] or 0.0), _s((r[8] or 0.0) * r[4]), "0"] for r in rows]
 
     def last_close(self, symbol: str, now: int) -> float:
-        r = self._conn.execute("SELECT close FROM candles WHERE symbol=? AND close_time<=? ORDER BY open_time DESC "
-                               "LIMIT 1", (symbol, now)).fetchone()
+        now = min(now, self.ceil)
+        r = self._conn.execute("SELECT close FROM candles WHERE symbol=? AND open_time>=? AND close_time<=? ORDER BY "
+                               "open_time DESC LIMIT 1", (symbol, self.floor, now)).fetchone()
         return float(r[0]) if r else 0.0
 
     def ticker_24h(self, symbol: str, now: int) -> dict | None:
+        now = min(now, self.ceil)
+        lo = max(now - MS_DAY, self.floor)
         r = self._conn.execute("SELECT SUM(quote_volume), SUM(volume), MAX(high), MIN(low), COUNT(*) FROM candles "
-                               "WHERE symbol=? AND open_time>=? AND close_time<=?",
-                               (symbol, now - MS_DAY, now)).fetchone()
+                               "WHERE symbol=? AND open_time>=? AND close_time<=?", (symbol, lo, now)).fetchone()
         if not r or not r[4]:
             return None
         first = self._conn.execute("SELECT open FROM candles WHERE symbol=? AND open_time>=? ORDER BY open_time LIMIT 1",
-                                   (symbol, now - MS_DAY)).fetchone()
+                                   (symbol, lo)).fetchone()
         last = self.last_close(symbol, now)
         op = float(first[0]) if first else last
         return {"symbol": symbol, "priceChange": _s(last - op), "priceChangePercent": _s((last / op - 1) * 100 if op else 0),
@@ -132,10 +143,10 @@ class ReplaySource:
         from heartless.learning.lab import infer_symbol_info
 
         rows = self._conn.execute("SELECT close FROM candles WHERE symbol=? AND open_time>=? AND open_time<? ORDER BY "
-                                  "open_time", (symbol, before_ms - 30 * MS_DAY, before_ms)).fetchall()
+                                  "open_time", (symbol, max(before_ms - 30 * MS_DAY, self.floor), before_ms)).fetchall()
         if not rows:
-            rows = self._conn.execute("SELECT close FROM candles WHERE symbol=? ORDER BY open_time LIMIT 43200",
-                                      (symbol,)).fetchall()
+            rows = self._conn.execute("SELECT close FROM candles WHERE symbol=? AND open_time>=? ORDER BY open_time "
+                                      "LIMIT 43200", (symbol, self.floor)).fetchall()
         info = infer_symbol_info(symbol, np.array([r[0] for r in rows], dtype=float))
         info.onboard_date = self._first[symbol]
         return info
@@ -143,6 +154,7 @@ class ReplaySource:
     # --- funding -------------------------------------------------------------------------------------
     def funding_rows(self, symbol: str, start: int | None, end: int | None, limit: int, now: int) -> list[dict]:
         t, r, m = self._funding.get(symbol, (np.zeros(0, dtype=np.int64), np.zeros(0), np.zeros(0)))
+        now = min(now, self.ceil)
         hi = now if end is None else min(int(end), now)
         lo_i = int(np.searchsorted(t, int(start))) if start is not None else 0
         hi_i = int(np.searchsorted(t, hi, side="right"))
@@ -172,13 +184,13 @@ class ReplaySource:
     def metrics_rows(self, symbol: str, limit: int, now: int, start: int | None = None,
                      end: int | None = None) -> list[sqlite3.Row]:
         """Archive rows (bucket start ts) whose 5m bucket has closed at `now`, newest `limit`, ascending."""
-        hi = now - METRICS_BUCKET
+        hi = min(now, self.ceil) - METRICS_BUCKET
         if end is not None:
             hi = min(hi, int(end) - METRICS_BUCKET)
         limit = max(1, min(int(limit or 30), 500))
         sql = ("SELECT ts, oi, oi_value, top_ls_accounts, top_ls_positions, ls_accounts, taker_ls_vol FROM metrics "
-               "WHERE symbol=? AND ts<=?")
-        params: list[Any] = [symbol, hi]
+               "WHERE symbol=? AND ts<=? AND ts>=?")
+        params: list[Any] = [symbol, hi, self.floor]
         if start is not None:
             sql += " AND ts>=?"
             params.append(int(start) - METRICS_BUCKET)

@@ -86,8 +86,10 @@ def rss_mb() -> float:
 
 
 class InvariantChecker:
-    def __init__(self, app, tolerance: float = 1e-6, keep: int = 50):
+    def __init__(self, app, tolerance: float = 1e-10, keep: int = 50):
         self.app = app
+        # ledger tolerance, relative to the initial balance (1e-6 USDT on 10k): the books are exact float sums whose
+        # error stays near 1e-11 USDT over months, while a missed funding payment on a small position is ~1e-3 USDT
         self.tol = tolerance
         self.keep = keep  # violations stored in full per check (all are counted)
         self.runs = {k: 0 for k in CHECKS}
@@ -124,15 +126,20 @@ class InvariantChecker:
         self.runs["exceptions"] += 1
         self.runs["network"] += 1
         for name, eng in list(self.app.engines.items()):
-            acc = eng.account
-            if not isinstance(acc, PaperAccount):
-                continue
-            algos = await acc.open_algo_orders()
-            orders = await acc.open_orders()
-            self._positions(name, eng, acc)
-            self._stops(name, eng, algos)
-            self._orphans(name, eng, algos, orders)
-            self._ledger(name, eng, acc)
+            await self.check_engine(name, eng)
+
+    async def check_engine(self, name: str, eng) -> None:
+        """positions / stops / orphans / ledger of one engine (also run on a challenger right after its retirement
+        close-out, which happens after it left app.engines and so is never reached by the minute checks)."""
+        acc = eng.account
+        if not isinstance(acc, PaperAccount):
+            return
+        algos = await acc.open_algo_orders()
+        orders = await acc.open_orders()
+        self._positions(name, eng, acc)
+        self._stops(name, eng, algos)
+        self._orphans(name, eng, algos, orders)
+        self._ledger(name, eng, acc)
 
     def _step(self, sym: str) -> float:
         info = self.app.symbols.get(sym)

@@ -17,7 +17,7 @@ def add_replay_parser(sub) -> argparse.ArgumentParser:
     rp.add_argument("--overwrite", action="store_true", help="wipe a non-empty --work-dir first")
     rp.add_argument("--speed", default="max", help="'max' or virtual seconds per real second (e.g. 600)")
     rp.add_argument("--seed-days", type=int, default=60, help="history before --start copied into the bot's store")
-    rp.add_argument("--seed-metrics", action="store_true", help="also copy the 5m metrics (production stores none)")
+    rp.add_argument("--seed-metrics", action="store_true", help="also copy the 5m metrics (default: none, like a bot that only starts polling them now)")
     rp.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="bot setting override, e.g. RESEARCH_INTERVAL_MINUTES=1440 (env-style names)")
     rp.add_argument("--params", default=None, help="StrategyParams JSON installed as the starting champion")

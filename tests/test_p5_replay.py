@@ -196,6 +196,52 @@ def test_fault_injection_is_detected_end_to_end(tmp_path, small_frames):
     assert "injected task failure" in details and "injected error log" in details
 
 
+def test_a_check_that_raises_once_fails_the_run_and_checking_goes_on(tmp_path, small_frames, monkeypatch):
+    """The per-minute checks run in a task nobody awaits: one exception inside a check used to end that task silently,
+    and the replay then passed with no invariant checked for the rest of the window."""
+    from heartless.replay.invariants import InvariantChecker
+
+    orig = InvariantChecker._orphans
+
+    def break_once(app):
+        def boom(self, *a, **k):
+            monkeypatch.setattr(InvariantChecker, "_orphans", orig)  # a transient failure
+            raise KeyError("checker bug")
+
+        monkeypatch.setattr(InvariantChecker, "_orphans", boom)
+
+    cfg = ReplayConfig(source_db=build_source(tmp_path / "src.db", 1, ["ETHUSDT"]), start_ms=START,
+                       end_ms=START + 2 * MS_HOUR - 1, work_dir=str(tmp_path / "bot"), seed_days=SEED_DAYS,
+                       settings=NO_LEARNING, commands=[], inject=[(START + 20 * MS_MINUTE, break_once)])
+    s = run_replay(cfg)
+    assert not s["passed"]
+    (v,) = s["invariants"]["violations"]
+    assert v["check"] == "exceptions" and "invariant check failed: KeyError" in v["detail"]
+    assert v["ts"] == START + 20 * MS_MINUTE + 500
+    checks = s["invariants"]["checks"]
+    assert checks["orphans"]["runs"] >= 110 and checks["ledger"]["runs"] >= 110  # every later minute still checked
+
+
+def test_a_retired_challengers_close_out_is_checked(tmp_path, small_frames):
+    """Retiring a challenger closes its books after it left app.engines, out of reach of the minute checks (and a new
+    challenger in that slot deletes its trades): the replay checks the retired engine once more right away."""
+    async def stray_then_retire(app):
+        slot = app.challengers[0]
+        await app.paper_accounts[slot.name].place_stop("ETHUSDT", "SELL", 1.0, close_position=True)
+        await app.retire_challenger(slot, "test")
+
+    challenger = StrategyParams.from_dict(busy_params()).clone(version="vretire", note="seeded challenger")
+    at = START + 30 * MS_MINUTE
+    cfg = ReplayConfig(source_db=build_source(tmp_path / "src.db", 1, ["ETHUSDT"]), start_ms=START,
+                       end_ms=START + MS_HOUR - 1, work_dir=str(tmp_path / "bot"), seed_days=SEED_DAYS,
+                       settings=NO_LEARNING, commands=[], inject=[(at, stray_then_retire)],
+                       seed_challengers=[("challenger-1", challenger.to_dict(), START - MS_DAY, "seeded")])
+    s = run_replay(cfg)
+    assert s["learning"]["challengers_retired"] and not s["learning"]["challengers_final"]
+    (v,) = s["invariants"]["violations"]
+    assert v["check"] == "orphans" and v["engine"] == "challenger-1" and v["ts"] == at
+
+
 def test_command_specs_parse_offsets_and_dates():
     assert parse_command("+2d=/pause", START).at_ms == START + 2 * MS_DAY
     assert parse_command("+1d6h30m=/close BTCUSDT", START) == ScriptedCommand(START + 30 * MS_HOUR + 30 * MS_MINUTE,
@@ -211,6 +257,80 @@ def test_a_window_touching_the_sealed_period_is_refused(tmp_path):
     src = build_source(tmp_path / "src.db", 1, ["ETHUSDT"])
     with pytest.raises(SealedError):  # the seed history (the 60 days before start) reaches into 2025
         run_replay(ReplayConfig(source_db=src, start_ms=START, end_ms=START + MS_DAY - 1))
+
+
+def test_a_work_dir_holding_the_source_is_refused(tmp_path):
+    """`overwrite` wipes the work dir; pointed at the data dir (the default source lives there) it deleted the very
+    history it was about to replay."""
+    src = build_source(tmp_path / "src.db", 1, ["ETHUSDT"])
+    with pytest.raises(ValueError, match="contains the replay source"):
+        run_replay(ReplayConfig(source_db=src, start_ms=START, end_ms=START + MS_HOUR - 1, work_dir=str(tmp_path),
+                                seed_days=SEED_DAYS, overwrite=True))
+    assert (tmp_path / "src.db").exists()
+
+
+def test_output_files_may_go_to_new_folders(tmp_path, small_frames):
+    """The messages / trades dumps are written when the run is over: a missing folder raised then and lost the run."""
+    out = tmp_path / "runs" / "a"
+    s = run_replay(ReplayConfig(source_db=build_source(tmp_path / "src.db", 1, ["ETHUSDT"]), start_ms=START,
+                                end_ms=START + 30 * MS_MINUTE - 1, work_dir=str(tmp_path / "bot"), seed_days=SEED_DAYS,
+                                settings=NO_LEARNING, commands=[], messages_out=str(out / "m.jsonl"),
+                                trades_out=str(out / "t.json"), out_report=str(tmp_path / "rep" / "r.txt")))
+    assert s["passed"] and (out / "m.jsonl").exists() and (out / "t.json").exists()
+    assert (tmp_path / "rep" / "r.txt").read_text().startswith("Heartless replay")
+
+
+def test_the_replay_serves_nothing_older_than_the_seal_checked_seed_window(tmp_path, small_frames):
+    """The seal check covers [start - seed_days, end]; the replayed bot backfills HISTORY_DAYS (here longer than the
+    seed) from the replay REST, which used to answer from the whole source store, sealed 2025 included."""
+    start = 1_768_435_200_000  # 2026-01-15 00:00 UTC
+    t0 = start - 22 * MS_DAY  # 2025-12-24: the source reaches into the sealed year
+    st = Store(tmp_path / "src.db")
+    ca = synth_candles(22 * 1440 + 180, seed=5, start_ms=t0, price=200.0, vol=0.0012)
+    st.save_candles("ETHUSDT", [ca.candle_at(k) for k in range(ca.n)])
+    st.save_funding("ETHUSDT", [(t, 0.0001, 0.0) for t in range(t0, start + 3 * MS_HOUR, 8 * MS_HOUR)])
+    st.close()
+    s = run_replay(ReplayConfig(source_db=str(tmp_path / "src.db"), start_ms=start, end_ms=start + 2 * MS_HOUR - 1,
+                                work_dir=str(tmp_path / "bot"), seed_days=10, commands=[],
+                                settings={**NO_LEARNING, "HISTORY_DAYS": 21}))
+    assert s["market"]["bars"] == 120
+    con = sqlite3.connect(str(tmp_path / "bot" / "heartless.db"))
+    try:
+        floor = start - 10 * MS_DAY
+        assert con.execute("SELECT MIN(open_time) FROM candles").fetchone()[0] >= floor
+        assert con.execute("SELECT MIN(funding_time) FROM funding").fetchone()[0] >= floor
+    finally:
+        con.close()
+
+
+def test_the_replay_serves_nothing_after_the_window_end(tmp_path, small_frames):
+    """A window that ends right before the sealed year passes the seal check, but the stream's funding estimate is
+    blended toward the NEXT settlement: in the last hours it showed the first sealed rate."""
+    end = 1_735_689_600_000 - 1  # 2024-12-31 23:59:59.999, the last instant before the sealed 2025
+    start = end + 1 - 2 * MS_HOUR
+    t0 = start - 12 * MS_DAY
+    st = Store(tmp_path / "src.db")
+    ca = synth_candles(12 * 1440 + 180, seed=6, start_ms=t0, price=200.0, vol=0.0012)  # runs into 2025
+    st.save_candles("ETHUSDT", [ca.candle_at(k) for k in range(ca.n)])
+    eight = 8 * MS_HOUR
+    st.save_funding("ETHUSDT", [(t, 0.0001, 0.0) for t in range(t0 - t0 % eight + eight, end, eight)]
+                    + [(end + 1, 0.0123, 0.0)])  # the first settlement of the sealed year
+    st.close()
+    seen: dict[str, float] = {}
+
+    def peek(app):
+        seen["r"] = app.tickers["ETHUSDT"].funding_rate
+
+    s = run_replay(ReplayConfig(source_db=str(tmp_path / "src.db"), start_ms=start, end_ms=end,
+                                work_dir=str(tmp_path / "bot"), seed_days=10, commands=[], settings=NO_LEARNING,
+                                inject=[(end + 1 - 90_000, peek)]))
+    assert s["market"]["bars"] == 120 and seen["r"] == pytest.approx(0.0001)
+    con = sqlite3.connect(str(tmp_path / "bot" / "heartless.db"))
+    try:
+        assert con.execute("SELECT MAX(close_time) FROM candles").fetchone()[0] <= end
+        assert con.execute("SELECT MAX(funding_time) FROM funding").fetchone()[0] <= end
+    finally:
+        con.close()
 
 
 def _trade(engine: str, i: int, r: float, exit_time: int) -> dict:

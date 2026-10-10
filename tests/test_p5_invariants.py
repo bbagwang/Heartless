@@ -161,6 +161,11 @@ def test_ledger_detects_a_corrupted_balance_and_a_corrupted_engine_book(world):
     eng.positions[SYM].fees += 1.0  # the engine booked a fee the account never charged
     checks(chk)
     assert chk.counts["ledger"] == 3 and "stored trades + open positions" in chk.samples[-1].detail
+    eng.positions[SYM].fees -= 1.0
+    assert checks(chk).get("ledger") == 3  # consistent again
+    acc.wallet += 0.001  # e.g. a funding payment on a 10 USDT position that no book recorded
+    checks(chk)
+    assert chk.counts["ledger"] == 5
 
 
 def test_exceptions_are_violations(world):
@@ -194,6 +199,7 @@ def test_reported_pnl_is_checked_against_stored_trades(world):
     # a report that is off by one trade or by a cent is caught
     today["stats"]["net"] += 0.02
     chk.on_message(SentMessage(clock(), "daily_report", F.fmt_daily(today, week, status, "UTC")))
+    today["stats"]["net"] -= 0.02  # the right amount, but one trade too many: the count alone must be caught
     today["stats"]["n"] = 2
     chk.on_message(SentMessage(clock(), "cmd:/pnl", F.fmt_pnl({"period": "today", "engine": "paper",
                                                                "stats": today["stats"]}, "UTC")))

@@ -173,6 +173,41 @@ async def _ret(v):
     return v
 
 
+class _LaggingMetricsRest(_MetricsRest):
+    """Every series answers its newest `limit` points, but the taker series lags one bucket behind the others (or
+    answers nothing at all), so a poll's oldest/newest bucket comes from only some of the endpoints."""
+
+    def __init__(self, stamps: list[int], taker: list[int]):
+        super().__init__(stamps)
+        self.taker = taker
+
+    async def taker_long_short_ratio(self, symbol, period="5m", limit=30):
+        return [{"buySellRatio": "0.9", "timestamp": t} for t in self.taker]
+
+
+def test_a_partial_poll_never_erases_stored_metrics():
+    """Each poll re-reads the newest buckets. A bucket that only some series answered in this poll (a lagging or empty
+    series) was written as a whole row with the other columns NULL, erasing the values an earlier poll had stored, and
+    with a series that lags by one bucket that happened to every bucket as it left the poll window."""
+    app = _app()
+    app.universe = ["BTCUSDT"]
+    b = 300_000
+    stamps = [START + i * b for i in range(1, 7)]
+    app.rest = _LaggingMetricsRest(stamps, [t - b for t in stamps])
+    asyncio.run(app._poll_metrics())
+    full = {r["ts"]: r for r in app.store.load_metrics("BTCUSDT")}
+    assert full[START]["oi"] == 1000 and full[START]["taker_ls_vol"] == 0.9  # stamp START + b: every series
+    app.rest = _LaggingMetricsRest([t + b for t in stamps], stamps)  # one bucket later: START + b only from taker
+    asyncio.run(app._poll_metrics())
+    rows = {r["ts"]: r for r in app.store.load_metrics("BTCUSDT")}
+    assert rows[START]["oi"] == 1000 and rows[START]["top_ls_positions"] == 1.5 and rows[START]["taker_ls_vol"] == 0.9
+    app.rest = _LaggingMetricsRest([t + b for t in stamps], [])  # the taker series answers nothing this time
+    asyncio.run(app._poll_metrics())
+    rows = {r["ts"]: r for r in app.store.load_metrics("BTCUSDT")}
+    assert all(rows[t - b]["taker_ls_vol"] == 0.9 for t in stamps)  # nothing stored is lost
+    assert rows[START + 5 * b]["taker_ls_vol"] == 0.9 and rows[START + 6 * b]["taker_ls_vol"] is None
+
+
 def test_a_trade_closed_seconds_after_midnight_counts_for_the_new_day():
     """The engines' daily counters (the "today" line of close messages) were reset only when the 5 s scheduler noticed
     the new day: a stop filled in between was booked into the old day's counter and then wiped. The day now rolls

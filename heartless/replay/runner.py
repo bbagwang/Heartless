@@ -46,7 +46,7 @@ class ReplayConfig:
     symbols: list[str] | None = None
     speed: float | None = None  # virtual seconds per real second; None = as fast as possible
     seed_days: int = 60  # history copied into the bot's store before start (research/discovery need it)
-    seed_metrics: bool = False  # the production bot never stores metrics; True gives research the archive metrics
+    seed_metrics: bool = False  # True: copy the archive metrics too (the bot stores what it polls only from start on)
     settings: dict[str, Any] = field(default_factory=dict)
     params: dict | None = None  # StrategyParams dict installed as the starting champion (default: shipped defaults)
     commands: list | None = None  # ScriptedCommand list; None = DEFAULT_SCRIPT
@@ -99,7 +99,7 @@ class _LogCapture(logging.Handler):
 
 def _prepare_store(cfg: ReplayConfig, work: Path, symbols: list[str]) -> None:
     """Fresh bot store holding the `seed_days` of history before start, as a bot that has been collecting data would
-    have (candles, funding; metrics only on request: the production bot keeps polled metrics in memory only)."""
+    have (candles, funding; metrics only on request: the bot stores the metrics it polls, from its own start on)."""
     from heartless.core.store import Store
 
     db = work / "heartless.db"
@@ -164,7 +164,8 @@ def run_replay(cfg: ReplayConfig) -> dict:
         raise ValueError("replay window is empty")
     # the replayed bot reads the seed history (research / discovery evaluate it) and the window itself
     seal.check_window(cfg.start_ms - cfg.seed_days * MS_DAY, cfg.end_ms)
-    source = ReplaySource(cfg.source_db, cfg.symbols)
+    # the source serves nothing outside the span the seal check just covered (the bot fetches HISTORY_DAYS itself)
+    source = ReplaySource(cfg.source_db, cfg.symbols, floor_ms=cfg.start_ms - cfg.seed_days * MS_DAY, ceil_ms=cfg.end_ms)
     try:
         symbols = source.symbols
         for s in symbols:
@@ -173,6 +174,9 @@ def run_replay(cfg: ReplayConfig) -> dict:
                 raise ValueError(f"{s}: no stored candles in the replay window")
         if cfg.work_dir:
             work = Path(cfg.work_dir)
+            if Path(cfg.source_db).resolve().is_relative_to(work.resolve()):
+                # --overwrite wipes the work dir: pointed at the data dir it would delete the history being replayed
+                raise ValueError(f"work dir {work} contains the replay source {cfg.source_db}; pick another work dir")
             if work.exists() and any(work.iterdir()):
                 if not cfg.overwrite:
                     raise FileExistsError(f"work dir {work} is not empty (pass overwrite / --overwrite)")
@@ -186,6 +190,10 @@ def run_replay(cfg: ReplayConfig) -> dict:
         if commands is None:
             commands = [parse_command(c, cfg.start_ms) for c in DEFAULT_SCRIPT]
         commands = [c for c in commands if cfg.start_ms <= c.at_ms <= cfg.end_ms]
+        # output folders up front: the messages / trades dumps are written at the end of a run that may take hours
+        for out in (cfg.out_json, cfg.out_report, cfg.messages_out, cfg.trades_out):
+            if out:
+                Path(out).parent.mkdir(parents=True, exist_ok=True)
         ctx = _Run(cfg, settings, source, symbols, commands, work)
         wall0 = time.perf_counter()
         old_factory = logging.getLogRecordFactory()
@@ -349,18 +357,26 @@ class _Run:
         next_progress = cfg.start_ms + MS_DAY
         while not market.finished.is_set():
             await loop.sleep_until_ms(nxt)
-            if app.engines:
-                await checker.check_minute()
             now = now_ms()
-            if now >= next_mem:
-                checker.sample_memory(cfg.tracemalloc)
-                next_mem += cfg.memory_every_ms
-            if now >= next_trades:
-                checker.check_trades()
-                next_trades += MS_HOUR
-            if now >= next_progress:
-                next_progress += MS_DAY
-                self._progress(app, market)
+            # a check that raises fails the run and the following minutes are still checked: an exception escaping
+            # this task used to end it silently (nobody awaits it), and the replay passed with its checks stopped
+            try:
+                if app.engines:
+                    await checker.check_minute()
+            except Exception as e:  # noqa: BLE001
+                checker.violation("exceptions", f"invariant check failed: {type(e).__name__}: {e}")
+            try:
+                if now >= next_mem:
+                    next_mem += cfg.memory_every_ms
+                    checker.sample_memory(cfg.tracemalloc)
+                if now >= next_trades:
+                    next_trades += MS_HOUR
+                    checker.check_trades()
+                if now >= next_progress:
+                    next_progress += MS_DAY
+                    self._progress(app, market)
+            except Exception as e:  # noqa: BLE001
+                checker.violation("exceptions", f"invariant check failed: {type(e).__name__}: {e}")
             nxt += cfg.check_every_ms
 
     def _progress(self, app, market) -> None:
@@ -400,6 +416,7 @@ class _Run:
         orig_cycle, orig_disc, orig_eval = research.cycle, research.discovery_cycle, research.evaluate_challengers
         orig_install = app.install_challenger
         orig_start = app._start_challenger
+        orig_retire = app.retire_challenger
         seed = self.cfg.seed
         if seed is not None:
             app.bandit.rng.seed(seed)
@@ -452,9 +469,21 @@ class _Run:
                                    "slot": slot.name if slot else None, "version": params.version, "note": params.note})
             return slot
 
+        async def retire_challenger(slot, reason: str, silent: bool = False):
+            eng = app.engines.get(slot.name)
+            await orig_retire(slot, reason, silent)
+            if eng is not None and self.checker is not None:
+                # its close-out runs after it left app.engines: check the final books before the slot is reused (a
+                # new challenger in the same slot deletes these trades)
+                try:
+                    await self.checker.check_engine(slot.name, eng)
+                except Exception as e:  # noqa: BLE001
+                    self.checker.violation("exceptions", f"invariant check failed: {type(e).__name__}: {e}")
+
         research.cycle, research.discovery_cycle, research.evaluate_challengers = cycle, discovery_cycle, evaluate_challengers
         app.install_challenger = install_challenger
         app._start_challenger = start_challenger
+        app.retire_challenger = retire_challenger
 
     def _make_counter(self, topic: str):
         async def handler(p: dict) -> None:
