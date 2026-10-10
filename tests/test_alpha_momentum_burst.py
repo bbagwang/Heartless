@@ -144,8 +144,9 @@ def test_warmup_nan_blocks_both_sides():
     assert evaluate(up_burst(close=[101.0, 102.0])) is None  # bar before the burst missing
 
 
-def test_shipped_enabled_with_research_defaults():
+def test_shipped_disabled_after_oos_judgement_with_research_defaults():
     p = params()
-    assert MomentumBurst.enabled_by_default is True and StrategyParams.default().enabled["momentum_burst"] is True
+    # switched off by the pre-registered 2022-2024 OOS judgement (ROADMAP P1, docs/OOS_2022_2024.md)
+    assert MomentumBurst.enabled_by_default is False and StrategyParams.default().enabled["momentum_burst"] is False
     assert (p["burst_atr"], p["vol_z_min"], p["trend_align"], p["ft_max"], p["sl_atr"], p["tp_r"], p["max_hold"]) == \
         (2.0, 3.0, 1, 0.5, 1.5, 2.5, 8)

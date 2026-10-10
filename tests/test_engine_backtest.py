@@ -10,6 +10,15 @@ from heartless.strategy.params import StrategyParams
 from synth import synth_candles, synth_symbols
 
 
+def _params() -> StrategyParams:
+    """Shipped defaults with the three 1h alphas these engine tests exercise switched on explicitly (they were the
+    shipped set until the 2022-2024 OOS judgement turned every alpha off by default, ROADMAP P1)."""
+    p = StrategyParams.default()
+    for a in ("htf_trend", "intraday_levels", "momentum_burst"):
+        p.enabled[a] = True
+    return p
+
+
 def _bt(n=8000, syms=("BTCUSDT", "ETHUSDT")):
     s = Settings(_env_file=None)
     candles = {name: synth_candles(n, seed=i, price=100 * (i + 1)) for i, name in enumerate(syms)}
@@ -18,7 +27,7 @@ def _bt(n=8000, syms=("BTCUSDT", "ETHUSDT")):
 
 def test_backtest_runs_and_accounts_consistently():
     s, bt, _ = _bt()
-    res = bt.run(StrategyParams.default())
+    res = bt.run(_params())
     st = res.stats
     assert st["n"] >= 1
     # closed-trade pnl must reconcile with the account equity change
@@ -31,7 +40,7 @@ def test_backtest_runs_and_accounts_consistently():
 
 def test_stop_losses_are_close_to_one_r():
     s, bt, _ = _bt(12000, ("BTCUSDT", "ETHUSDT", "SOLUSDT"))
-    res = bt.run(StrategyParams.default())
+    res = bt.run(_params())
     sl = [t["r_multiple"] for t in res.trades if t["exit_reason"].startswith("손절")]
     if len(sl) >= 5:
         assert -2.0 < float(np.mean(sl)) < -0.6

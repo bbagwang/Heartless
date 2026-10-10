@@ -44,7 +44,7 @@ def vol_z(close: float, past: float, atr: float, bars: int) -> float:
 class HtfTrend(Alpha):
     name = "htf_trend"
     timeframe = TF
-    enabled_by_default = True  # met the TRAIN/stress/VALID acceptance gates (see the caveats in the module docstring)
+    enabled_by_default = False  # failed the pre-registered OOS judgement on 2022-2024 (ROADMAP P1, docs/OOS_2022_2024.md)
     description = ("1-week time-series momentum (vol-scaled 168h return) entered on a 2-day pullback against it; "
                    "post-only entry, 3-ATR 1h stop, far target + 1h chandelier trail, ~2 day hold")
     # tunable parameters (the shared min_conf / tp1_frac are added by the registry; tp1_frac is unused: no partial)

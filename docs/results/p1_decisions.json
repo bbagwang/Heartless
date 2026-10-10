@@ -1,0 +1,714 @@
+{
+ "purpose": "ROADMAP P1: one-shot pre-registered out-of-sample judgement of the shipped alphas on OOS-1",
+ "pre_registration": "docs/ROADMAP.md P1, commit 0ae5e7c",
+ "window": "2022-01-13 00:00 .. 2024-12-31 23:59 UTC (lab --start 2022-01-13 --end 2025-01-01)",
+ "universe": "12 core symbols: BTC ETH SOL XRP DOGE ADA AVAX LINK LTC BCH BNB SUI (SUI from 2023-05-03)",
+ "params": "shipped defaults (data/longhist has no stored champion; params_version v0-default+lab)",
+ "rules": {
+  "enabled (htf_trend, intraday_levels, momentum_burst) stay on iff": "pooled avg_r > 0 AND pooled t_day >= 2.0 AND >= 2 of 3 years avg_r > 0 AND stress pooled avg_r > 0",
+  "disabled (trend_pullback, squeeze_breakout, mean_reversion, funding_fade, sweep_reversal, positioning) turn on iff": "pooled avg_r >= 0.05 AND pooled t_day >= 3.0 AND 3 of 3 years avg_r > 0 AND stress pooled avg_r > 0",
+  "numbers": "pooled over all trades including chunk-boundary trades, as rounded in the result files (avg_r 4 decimals, t_day 2 decimals); years by entry time; excl-boundary numbers are information only"
+ },
+ "alphas": {
+  "htf_trend": {
+   "group": "enabled (keep rule)",
+   "inputs": {
+    "n": 2064,
+    "avg_r": -0.0421,
+    "t_day": -1.07,
+    "profit_factor": 0.887,
+    "years": {
+     "2022": {
+      "n": 631,
+      "avg_r": 0.0102,
+      "t_day": 0.13,
+      "profit_factor": 0.991
+     },
+     "2023": {
+      "n": 642,
+      "avg_r": -0.0965,
+      "t_day": -1.49,
+      "profit_factor": 0.803
+     },
+     "2024": {
+      "n": 791,
+      "avg_r": -0.0396,
+      "t_day": -0.63,
+      "profit_factor": 0.876
+     }
+    },
+    "years_positive": 1,
+    "stress_avg_r": -0.0568,
+    "stress_t_day": -1.46,
+    "stress_profit_factor": 0.854
+   },
+   "checks": {
+    "avg_r > 0": false,
+    "t_day >= 2.0": false,
+    ">= 2 of 3 years avg_r > 0": false,
+    "stress avg_r > 0": false
+   },
+   "before": true,
+   "after": false,
+   "decision": "turn off",
+   "info_excl_boundary": {
+    "boundary_trades": 0,
+    "n": 2064,
+    "avg_r": -0.0421,
+    "t_day": -1.07,
+    "profit_factor": 0.887,
+    "stress_n": 2063,
+    "stress_avg_r": -0.0568
+   },
+   "info_by_side": {
+    "LONG": {
+     "n": 965,
+     "avg_r": -0.0618,
+     "t_day": -1.21
+    },
+    "SHORT": {
+     "n": 1099,
+     "avg_r": -0.0248,
+     "t_day": -0.41
+    }
+   },
+   "files": [
+    "docs/results/p1_htf_trend_nominal.json",
+    "docs/results/p1_htf_trend_stress.json"
+   ],
+   "git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "stress_git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "params_version": "v0-default+lab",
+   "lab_seconds": [
+    616.7,
+    654.5
+   ],
+   "errors": {
+    "SUIUSDT@2022": "not enough candles"
+   }
+  },
+  "intraday_levels": {
+   "group": "enabled (keep rule)",
+   "inputs": {
+    "n": 2212,
+    "avg_r": -0.1293,
+    "t_day": -3.92,
+    "profit_factor": 0.726,
+    "years": {
+     "2022": {
+      "n": 870,
+      "avg_r": -0.1625,
+      "t_day": -2.64,
+      "profit_factor": 0.657
+     },
+     "2023": {
+      "n": 505,
+      "avg_r": -0.0966,
+      "t_day": -1.72,
+      "profit_factor": 0.787
+     },
+     "2024": {
+      "n": 837,
+      "avg_r": -0.1145,
+      "t_day": -2.34,
+      "profit_factor": 0.767
+     }
+    },
+    "years_positive": 0,
+    "stress_avg_r": -0.1448,
+    "stress_t_day": -4.47,
+    "stress_profit_factor": 0.695
+   },
+   "checks": {
+    "avg_r > 0": false,
+    "t_day >= 2.0": false,
+    ">= 2 of 3 years avg_r > 0": false,
+    "stress avg_r > 0": false
+   },
+   "before": true,
+   "after": false,
+   "decision": "turn off",
+   "info_excl_boundary": {
+    "boundary_trades": 0,
+    "n": 2212,
+    "avg_r": -0.1293,
+    "t_day": -3.92,
+    "profit_factor": 0.726,
+    "stress_n": 2212,
+    "stress_avg_r": -0.1448
+   },
+   "info_by_side": {
+    "LONG": {
+     "n": 1134,
+     "avg_r": -0.1344,
+     "t_day": -3.21
+    },
+    "SHORT": {
+     "n": 1078,
+     "avg_r": -0.1239,
+     "t_day": -2.34
+    }
+   },
+   "files": [
+    "docs/results/p1_intraday_levels_nominal.json",
+    "docs/results/p1_intraday_levels_stress.json"
+   ],
+   "git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "stress_git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "params_version": "v0-default+lab",
+   "lab_seconds": [
+    617.0,
+    681.2
+   ],
+   "errors": {
+    "SUIUSDT@2022": "not enough candles"
+   }
+  },
+  "momentum_burst": {
+   "group": "enabled (keep rule)",
+   "inputs": {
+    "n": 1360,
+    "avg_r": -0.1612,
+    "t_day": -3.81,
+    "profit_factor": 0.667,
+    "years": {
+     "2022": {
+      "n": 416,
+      "avg_r": -0.2422,
+      "t_day": -2.69,
+      "profit_factor": 0.587
+     },
+     "2023": {
+      "n": 515,
+      "avg_r": -0.1024,
+      "t_day": -1.9,
+      "profit_factor": 0.731
+     },
+     "2024": {
+      "n": 429,
+      "avg_r": -0.1533,
+      "t_day": -1.98,
+      "profit_factor": 0.688
+     }
+    },
+    "years_positive": 0,
+    "stress_avg_r": -0.1964,
+    "stress_t_day": -4.78,
+    "stress_profit_factor": 0.601
+   },
+   "checks": {
+    "avg_r > 0": false,
+    "t_day >= 2.0": false,
+    ">= 2 of 3 years avg_r > 0": false,
+    "stress avg_r > 0": false
+   },
+   "before": true,
+   "after": false,
+   "decision": "turn off",
+   "info_excl_boundary": {
+    "boundary_trades": 0,
+    "n": 1360,
+    "avg_r": -0.1612,
+    "t_day": -3.81,
+    "profit_factor": 0.667,
+    "stress_n": 1360,
+    "stress_avg_r": -0.1964
+   },
+   "info_by_side": {
+    "LONG": {
+     "n": 796,
+     "avg_r": -0.1167,
+     "t_day": -1.79
+    },
+    "SHORT": {
+     "n": 564,
+     "avg_r": -0.2241,
+     "t_day": -4.98
+    }
+   },
+   "files": [
+    "docs/results/p1_momentum_burst_nominal.json",
+    "docs/results/p1_momentum_burst_stress.json"
+   ],
+   "git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "stress_git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "params_version": "v0-default+lab",
+   "lab_seconds": [
+    655.4,
+    623.5
+   ],
+   "errors": {
+    "SUIUSDT@2022": "not enough candles"
+   }
+  },
+  "trend_pullback": {
+   "group": "disabled (turn-on rule)",
+   "inputs": {
+    "n": 9831,
+    "avg_r": -0.0166,
+    "t_day": -0.72,
+    "profit_factor": 0.963,
+    "years": {
+     "2022": {
+      "n": 2958,
+      "avg_r": 0.0004,
+      "t_day": 0.01,
+      "profit_factor": 1.0
+     },
+     "2023": {
+      "n": 3441,
+      "avg_r": -0.0621,
+      "t_day": -1.63,
+      "profit_factor": 0.865
+     },
+     "2024": {
+      "n": 3432,
+      "avg_r": 0.0143,
+      "t_day": 0.39,
+      "profit_factor": 1.03
+     }
+    },
+    "years_positive": 2,
+    "stress_avg_r": -0.0432,
+    "stress_t_day": -1.94,
+    "stress_profit_factor": 0.904
+   },
+   "checks": {
+    "avg_r >= 0.05": false,
+    "t_day >= 3.0": false,
+    "3 of 3 years avg_r > 0": false,
+    "stress avg_r > 0": false
+   },
+   "before": false,
+   "after": false,
+   "decision": "stay off",
+   "info_excl_boundary": {
+    "boundary_trades": 0,
+    "n": 9831,
+    "avg_r": -0.0166,
+    "t_day": -0.72,
+    "profit_factor": 0.963,
+    "stress_n": 9894,
+    "stress_avg_r": -0.0432
+   },
+   "info_by_side": {
+    "LONG": {
+     "n": 4687,
+     "avg_r": -0.0367,
+     "t_day": -1.34
+    },
+    "SHORT": {
+     "n": 5144,
+     "avg_r": 0.0017,
+     "t_day": 0.05
+    }
+   },
+   "files": [
+    "docs/results/p1_trend_pullback_nominal.json",
+    "docs/results/p1_trend_pullback_stress.json"
+   ],
+   "git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "stress_git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "params_version": "v0-default+lab",
+   "lab_seconds": [
+    713.6,
+    643.9
+   ],
+   "errors": {
+    "SUIUSDT@2022": "not enough candles"
+   }
+  },
+  "squeeze_breakout": {
+   "group": "disabled (turn-on rule)",
+   "inputs": {
+    "n": 1226,
+    "avg_r": 0.0178,
+    "t_day": 0.39,
+    "profit_factor": 1.045,
+    "years": {
+     "2022": {
+      "n": 402,
+      "avg_r": 0.0063,
+      "t_day": 0.07,
+      "profit_factor": 1.048
+     },
+     "2023": {
+      "n": 413,
+      "avg_r": 0.0097,
+      "t_day": 0.14,
+      "profit_factor": 1.02
+     },
+     "2024": {
+      "n": 411,
+      "avg_r": 0.0372,
+      "t_day": 0.51,
+      "profit_factor": 1.065
+     }
+    },
+    "years_positive": 3,
+    "stress_avg_r": -0.0107,
+    "stress_t_day": -0.24,
+    "stress_profit_factor": 0.98
+   },
+   "checks": {
+    "avg_r >= 0.05": false,
+    "t_day >= 3.0": false,
+    "3 of 3 years avg_r > 0": true,
+    "stress avg_r > 0": false
+   },
+   "before": false,
+   "after": false,
+   "decision": "stay off",
+   "info_excl_boundary": {
+    "boundary_trades": 0,
+    "n": 1226,
+    "avg_r": 0.0178,
+    "t_day": 0.39,
+    "profit_factor": 1.045,
+    "stress_n": 1226,
+    "stress_avg_r": -0.0107
+   },
+   "info_by_side": {
+    "LONG": {
+     "n": 549,
+     "avg_r": 0.0915,
+     "t_day": 1.45
+    },
+    "SHORT": {
+     "n": 677,
+     "avg_r": -0.0419,
+     "t_day": -0.65
+    }
+   },
+   "files": [
+    "docs/results/p1_squeeze_breakout_nominal.json",
+    "docs/results/p1_squeeze_breakout_stress.json"
+   ],
+   "git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "stress_git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "params_version": "v0-default+lab",
+   "lab_seconds": [
+    608.4,
+    598.9
+   ],
+   "errors": {
+    "SUIUSDT@2022": "not enough candles"
+   }
+  },
+  "mean_reversion": {
+   "group": "disabled (turn-on rule)",
+   "inputs": {
+    "n": 851,
+    "avg_r": -0.084,
+    "t_day": -7.5,
+    "profit_factor": 0.36,
+    "years": {
+     "2022": {
+      "n": 287,
+      "avg_r": -0.0766,
+      "t_day": -3.17,
+      "profit_factor": 0.379
+     },
+     "2023": {
+      "n": 338,
+      "avg_r": -0.0821,
+      "t_day": -6.11,
+      "profit_factor": 0.357
+     },
+     "2024": {
+      "n": 226,
+      "avg_r": -0.0964,
+      "t_day": -4.62,
+      "profit_factor": 0.343
+     }
+    },
+    "years_positive": 0,
+    "stress_avg_r": -0.1102,
+    "stress_t_day": -10.03,
+    "stress_profit_factor": 0.278
+   },
+   "checks": {
+    "avg_r >= 0.05": false,
+    "t_day >= 3.0": false,
+    "3 of 3 years avg_r > 0": false,
+    "stress avg_r > 0": false
+   },
+   "before": false,
+   "after": false,
+   "decision": "stay off",
+   "info_excl_boundary": {
+    "boundary_trades": 0,
+    "n": 851,
+    "avg_r": -0.084,
+    "t_day": -7.5,
+    "profit_factor": 0.36,
+    "stress_n": 853,
+    "stress_avg_r": -0.1102
+   },
+   "info_by_side": {
+    "LONG": {
+     "n": 325,
+     "avg_r": -0.069,
+     "t_day": -3.31
+    },
+    "SHORT": {
+     "n": 526,
+     "avg_r": -0.0933,
+     "t_day": -7.74
+    }
+   },
+   "files": [
+    "docs/results/p1_mean_reversion_nominal.json",
+    "docs/results/p1_mean_reversion_stress.json"
+   ],
+   "git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "stress_git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "params_version": "v0-default+lab",
+   "lab_seconds": [
+    578.8,
+    581.6
+   ],
+   "errors": {
+    "SUIUSDT@2022": "not enough candles"
+   }
+  },
+  "funding_fade": {
+   "group": "disabled (turn-on rule)",
+   "inputs": {
+    "n": 1291,
+    "avg_r": -0.0374,
+    "t_day": -1.03,
+    "profit_factor": 0.911,
+    "years": {
+     "2022": {
+      "n": 69,
+      "avg_r": -0.068,
+      "t_day": -0.43,
+      "profit_factor": 0.863
+     },
+     "2023": {
+      "n": 587,
+      "avg_r": -0.0229,
+      "t_day": -0.43,
+      "profit_factor": 0.947
+     },
+     "2024": {
+      "n": 635,
+      "avg_r": -0.0474,
+      "t_day": -0.91,
+      "profit_factor": 0.884
+     }
+    },
+    "years_positive": 0,
+    "stress_avg_r": -0.0607,
+    "stress_t_day": -1.71,
+    "stress_profit_factor": 0.864
+   },
+   "checks": {
+    "avg_r >= 0.05": false,
+    "t_day >= 3.0": false,
+    "3 of 3 years avg_r > 0": false,
+    "stress avg_r > 0": false
+   },
+   "before": false,
+   "after": false,
+   "decision": "stay off",
+   "info_excl_boundary": {
+    "boundary_trades": 0,
+    "n": 1291,
+    "avg_r": -0.0374,
+    "t_day": -1.03,
+    "profit_factor": 0.911,
+    "stress_n": 1291,
+    "stress_avg_r": -0.0607
+   },
+   "info_by_side": {
+    "LONG": {
+     "n": 524,
+     "avg_r": 0.0212,
+     "t_day": 0.34
+    },
+    "SHORT": {
+     "n": 767,
+     "avg_r": -0.0774,
+     "t_day": -1.63
+    }
+   },
+   "files": [
+    "docs/results/p1_funding_fade_nominal.json",
+    "docs/results/p1_funding_fade_stress.json"
+   ],
+   "git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "stress_git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "params_version": "v0-default+lab",
+   "lab_seconds": [
+    607.3,
+    599.1
+   ],
+   "errors": {
+    "SUIUSDT@2022": "not enough candles"
+   }
+  },
+  "sweep_reversal": {
+   "group": "disabled (turn-on rule)",
+   "inputs": {
+    "n": 12514,
+    "avg_r": -0.078,
+    "t_day": -6.28,
+    "profit_factor": 0.826,
+    "years": {
+     "2022": {
+      "n": 3959,
+      "avg_r": -0.0614,
+      "t_day": -2.49,
+      "profit_factor": 0.863
+     },
+     "2023": {
+      "n": 4002,
+      "avg_r": -0.0861,
+      "t_day": -4.24,
+      "profit_factor": 0.805
+     },
+     "2024": {
+      "n": 4553,
+      "avg_r": -0.0853,
+      "t_day": -4.31,
+      "profit_factor": 0.811
+     }
+    },
+    "years_positive": 0,
+    "stress_avg_r": -0.1032,
+    "stress_t_day": -8.53,
+    "stress_profit_factor": 0.77
+   },
+   "checks": {
+    "avg_r >= 0.05": false,
+    "t_day >= 3.0": false,
+    "3 of 3 years avg_r > 0": false,
+    "stress avg_r > 0": false
+   },
+   "before": false,
+   "after": false,
+   "decision": "stay off",
+   "info_excl_boundary": {
+    "boundary_trades": 0,
+    "n": 12514,
+    "avg_r": -0.078,
+    "t_day": -6.28,
+    "profit_factor": 0.826,
+    "stress_n": 12513,
+    "stress_avg_r": -0.1032
+   },
+   "info_by_side": {
+    "LONG": {
+     "n": 6050,
+     "avg_r": -0.0921,
+     "t_day": -4.37
+    },
+    "SHORT": {
+     "n": 6464,
+     "avg_r": -0.0649,
+     "t_day": -3.61
+    }
+   },
+   "files": [
+    "docs/results/p1_sweep_reversal_nominal.json",
+    "docs/results/p1_sweep_reversal_stress.json"
+   ],
+   "git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "stress_git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "params_version": "v0-default+lab",
+   "lab_seconds": [
+    619.9,
+    637.7
+   ],
+   "errors": {
+    "SUIUSDT@2022": "not enough candles"
+   }
+  },
+  "positioning": {
+   "group": "disabled (turn-on rule)",
+   "inputs": {
+    "n": 865,
+    "avg_r": -0.1032,
+    "t_day": -2.59,
+    "profit_factor": 0.788,
+    "years": {
+     "2022": {
+      "n": 150,
+      "avg_r": -0.1825,
+      "t_day": -1.72,
+      "profit_factor": 0.712
+     },
+     "2023": {
+      "n": 357,
+      "avg_r": -0.0481,
+      "t_day": -0.88,
+      "profit_factor": 0.872
+     },
+     "2024": {
+      "n": 358,
+      "avg_r": -0.1248,
+      "t_day": -1.89,
+      "profit_factor": 0.755
+     }
+    },
+    "years_positive": 0,
+    "stress_avg_r": -0.124,
+    "stress_t_day": -3.19,
+    "stress_profit_factor": 0.744
+   },
+   "checks": {
+    "avg_r >= 0.05": false,
+    "t_day >= 3.0": false,
+    "3 of 3 years avg_r > 0": false,
+    "stress avg_r > 0": false
+   },
+   "before": false,
+   "after": false,
+   "decision": "stay off",
+   "info_excl_boundary": {
+    "boundary_trades": 0,
+    "n": 865,
+    "avg_r": -0.1032,
+    "t_day": -2.59,
+    "profit_factor": 0.788,
+    "stress_n": 865,
+    "stress_avg_r": -0.124
+   },
+   "info_by_side": {
+    "LONG": {
+     "n": 329,
+     "avg_r": -0.1815,
+     "t_day": -2.69
+    },
+    "SHORT": {
+     "n": 536,
+     "avg_r": -0.0551,
+     "t_day": -1.11
+    }
+   },
+   "files": [
+    "docs/results/p1_positioning_nominal.json",
+    "docs/results/p1_positioning_stress.json"
+   ],
+   "git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "stress_git_commit": "9608578e3bb6fd88be63e8a5059a6d8582536f11",
+   "params_version": "v0-default+lab",
+   "lab_seconds": [
+    600.5,
+    605.0
+   ],
+   "errors": {
+    "SUIUSDT@2022": "not enough candles"
+   }
+  }
+ },
+ "enabled_before": [
+  "htf_trend",
+  "intraday_levels",
+  "momentum_burst"
+ ],
+ "enabled_after": [],
+ "generated_utc": "2026-10-10T07:12:53Z"
+}

@@ -190,8 +190,10 @@ def _legacy_champion() -> dict:
 
 
 def test_from_stored_resets_alphas_saved_for_an_older_design():
-    p, reset = StrategyParams.from_stored(_legacy_champion())
     base = StrategyParams.default()
+    d = _legacy_champion()
+    d["enabled"]["htf_trend"] = base.enabled["htf_trend"]  # this stored flag already equals the shipped one
+    p, reset = StrategyParams.from_stored(d)
     assert p.enabled == base.enabled  # shipped (validated) on/off state wins over the stale flags
     assert p.alphas["mean_reversion"] == base.alphas["mean_reversion"]
     assert p.ensemble == base.ensemble

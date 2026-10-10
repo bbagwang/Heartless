@@ -75,7 +75,7 @@ class IntradayLevels(Alpha):
 
     name = "intraday_levels"
     timeframe = TF
-    enabled_by_default = True  # meets the lab acceptance criteria on TRAIN, --stress and VALID (see module docstring)
+    enabled_by_default = False  # failed the pre-registered OOS judgement on 2022-2024 (ROADMAP P1, docs/OOS_2022_2024.md)
     description = ("UTC-day intraday momentum: at 13:00 UTC a move of >= k_adr x ADR from the 00:00 UTC open, in a "
                    "volatile market, is joined into the US session; post-only entry, 1h-ATR stop, partial + target, "
                    "8h time stop")

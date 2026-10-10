@@ -40,7 +40,7 @@ LAG = 1  # the burst bar is LAG bars before the decision bar (wait one hour for 
 class MomentumBurst(Alpha):
     name = "momentum_burst"
     timeframe = TF
-    enabled_by_default = True  # passed the TRAIN acceptance criteria, the cost stress test and VALID
+    enabled_by_default = False  # failed the pre-registered OOS judgement on 2022-2024 (ROADMAP P1, docs/OOS_2022_2024.md)
     description = ("Fade a high-volume 1h burst bar (>= 2 ATR, volume z >= 3) that extended the 1h EMA50/200 trend, "
                    "one bar later once it stalled; 1.5 1h-ATR stop, 2.5R target, ~8h hold (market entry)")
     # tunable parameters (the shared min_conf / tp1_frac are added by the registry; tp1_frac is unused: no partial)

@@ -397,8 +397,9 @@ async def test_failed_backfill_is_retried_and_repairs_history():
 # --- startup: which alphas trade ------------------------------------------------------------------------------
 def test_startup_summary_names_the_enabled_alphas_or_warns_when_none():
     app, _ = _make_app()
+    app.params.enabled["htf_trend"] = True  # the shipped set is empty since the 2022-2024 OOS judgement (P1)
     active = app.enabled_alphas()
-    assert active == [a for a, on in app.params.enabled.items() if on]
+    assert active == [a for a, on in app.params.enabled.items() if on] and "htf_trend" in active
     assert f"활성 알파: {', '.join(active)}" in app.startup_summary()
     for a in app.params.enabled:
         app.params.enabled[a] = False
