@@ -73,8 +73,23 @@ def main(argv: list[str] | None = None) -> None:
     lb.add_argument("--meta", action="store_true", help="enable the walk-forward meta-labeling filter")
     lb.add_argument("--json", action="store_true")
     lb.add_argument("--trades-out", default=None)
+    # P2a research options
+    lb.add_argument("--universe", default=None, choices=["core", "extended", "all"],
+                    help="symbol set instead of --symbols: core (12), extended (core + 8 research symbols), all stored")
+    lb.add_argument("--tag", default=None, metavar="FAMILY",
+                    help="append this run to the P2 trial ledger docs/results/p2_trials.jsonl under FAMILY")
     dc = sub.add_parser("discover", help="mine rule-based alphas on stored history (TRAIN) and validate them (VALID)")
-    dc.add_argument("--tf", default="15m", choices=["15m", "1h"])
+    dc.add_argument("--tf", default="15m", help="decision grid(s), comma separated: 15m, 1h, 1d (00:00 UTC daily)")
+    dc.add_argument("--grid", default=None, help="same as --tf (e.g. 1h,1d); the t bar counts every grid's rules")
+    dc.add_argument("--templates", default="classic", choices=["classic", "time", "all"],
+                    help="exit templates: stop/target/timeout (classic), 8h/24h/72h time exits behind a 4 ATR stop "
+                         "(time), or both")
+    dc.add_argument("--context", action="store_true",
+                    help="add the market-context features (built on demand, see `heartless context build`)")
+    dc.add_argument("--tag", default=None, metavar="FAMILY",
+                    help="append the search (rules evaluated) to the P2 trial ledger; the t bar then also counts the "
+                         "family's earlier trials")
+    dc.add_argument("--universe", default=None, choices=["core", "extended", "all"], help="symbol set instead of --symbols")
     dc.add_argument("--symbols", default=None)
     dc.add_argument("--beam", type=int, default=30)
     dc.add_argument("--depth", type=int, default=3)
@@ -85,6 +100,14 @@ def main(argv: list[str] | None = None) -> None:
     dc.add_argument("--valid", default=None, metavar="START:END", help="VALID window as ISO dates (default: stored split)")
     dc.add_argument("--unseal", action="append", default=[], metavar="PERIOD",
                     help="deliberately mine/validate on a sealed period; loud warning + seal ledger entry")
+    cx = sub.add_parser("context", help="market context: hourly cross-sectional features (build / status)")
+    cx.add_argument("action", choices=["build", "status"])
+    cx.add_argument("--start", default=None, help="ISO date (default: first stored candle)")
+    cx.add_argument("--end", default=None, help="ISO date, exclusive (default: last complete stored hour)")
+    cx.add_argument("--rebuild", action="store_true", help="recompute everything (default: resume, skip built years)")
+    tr = sub.add_parser("trials", help="P2 trial ledger: evaluated configurations per family and the t_day bar")
+    tr.add_argument("--family", default=None)
+    tr.add_argument("--ledger", default=None, help="ledger path (default docs/results/p2_trials.jsonl)")
     from heartless.replay.cli import add_replay_parser
 
     add_replay_parser(sub)
@@ -111,6 +134,12 @@ def main(argv: list[str] | None = None) -> None:
         main_cli(settings, args)
     elif cmd == "discover":
         _discover(settings, args)
+    elif cmd == "context":
+        _context(settings, args)
+    elif cmd == "trials":
+        from heartless.learning import trials
+
+        print(trials.report(trials.load(args.ledger), args.family))
     elif cmd == "replay":
         from heartless.replay.cli import main_cli as replay_main
 
@@ -495,12 +524,21 @@ def _discover(settings, args) -> None:
     from heartless.core.store import Store
     from heartless.learning import discovery as D
     from heartless.learning import seal
-    from heartless.learning.lab import store_splits
+    from heartless.learning.lab import store_splits, universe_symbols
 
     store = Store(settings.db_path)
-    symbols = [x.strip().upper() for x in args.symbols.split(",")] if args.symbols else store.candle_symbols()
     unseal = sorted(set(args.unseal or []))
+    tag = (getattr(args, "tag", None) or "").strip() or None
     try:
+        if getattr(args, "universe", None) and args.symbols:
+            raise ValueError("--symbols and --universe are mutually exclusive")
+        if getattr(args, "universe", None):
+            symbols = universe_symbols(args.universe, store)
+        else:
+            symbols = [x.strip().upper() for x in args.symbols.split(",")] if args.symbols else store.candle_symbols()
+        grids = D._grids(getattr(args, "grid", None) or args.tf)
+        if getattr(args, "tag", None) is not None and not tag:
+            raise ValueError("--tag needs a family name")
         sp = store_splits(store, symbols) if not (args.train and args.valid) else {}
         train = _window_arg(args.train) if args.train else sp["train"]
         valid = _window_arg(args.valid) if args.valid else sp["valid"]
@@ -519,24 +557,96 @@ def _discover(settings, args) -> None:
         else:
             print(f"note: --unseal {period} has no effect: neither window overlaps it (not recorded)", file=sys.stderr)
     cfg = D.SearchConfig(min_trades=args.min_trades, beam=args.beam, depth=args.depth)
-    res = D.mine(str(settings.db_path), symbols, train, valid, args.tf, cfg, workers=args.workers,
-                 progress=lambda m: print(m, file=sys.stderr, flush=True), unseal=[p for p in unseal if p in touched])
-    store.set("discovery.last", {"tf": args.tf, "tested": res["tested"], "t_bar": res["t_bar"], "passed": res["passed"],
-                                 "ts": now_ms()})
+    templates = getattr(args, "templates", "classic") or "classic"
+    context = None
+    if getattr(args, "context", False):
+        context = {"db": str(settings.context_db_path), "universe": settings.context_universe_list,
+                   "build": bool(settings.context_auto_build), "progress": lambda m: print(m, file=sys.stderr, flush=True)}
+    n_prior = 0
+    if tag:
+        from heartless.learning import trials
+
+        n_prior = trials.family_tests(tag)
+    kw = {"workers": args.workers, "progress": lambda m: print(m, file=sys.stderr, flush=True),
+          "unseal": [p for p in unseal if p in touched]}
+    if templates != "classic" or context or n_prior:  # the defaults keep the call the live discovery cycle makes
+        kw.update(templates=templates, context=context, n_prior=n_prior)
+    res = D.mine(str(settings.db_path), symbols, train, valid, ",".join(grids), cfg, **kw)
+    store.set("discovery.last", {"tf": res.get("tf", ",".join(grids)), "tested": res["tested"], "t_bar": res["t_bar"],
+                                 "passed": res["passed"], "ts": now_ms()})
     store.close()
-    print(f"tested {res['tested']} rules on {res['rows']['train']} TRAIN rows; family-wise t bar {res['t_bar']:.2f}; "
-          f"{len(res['passed'])} rule(s) passed VALID ({res['seconds']:.0f}s)")
+    trial = None
+    if tag:
+        best = res.get("best_train") or {}
+        conf = {"tool": "discover", "grids": grids, "templates": templates, "context": bool(context),
+                "features": len(D.FEATURES_X if context else D.FEATURES), "symbols": sorted(symbols),
+                "search": {"min_trades": cfg.min_trades, "beam": cfg.beam, "depth": cfg.depth},
+                "train": [int(train[0]), int(train[1])]}
+        trial = trials.record("discover", tag, conf, train, n=best.get("n"), avg_r=best.get("avg_r"),
+                              t_day=best.get("t_ex"), count=res["tested"],
+                              extra={"valid": [_iso(valid[0]), _iso(valid[1])], "argv": list(args.argv)})
+        res["trial"] = trial
+        n_fam = trials.family_tests(tag)
+        print(f"trial ledger: {tag} search {trial['config_hash']} with {res['tested']} rules recorded; family N={n_fam}, "
+              f"TRAIN bar t >= {trials.threshold(n_fam):.2f}", file=sys.stderr)
+    rows = res.get("rows", {})
+    print(f"tested {res['tested']} rules on {rows.get('train', 0)} TRAIN rows ({res.get('tf', ','.join(grids))}); "
+          f"family-wise t bar {res['t_bar']:.2f}" + (f" (N={res['n_tests']})" if res.get("n_tests") else "")
+          + f"; {len(res['passed'])} rule(s) passed VALID ({res['seconds']:.0f}s)")
     for r in res["results"]:
         st = r["rule"]["stats"]
         tr, va = st["train"], st["valid"]
-        print(f"{'PASS' if r['passed'] else 'fail'} {r['rule']['side']:5s} sl={r['rule']['sl_atr']} tp={r['rule']['tp_r']}R "
-              f"hold={r['rule']['hold_min']}m {r['rule']['conds']}")
+        tp = r["rule"]["tp_r"]
+        print(f"{'PASS' if r['passed'] else 'fail'} {r['rule']['tf']:3s} {r['rule']['side']:5s} sl={r['rule']['sl_atr']} "
+              f"tp={'-' if tp is None else str(tp) + 'R'} hold={r['rule']['hold_min']}m {r['rule']['conds']}")
         print(f"     TRAIN n={tr['n']} days={tr.get('days', 0)} avgR={tr['avg_r']:+.3f} excess={tr.get('avg_ex', 0):+.3f} "
               f"t={tr['t']:.2f} t_excess={tr.get('t_ex', 0):.2f} | VALID n={va['n']} avgR={va['avg_r']:+.3f} "
               f"excess={va.get('avg_ex', 0):+.3f} t={va['t']:.2f}")
     if args.out:
         with open(args.out, "w") as f:
             json.dump(res, f, default=str, indent=1)
+
+
+def _context(settings, args) -> None:
+    """`heartless context build|status`: the market_context table (heartless/data/context.py)."""
+    import time
+
+    from heartless.core.store import Store
+    from heartless.data import context as C
+    from heartless.learning.lab import parse_when
+
+    universe = settings.context_universe_list
+    src = Store(settings.db_path)
+    ctx_path = settings.context_db_path
+    dst = src if str(ctx_path) == str(settings.db_path) else Store(ctx_path)
+    try:
+        if args.action == "status":
+            meta = dst.get("context.meta")
+            st = dst.market_context_stats()
+            ok = C.meta_ok(meta, universe)
+            print(f"context store {ctx_path}: {st['hours']} hours, {st['rows']} rows, {_iso(st['first'])} .. "
+                  f"{_iso(st['last'])} UTC; version {'current' if ok else 'missing or outdated (rebuilt on the next build)'}")
+            for a, b in (meta or {}).get("built", []):
+                print(f"  built {_iso(a)} .. {_iso(b)}")
+            print(f"  universe ({len(universe)}): {', '.join(universe)}; stored candles: "
+                  f"{', '.join(C.stored_symbols(src, universe)) or '-'}")
+            return
+        start = parse_when(args.start) if args.start else None
+        end = parse_when(args.end, end=True) if args.end else None
+        t0 = time.time()
+        stats = C.build(src, dst, start, end, universe, rebuild=args.rebuild,
+                        progress=lambda m: print(m, file=sys.stderr, flush=True))
+        built = [u for u in stats["units"] if not u.get("skipped")]
+        print(f"context: {stats['hours']} hours / {stats['rows']} rows built in {len(built)} year(s), "
+              f"{len(stats['units']) - len(built)} already built; {len(stats['stored_symbols'])}/{len(universe)} "
+              f"universe symbols stored; {time.time() - t0:.0f}s -> {ctx_path}")
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        if dst is not src:
+            dst.close()
+        src.close()
 
 
 async def _fetch(settings, args) -> None:

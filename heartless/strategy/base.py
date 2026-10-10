@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from heartless.core.models import Regime, Signal, SymbolInfo, Ticker
+from heartless.data.context import EMPTY
 from heartless.data.features import MarketView
 
 
@@ -24,6 +26,11 @@ class Context:
     # derivatives positioning snapshot (open interest, long/short ratios, taker ratio) - see data/extras.py.
     # Identical computation in live trading and backtests; empty when no metrics are available.
     extras: dict = field(default_factory=dict)
+    # market context at the last hour close (data/context.py): the symbol's cross-sectional features (return ranks and
+    # z-scores, volume share, funding, OI change, distance from highs/lows) plus market-wide ones (BTC returns and trend,
+    # breadth, dispersion, median funding, aggregate OI) and "ts". Read-only and identical in live trading and backtests;
+    # empty when no context is available, so alphas must treat a missing key (or NaN) as "unknown".
+    market: Mapping = field(default_factory=lambda: EMPTY)
 
 
 def ok(*vals: float) -> bool:

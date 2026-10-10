@@ -79,6 +79,18 @@ class Settings(BaseSettings):
     graduation_max_drawdown_pct: float = Field(default=8.0, alias="GRADUATION_MAX_DD_PCT")
     daily_report_hour: int = Field(default=9, alias="DAILY_REPORT_HOUR")  # local hour (timezone above)
 
+    # --- market context (P2a, heartless/data/context.py) ---------------------------------------
+    # hourly cross-sectional features over a fixed universe (alphas read them as ctx.market); symbols without data at
+    # an hour are simply left out of that hour's cross-section
+    context_universe: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,LTCUSDT,"
+                                          "BCHUSDT,BNBUSDT,SUIUSDT,DOTUSDT,ATOMUSDT,NEARUSDT,FILUSDT,ETCUSDT,TRXUSDT,"
+                                          "UNIUSDT,AAVEUSDT", alias="CONTEXT_UNIVERSE")
+    # SQLite file holding the market_context table (empty: the main database). Derived data, rebuildable at any time;
+    # a separate file keeps a read-only research database untouched.
+    context_db: str = Field(default="", alias="CONTEXT_DB")
+    # lab / discover build missing context years on demand (otherwise only stored rows are used)
+    context_auto_build: bool = Field(default=True, alias="CONTEXT_AUTO_BUILD")
+
     @field_validator("telegram_owner_id", mode="before")
     @classmethod
     def _blank_owner_id_is_none(cls, v):
@@ -99,6 +111,14 @@ class Settings(BaseSettings):
     @property
     def always_include_list(self) -> list[str]:
         return [s.strip().upper() for s in self.always_include.split(",") if s.strip()]
+
+    @property
+    def context_universe_list(self) -> list[str]:
+        return sorted({s.strip().upper() for s in self.context_universe.split(",") if s.strip()})
+
+    @property
+    def context_db_path(self) -> Path:
+        return Path(self.context_db) if self.context_db else self.db_path
 
 
 def load_settings(**overrides) -> Settings:

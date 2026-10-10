@@ -12,9 +12,14 @@
   force-closed and flagged `boundary`, and reports show the statistics with and without those trades.
 * Every evaluated window passes the seal check (`heartless.learning.seal`): sealed periods are refused unless
   explicitly unsealed.
+* The market context (data/context.py) of the window is built on demand before the jobs start and each worker reads
+  its symbol's rows, so alphas see the same ctx.market as in live trading. Multi-chunk runs give every job a fresh
+  worker process, so a long multi-year run never accumulates memory across jobs.
+* `--tag FAMILY` appends the run to the P2 trial ledger (heartless.learning.trials).
 
 CLI: `heartless lab --alpha trend_pullback --split train --set trend_pullback.adx_min=24`
      `heartless lab --alpha htf_trend --years 2022,2023,2024 --by-side --out docs/results/htf_2022_2024.json`
+     `heartless lab --alpha xs_momentum --years 2022,2023,2024 --universe extended --tag xs_momentum`
 """
 from __future__ import annotations
 
@@ -31,6 +36,7 @@ from datetime import datetime, timezone
 import numpy as np
 
 from heartless.core.models import SymbolInfo
+from heartless.data.context import CORE_SYMBOLS, EXTRA_SYMBOLS
 from heartless.execution.stats import summarize
 from heartless.learning import seal
 from heartless.util.timeutil import MS_DAY, MS_MINUTE
@@ -42,6 +48,19 @@ WARMUP_MS = 12 * MS_DAY  # indicator warm-up loaded before the evaluation window
 RESEARCH_SETTINGS = {"DAILY_LOSS_LIMIT_PCT": 1000.0, "WEEKLY_LOSS_LIMIT_PCT": 1000.0, "MAX_DRAWDOWN_HALT_PCT": 1000.0}
 # cost stress test: 1.5x fees and 2x slippage; an edge that only exists at nominal costs is not an edge
 STRESS_SETTINGS = {"TAKER_FEE": 0.00075, "MAKER_FEE": 0.0003, "BACKTEST_SLIPPAGE_BPS": 3.0}
+
+
+# lab --universe: core = the 12 core symbols, extended = core + the 8 cross-coin research symbols (ROADMAP section 1),
+# all = every symbol with stored candles
+UNIVERSES = {"core": CORE_SYMBOLS, "extended": CORE_SYMBOLS + EXTRA_SYMBOLS}
+
+
+def universe_symbols(name: str, store=None) -> list[str]:
+    if name == "all":
+        return sorted(store.candle_symbols()) if store is not None else list(CORE_SYMBOLS + EXTRA_SYMBOLS)
+    if name not in UNIVERSES:
+        raise ValueError(f"unknown universe {name!r} (core, extended, all)")
+    return list(UNIVERSES[name])
 
 
 # --- symbol metadata -----------------------------------------------------------------------------------
@@ -201,8 +220,15 @@ def _run_symbol(job: dict) -> dict:
     mrows = store.load_metrics(sym, sim_start - warm, sim_end) if hasattr(store, "load_metrics") else []
     metrics = {sym: MetricsSeries.from_rows(mrows)} if mrows else {}
     store.close()
+    market = None
+    if job.get("context_db") and os.path.exists(job["context_db"]):
+        from heartless.data.context import MS_H, ContextTable
+
+        ctx_store = Store(job["context_db"])
+        market = ContextTable.load(ctx_store, [sym], sim_start - MS_H, sim_end)
+        ctx_store.close()
     settings = Settings(_env_file=None, **{**RESEARCH_SETTINGS, **job.get("settings", {})})
-    bt = Backtester(settings, {sym: info}, {sym: ca}, funding, metrics)
+    bt = Backtester(settings, {sym: info}, {sym: ca}, funding, metrics, market)
     params = StrategyParams.from_dict(job["params"])
     res = bt.run(params, sim_start, sim_end, only_alpha=job.get("only_alpha"), initial_balance=job.get("balance", 10_000.0))
     keep = ("symbol", "side", "alpha", "alphas", "regime", "entry_time", "exit_time", "entry_price", "exit_price", "pnl",
@@ -219,7 +245,8 @@ def _run_symbol(job: dict) -> dict:
             d["chunk"] = label
         trades.append(d)
     return {**base, "eff_start": eff_start, "sim": [sim_start, sim_end], "stats": summarize(trades), "trades": trades,
-            "skipped": res.skipped, "seconds": time.time() - t0, "bars": int(ca.n), "info": asdict(info)}
+            "skipped": res.skipped, "seconds": time.time() - t0, "bars": int(ca.n), "info": asdict(info),
+            "context_hours": len(market) if market is not None else 0}
 
 
 # --- aggregation -------------------------------------------------------------------------------------
@@ -378,15 +405,28 @@ def _group(trades: list[dict], key) -> dict:
     return {k: summarize(v) for k, v in _bucket(trades, key).items()}
 
 
+def prepare_context(db_path: str, context: dict, start: int, end: int, unseal=()) -> str | None:
+    """Build the missing market-context years for [start, end] (the simulated span, capped at a sealed period like
+    every other look-ahead read) and return the path of the store that holds them, or None when unavailable."""
+    from heartless.data import context as C
+
+    return C.prepare(db_path, context, start, seal.readable_until(start, end, unseal) if end > start else end)
+
+
 def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, only_alpha: str | None = None,
              workers: int | None = None, settings: dict | None = None, infos: dict | None = None,
              pool: ProcessPoolExecutor | None = None, chunk_days: int | None = None, unseal=(),
-             warmup_ms: int = WARMUP_MS, burn_in_ms: int = BURN_IN_MS, runoff_ms: int = RUNOFF_MS) -> LabResult:
+             warmup_ms: int = WARMUP_MS, burn_in_ms: int = BURN_IN_MS, runoff_ms: int = RUNOFF_MS,
+             context: dict | None = None) -> LabResult:
     """Backtest `params` on every symbol over [start, end] in parallel and aggregate the results.
 
     The window is cut into chunks (calendar years by default, `chunk_days` blocks, or none for 0); each
     (symbol, chunk) is an independent job with its own warm-up and the burn-in / run-off hand-off described at
-    BURN_IN_MS. Raises SealedError when [start, end] overlaps a sealed period that is not in `unseal`."""
+    BURN_IN_MS. Raises SealedError when [start, end] overlaps a sealed period that is not in `unseal`.
+
+    `context` = {"db": market_context store path, "universe": [...], "build": bool} attaches the market context:
+    the rows of the simulated span are built first when missing (and `build`), then every worker reads its symbol's
+    rows. None runs without it (ctx.market stays empty)."""
     seal.check_window(int(start), int(end), unseal)
     unseal = seal.opened(int(start), int(end), unseal)  # an unseal the window does not need opens nothing
     t0 = time.time()
@@ -399,15 +439,19 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
             return ""
         return str(datetime.fromtimestamp(a / 1000, tz=timezone.utc).year) if chunk_days is None else _iso(a)[:10]
 
+    ctx_db = prepare_context(str(db_path), context, int(start) - burn_in_ms, int(end) + runoff_ms, unseal) \
+        if context else None
     jobs = [{"db_path": str(db_path), "symbol": s, "start": a, "end": b, "params": pdict, "only_alpha": only_alpha,
              "settings": settings or {}, "info": (infos or {}).get(s), "label": label(a), "first": k == 0,
              "final": k == len(windows) - 1, "unseal": sorted(unseal or ()), "warmup_ms": warmup_ms,
-             "burn_in_ms": burn_in_ms, "runoff_ms": runoff_ms}
+             "burn_in_ms": burn_in_ms, "runoff_ms": runoff_ms, "context_db": ctx_db}
             for s in symbols for k, (a, b) in enumerate(windows)]
     own = pool is None
     if own:
         n = workers or max(1, min(len(jobs), (os.cpu_count() or 2)))
-        pool = ProcessPoolExecutor(max_workers=n, mp_context=multiprocessing.get_context("spawn"))
+        # a multi-year run recycles the worker after every (symbol, chunk) job: memory stays bounded by one job
+        pool = ProcessPoolExecutor(max_workers=n, mp_context=multiprocessing.get_context("spawn"),
+                                   max_tasks_per_child=1 if multi else None)
     try:
         results = list(pool.map(_run_symbol, jobs))
     finally:
@@ -429,7 +473,8 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
     job_info = [{"symbol": r["symbol"], "chunk": r.get("chunk", ""), "start": _iso(r["start"]),
                  "eff_start": _iso(r.get("eff_start", r["start"])), "end": _iso(r["end"]),
                  "simulated": [_iso(x) for x in r["sim"]] if r.get("sim") else None, "n": len(r["trades"]),
-                 "bars": r.get("bars", 0), "seconds": round(r.get("seconds", 0.0), 1), "error": r.get("error")}
+                 "bars": r.get("bars", 0), "seconds": round(r.get("seconds", 0.0), 1), "error": r.get("error"),
+                 "context_hours": r.get("context_hours", 0)}
                 for r in results]
     return LabResult(params_version=pdict.get("version", "?"), alpha=only_alpha, start=int(start), end=int(end),
                      overall=summarize(trades), by_alpha=_group(trades, lambda t: t.get("alpha") or "?"),
@@ -489,6 +534,12 @@ def apply_overrides(params, overrides: list[str], notes: list | None = None):
     return p
 
 
+def trials_period(start: int, end: int) -> str:
+    from heartless.learning.trials import period_of
+
+    return period_of(start, end)
+
+
 def git_dirty(paths: tuple[str, ...] = ("heartless",)) -> bool | None:
     """Whether the code that produced a result differs from the commit recorded with it: uncommitted (staged or not)
     or untracked files under `paths` (the package). Other paths, such as the result files a batch of runs writes into
@@ -521,9 +572,18 @@ def main_cli(settings, args) -> None:
     from heartless.strategy.params import StrategyParams
 
     store = Store(settings.db_path)
-    symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else store.candle_symbols()
     years = getattr(args, "years", None)
+    universe = getattr(args, "universe", None)
     try:
+        if universe and args.symbols:
+            raise ValueError("--symbols and --universe are mutually exclusive")
+        if universe:
+            symbols = universe_symbols(universe, store)
+        else:
+            symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else store.candle_symbols()
+        tag = (getattr(args, "tag", None) or "").strip() or None
+        if getattr(args, "tag", None) is not None and not tag:
+            raise ValueError("--tag needs a family name")
         if years:
             if args.start or args.end:
                 raise ValueError("--years and --start/--end are mutually exclusive")
@@ -571,8 +631,25 @@ def main_cli(settings, args) -> None:
         extra_settings["META_LABEL"] = True
     chunk_days = getattr(args, "chunk_days", None)
     commit, dirty = seal.git_commit(), git_dirty()  # the code state the run starts from (it may change while it runs)
+    context = {"db": str(settings.context_db_path), "universe": settings.context_universe_list,
+               "build": bool(settings.context_auto_build),
+               "progress": lambda m: print(m, file=sys.stderr, flush=True)}
     res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers,
-                   settings=extra_settings, chunk_days=chunk_days, unseal=[p for p in unseal if p in touched])
+                   settings=extra_settings, chunk_days=chunk_days, unseal=[p for p in unseal if p in touched],
+                   context=context)
+    trial = None
+    if tag:
+        from heartless.learning import trials
+
+        cfg = trials.lab_config(params.to_dict(), args.alpha, symbols, meta=bool(getattr(args, "meta", False)))
+        s = res.summary()
+        trial = trials.record("lab", tag, cfg, (start, end), n=s["n"], avg_r=s["avg_r"], t_day=s["t_day"],
+                              extra={"stress": bool(getattr(args, "stress", False)), "dirty": dirty, "argv": argv})
+        n_fam = trials.family_tests(tag)
+        print(f"trial ledger: {tag} config {trial['config_hash']} recorded; family N={n_fam}, TRAIN bar t_day >= "
+              f"{trials.threshold(n_fam):.2f}", file=sys.stderr)
+    elif trials_period(start, end) == "TRAIN":
+        print("note: not recorded in the P2 trial ledger (no --tag FAMILY)", file=sys.stderr)
     if args.json:
         print(json.dumps(_clean({"summary": res.summary(), "summary_excl_boundary": res.summary_excl_boundary(),
                                  "by_year": res.by_year(), "by_alpha": res.by_alpha, "by_symbol": res.by_symbol,
@@ -585,6 +662,7 @@ def main_cli(settings, args) -> None:
             json.dump(res.trades, f, default=str)
     if getattr(args, "out", None):
         doc = {**res.to_json(), "params_version": params.version, "alpha": args.alpha, "symbols": symbols,
+               "universe": universe, "trial": trial,
                "overrides": list(args.set or []), "override_adjustments": notes, "settings_overrides": extra_settings,
                "chunk_days": chunk_days, "workers": args.workers, "git_commit": commit,
                "git_dirty": dirty, "seal": seal.status(start, end, unseal), "argv": argv,
