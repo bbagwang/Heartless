@@ -17,14 +17,14 @@ from heartless.core.models import (Decision, EntryStyle, Fill, Position, Positio
 from heartless.core.store import Store
 from heartless.data.features import MarketView
 from heartless.exchange.base import Account, OrderResult
-from heartless.exchange.symbols import norm_price, norm_qty
+from heartless.exchange.symbols import min_qty_for_notional, norm_price, norm_qty
 from heartless.learning.bandit import AlphaBandit
 from heartless.strategy.base import Context
 from heartless.strategy.ensemble import Ensemble
 from heartless.strategy.params import StrategyParams
 from heartless.strategy.risk import RiskManager
 from heartless.util.ids import client_order_id, short_id
-from heartless.util.timeutil import MS_MINUTE, now_ms
+from heartless.util.timeutil import MS_MINUTE, TF_MS, now_ms
 
 log = logging.getLogger(__name__)
 
@@ -223,6 +223,8 @@ class TradingEngine:
                        max_hold_bars=sig.max_hold_bars, timeframe=sig.timeframe, status=PositionStatus.PENDING,
                        entry_client_id=cid, original_qty=sz.qty, entry_style=sig.entry_style.value,
                        limit_price=entry_ref if sig.entry_style is EntryStyle.LIMIT else None, pending_since=self.clock(),
+                       entry_ttl_bars=d.entry_ttl_bars if sig.entry_style is EntryStyle.LIMIT else None,
+                       exit_on_regime_change=d.exit_on_regime_change,
                        expected_profit=(abs((tp or entry_ref + d.side.sign * d.expected_r * r_unit) - entry_ref) * sz.qty),
                        extra={"tp1_frac": self.params.alphas.get(sig.alpha, {}).get("tp1_frac", 0.5), "tags": sig.tags,
                               "size_mult": d.size_mult, "risk_pct": sz.risk_pct})
@@ -600,10 +602,12 @@ class TradingEngine:
             return
         if pos.status is not PositionStatus.OPEN or not price:
             return
-        # a post-only entry that opened on a partial fill keeps its remainder working for two bars at most
+        # a post-only entry that opened on a partial fill keeps its remainder working for two bars at most, or until
+        # its signal TTL runs out (or new entries get blocked meanwhile)
         step = self.symbols[pos.symbol].step_size if pos.symbol in self.symbols else 0.0
         if (pos.entry_style == EntryStyle.LIMIT.value and pos.filled_qty < pos.original_qty - step * 0.5 - 1e-12
-                and now - pos.pending_since >= 2 * MS_MINUTE):
+                and (self._ttl_stop_reason(pos, now) if self._entry_ttl_ms(pos)
+                     else now - pos.pending_since >= 2 * MS_MINUTE)):
             await self._cancel_entry_remainder(pos)
             if pos.status is not PositionStatus.OPEN:
                 return
@@ -652,8 +656,8 @@ class TradingEngine:
                 cand = anchor + pos.trail_atr_mult * atr
                 if cand < pos.stop - max(self.symbols[pos.symbol].tick_size, 0.05 * atr):
                     await self._replace_stop(pos, cand)
-        # 5) mean reversion / fade trades: exit if the regime flips hard against us
-        if pos.alpha in ("mean_reversion", "funding_fade") and pos.bars_held % 5 == 0:
+        # 5) signals that opted in (fades / mean reversion): exit if the regime flips hard against us
+        if pos.exit_on_regime_change and pos.bars_held % 5 == 0:
             m15 = view.tf("15m")
             adx = m15.v("adx") if m15.ok else float("nan")
             slope = m15.v("slope20") if m15.ok else float("nan")
@@ -663,7 +667,22 @@ class TradingEngine:
         self._save(pos)
 
     async def _manage_pending(self, pos: Position, view: MarketView, ctx: Context) -> None:
-        """Re-quote or cancel a resting post-only entry."""
+        """Re-quote or cancel a resting post-only entry.
+
+        Default (no signal TTL): the order chases the touch. Two minutes after it was placed it is cancelled and
+        re-quoted at the current bid/ask, at most twice (then the entry is abandoned), and abandoned at once if the
+        touch ran more than 0.6 ATR away. Every re-quote re-sizes the order for its new price (_requote_size): a
+        chased entry never risks more than the trade's budget at its stop and never grows beyond what the open sized;
+        when what fits is below the exchange minimum the entry is cancelled.
+
+        With Signal.entry_ttl_bars = N: the order rests at its limit price until N bars of the signal's timeframe
+        have passed since it was placed, then it is cancelled. The deadline (pending_since + N * timeframe) is checked
+        on every 1m bar after the simulator processed that bar, so the order works through exactly N such bars. It is
+        never re-quoted, re-sized or abandoned for price drift in between (a retest limit), a partial fill keeps the
+        remainder working until the same deadline (see _manage), and its state is checked every bar so an order the
+        exchange no longer works (filled with the event missed, cancelled, unknown) is settled at once. It is also
+        cancelled as soon as new entries are blocked (pause, loss halt, market shock, entries disabled): unlike the
+        default entry, which is gone within minutes, it could otherwise open a position hours into a halt."""
         now = self.clock()
         age_bars = (now - pos.pending_since) / MS_MINUTE
         if pos.entry_style != EntryStyle.LIMIT.value:
@@ -677,6 +696,22 @@ class TradingEngine:
                     await self._cancel_pending(pos, f"entry {res.status.lower()}")
             return
         # (a partially filled limit entry is OPEN, not PENDING: its remainder is handled in _manage / close / finalize)
+        ttl = self._entry_ttl_ms(pos)
+        if ttl:
+            why = self._ttl_stop_reason(pos, now)
+            if why:
+                await self._cancel_pending(pos, why)
+                return
+            try:
+                res = await self.account.query_order(pos.symbol, pos.entry_order_id, pos.entry_client_id)
+            except Exception as e:  # noqa: BLE001
+                log.debug("[%s] cannot check resting entry on %s: %s", self.name, pos.symbol, e)
+                return
+            if res.status in TERMINAL_ORDER_STATES or res.status == "UNKNOWN":
+                # only a terminal order is settled here (credits a missed fill -> OPEN, else cancels the entry); a
+                # working order's fills arrive on the stream, crediting them from a poll could count them twice
+                await self._cancel_pending(pos, f"진입 주문이 거래소에서 종료됨 ({res.status})")
+            return
         if age_bars < 2:
             return
         if pos.requotes >= 2:
@@ -691,12 +726,18 @@ class TradingEngine:
         if abs(touch - pos.limit_price) > 0.6 * max(pos.atr, pos.r_unit):
             await self._cancel_pending(pos, "가격 이탈로 진입 포기")
             return
+        price = norm_price(info, touch, pos.side.order_side)
+        qty, risk = await self._requote_size(pos, price)
+        if qty <= 0:
+            await self._cancel_pending(pos, "재호가 수량이 위험 예산 내 거래소 최소 수량 미만 → 진입 취소")
+            return
         res = await self._settle_entry_order(pos)  # cancel the resting order and credit anything that filled meanwhile
         if pos.status is not PositionStatus.PENDING:
             return
-        if res is None:
-            return  # exchange unreachable: the old order may still rest, so do not quote a second one; retry next bar
-        price = norm_price(info, touch, pos.side.order_side)
+        if res is None or res.status in ("NEW", "PARTIALLY_FILLED"):
+            # exchange unreachable, or the cancel did not take (timeout, rate limit) and the old order still works:
+            # quoting a second one on top could fill both (twice the size and the risk budget); retry next bar
+            return
         cid = client_order_id(f"E{self.tag}")
         # remember every entry id this position ever used so fills are recognised whichever order they belong to,
         # whether they arrive before the REST response (new id) or late (old id, de-duplicated via settled_orders)
@@ -705,11 +746,13 @@ class TradingEngine:
             if c and c not in cids:
                 cids.append(c)
         pos.requotes += 1  # counts attempts, so a flaky exchange cannot keep a position re-quoting forever
-        rem = pos.original_qty - pos.filled_qty
+        old_qty, old_r = pos.original_qty, pos.r_unit
+        pos.original_qty = pos.filled_qty + qty  # the entry is now this order: remainder / dust checks measure it
         try:
-            res = await self.account.limit_order(pos.symbol, pos.side.order_side, rem, price, post_only=True, client_id=cid)
+            res = await self.account.limit_order(pos.symbol, pos.side.order_side, qty, price, post_only=True, client_id=cid)
             if res.status in ("EXPIRED", "REJECTED"):
-                res = await self.account.market_order(pos.symbol, pos.side.order_side, rem, client_id=cid)
+                # would cross: the ask (long) is at or below our price, so a taker fill is no worse than the quote
+                res = await self.account.market_order(pos.symbol, pos.side.order_side, qty, client_id=cid)
         except Exception as e:  # noqa: BLE001
             log.warning("[%s] re-quote failed for %s: %s", self.name, pos.symbol, e)
             await self._emit("error", {"message": f"{pos.symbol} 재주문 실패: {e}"})
@@ -730,14 +773,61 @@ class TradingEngine:
         pos.entry_order_id = res.order_id
         pos.pending_since = now
         pos.limit_price = price
-        new_stop = pos.stop  # keep the structural stop; R shrinks/grows with the new price
-        pos.r_unit = abs(price - new_stop)
-        pos.entry_price = price
+        if pos.status is PositionStatus.PENDING:
+            # the geometry of the order now resting; the first fill recomputes entry, R and risk from the real fill
+            # price (a crossing re-quote that a simulator filled synchronously as a taker already did: keep that)
+            pos.r_unit = abs(price - pos.stop)  # keep the structural stop; R shrinks/grows with the new price
+            pos.entry_price = price
+            pos.risk_amount = risk
+            pos.notional = pos.original_qty * price
+            if pos.take_profit:
+                pos.expected_profit = abs(pos.take_profit - price) * pos.original_qty
+            elif old_qty > 0 and old_r > 0:
+                pos.expected_profit *= (pos.original_qty * pos.r_unit) / (old_qty * old_r)
         if res.status == "FILLED" and pos.status is PositionStatus.PENDING and pos.filled_qty <= 0:
             await self.on_fill(Fill(pos.symbol, pos.side.order_side, res.filled_qty, res.avg_price,
                                     res.filled_qty * res.avg_price * self.s.taker_fee, now, cid, res.order_id, kind="ENTRY"))
             self._mark_settled(pos, res.order_id)
         self._save(pos)
+
+    async def _requote_size(self, pos: Position, price: float) -> tuple[float, float]:
+        """Quantity and stop-out risk for re-quoting the unfilled part of a post-only entry at `price`.
+
+        Uses the open's sizing rule (RiskManager.size_at) with the new stop distance and the risk budget the open
+        accepted (its risk_pct, of current equity); a filled part of the trade consumes that budget and the notional
+        caps first. The result never exceeds the quantity still to fill (a re-quote only ever shrinks an entry) and is
+        never lifted to the exchange minimum: (0, 0) when what fits the budget is below it."""
+        info = self.symbols[pos.symbol]
+        stop = pos.initial_stop or pos.stop
+        pct = pos.extra.get("risk_pct") or self.risk.budget_pct(float(pos.extra.get("size_mult", 1.0) or 1.0))
+        equity = await self.equity()
+        others = sum(p.notional for p in self.open_positions() if p is not pos)
+        filled = pos.filled_qty > 0
+        sz = self.risk.size_at(stop, price, equity, info, float(pct), others,
+                               filled_risk=pos.risk_amount if filled else 0.0,
+                               filled_notional=pos.qty * pos.entry_price if filled else 0.0, lift_to_min=False)
+        qty = min(sz.qty, norm_qty(info, max(pos.original_qty - pos.filled_qty, 0.0)))
+        if sz.qty <= 0 or qty < min_qty_for_notional(info, price):
+            return 0.0, 0.0
+        return qty, sz.risk_amount * qty / sz.qty
+
+    @staticmethod
+    def _entry_ttl_ms(pos: Position) -> int:
+        """How long a post-only entry with a signal TTL may rest (0 = no TTL: the default re-quote policy applies)."""
+        if pos.entry_style != EntryStyle.LIMIT.value or not pos.entry_ttl_bars or pos.entry_ttl_bars <= 0:
+            return 0
+        return int(pos.entry_ttl_bars) * TF_MS.get(pos.timeframe, MS_MINUTE)
+
+    def _ttl_stop_reason(self, pos: Position, now: int) -> str:
+        """Why a resting signal-TTL entry (or its partial-fill remainder) must stop working now ('' = keep resting):
+        its deadline passed, or new entries are blocked account-wide."""
+        ttl = self._entry_ttl_ms(pos)
+        if not ttl:
+            return ""
+        if now - pos.pending_since >= ttl:
+            return f"진입 유효 기간({pos.entry_ttl_bars}봉) 만료로 주문 취소"
+        blocked = self.risk.entries_blocked(now) if self.entries_enabled else "entries disabled"
+        return f"신규 진입 중단({blocked})으로 대기 주문 취소" if blocked else ""
 
     async def _settle_entry_order(self, pos: Position) -> OrderResult | None:
         """Cancel the working entry order, then read its final state and credit any fill that raced the cancel.
@@ -786,9 +876,10 @@ class TradingEngine:
         res = await self._settle_entry_order(pos)
         if pos.status is not PositionStatus.PENDING:
             return  # it filled under the cancel (in either ordering): it is a live position now, brackets placed
-        if res is None:
-            # neither the cancel nor the query could be confirmed: keep it pending rather than forgetting an order
-            # that may still fill; _manage_pending retries on the next bar
+        if res is None or res.status in ("NEW", "PARTIALLY_FILLED"):
+            # the cancel could not be confirmed, or it did not take and the order still works on the exchange: keep
+            # it pending rather than forgetting an order that may still fill into an untracked, unprotected
+            # position; _manage_pending (or the caller) retries on the next bar
             await self._emit("error", {"message": f"{pos.symbol} 진입 주문 취소 확인 실패; 다음 봉에 재시도"})
             return
         if pos.filled_qty > 0:  # partially filled: manage what we have

@@ -145,6 +145,13 @@ class Signal:
     atr: float = 0.0
     timeframe: str = "5m"
     tags: dict[str, Any] = field(default_factory=dict)
+    # opt-in early exit: close the trade (while in loss) once the 15m trend turns hard against it. Meant for fades /
+    # mean-reversion setups whose premise a strong counter-trend invalidates; trend followers leave it off.
+    exit_on_regime_change: bool = False
+    # post-only entries only: rest at limit_price for this many bars of `timeframe`, never moved, then cancel
+    # (a retest limit; cancelled early once new entries are blocked). None = chase the touch: re-quote every 2
+    # minutes, cancel after two re-quotes.
+    entry_ttl_bars: int | None = None
 
     @property
     def r_distance(self) -> float:
@@ -165,6 +172,8 @@ class Decision:
     regime: Regime
     size_mult: float = 1.0
     expected_r: float = 0.0
+    exit_on_regime_change: bool = False  # see Signal; the ensemble takes it from the primary signal
+    entry_ttl_bars: int | None = None  # see Signal; the ensemble takes it from the primary signal
 
 
 @dataclass(slots=True)
@@ -180,6 +189,10 @@ class Fill:
     reduce_only: bool = False
     maker: bool = False
     kind: str = "ENTRY"  # ENTRY | SL | TP | CLOSE | UNKNOWN
+
+
+# alphas whose open positions got the regime-flip exit by name before Signal.exit_on_regime_change existed
+_LEGACY_REGIME_EXIT_ALPHAS = ("mean_reversion", "funding_fade")
 
 
 @dataclass
@@ -232,6 +245,8 @@ class Position:
     limit_price: float | None = None
     pending_since: int = 0
     requotes: int = 0
+    entry_ttl_bars: int | None = None  # signal TTL of a resting post-only entry (None = re-quote policy)
+    exit_on_regime_change: bool = False  # the signal opted into the engine's regime-flip exit
     expected_profit: float = 0.0
     last_stop_update: int = 0
     stop_dirty: bool = False
@@ -269,6 +284,9 @@ class Position:
         row["status"] = PositionStatus(row["status"])
         row["alphas"] = json.loads(row.get("alphas") or "[]")
         row["extra"] = json.loads(row.get("extra") or "{}")
+        if "exit_on_regime_change" not in row:
+            # a row persisted before the flag existed: the engine applied the regime-flip exit to these alphas by name
+            row["exit_on_regime_change"] = row.get("alpha") in _LEGACY_REGIME_EXIT_ALPHAS
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in row.items() if k in known})
 

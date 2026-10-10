@@ -173,4 +173,5 @@ class FundingFade(Alpha):
                       max_hold_bars=self.bars_to_1m(int(p["max_hold"]), "1h"), trail_atr_mult=0.0, atr=atr1h,
                       timeframe="1h",
                       tags={"ref_price": entry, "funding": ctx.funding_rate, "funding_z": fz, "top_pos_z": zt,
-                            "oi_chg_24h": oi24, "crowd": crowd.value, "min_to_funding": mtf})
+                            "oi_chg_24h": oi24, "crowd": crowd.value, "min_to_funding": mtf},
+                      exit_on_regime_change=True)  # a crowd fade: a strong counter-trend means the crowd was right

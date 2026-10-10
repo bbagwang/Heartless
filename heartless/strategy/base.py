@@ -31,6 +31,8 @@ def ok(*vals: float) -> bool:
 
 
 class Alpha(ABC):
+    """One setup. evaluate() returns a Signal whose fields also tell the engine how to run the trade: entry style,
+    time stop, trailing, and the opt-ins exit_on_regime_change (fades) and entry_ttl_bars (resting retest limits)."""
     name: str = "alpha"
     timeframe: str = "5m"
     description: str = ""

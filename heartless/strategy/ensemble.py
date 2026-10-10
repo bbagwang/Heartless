@@ -94,4 +94,5 @@ class Ensemble:
         if len(names) > 1:
             reason += f" | 컨플루언스: {', '.join(names[1:])}"
         return Decision(symbol=ctx.symbol, side=best_side, score=total, confidence=primary.confidence, alphas=names,
-                        primary=primary, reason=reason, regime=ctx.regime, size_mult=size_mult, expected_r=exp_r)
+                        primary=primary, reason=reason, regime=ctx.regime, size_mult=size_mult, expected_r=exp_r,
+                        exit_on_regime_change=primary.exit_on_regime_change, entry_ttl_bars=primary.entry_ttl_bars)
