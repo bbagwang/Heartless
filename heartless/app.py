@@ -85,6 +85,7 @@ class Heartless:
         # execution-quality monitor: rolling fill rows per engine (slippage vs the decision reference, fee vs model)
         self.fill_rows: dict[str, deque] = {}
         self._entry_refs: dict[str, float] = {}  # position id -> reference price of its first entry fill
+        self._order_refs: dict[str, tuple[float, str, str]] = {}  # client id -> (decision reference, kind, position id)
         self.challengers: list[ChallengerSlot] = []
         self.engines: dict[str, TradingEngine] = {}
         self.paper_accounts: dict[str, PaperAccount] = {}
@@ -615,10 +616,15 @@ class Heartless:
     # --- execution quality ---------------------------------------------------------------------------
     def _watch_fills(self, acc, name: str, since: int | None = None) -> dict:
         """Execution-quality monitor for one engine: every entry / exit fill is compared with the reference price the
-        engine decided on (slippage in bps, positive = cost) and its fee with the fee model. The observer is registered
-        on the account BEFORE the engine, so it runs first and sees the position as the engine left it: an entry's
-        decision price is still in pos.entry_price. Returns a holder the caller fills with the engine once built."""
+        engine decided on (slippage in bps, positive = cost) and its fee with the fee model.
+
+        The reference of a market / limit order is recorded when the engine sends it (the touch on its side, or the
+        limit price), keyed by client id: a live fill can reach the account's handlers after the engine already booked
+        the REST result (entry price overwritten, a closed position gone). Stops and take-profits are measured against
+        their trigger. The observer is registered on the account BEFORE the engine, so it runs first and sees the
+        position as the engine left it. Returns a holder the caller fills with the engine once built."""
         holder: dict = {}
+        self._record_order_refs(acc, holder)
         rows = self.store.load_fill_quality(name, self.s.exec_quality_window)
         if since is not None:
             rows = [r for r in rows if (r.get("ts") or 0) >= since]
@@ -629,10 +635,7 @@ class Heartless:
                 eng = holder.get("engine")
                 if eng is None or fill.kind == "FUNDING" or fill.qty <= 0 or fill.price <= 0:
                     return
-                pos = eng.positions.get(fill.symbol)
-                if pos is None:
-                    return
-                row = self._fill_row(name, pos, fill)
+                row = self._fill_row(name, eng.positions.get(fill.symbol), fill)
                 if row is not None:
                     self.fill_rows.setdefault(name, deque(maxlen=max(1, self.s.exec_quality_window))).append(row)
                     self.store.save_fill_quality(row)
@@ -642,12 +645,43 @@ class Heartless:
         acc.on_fill(observe)
         return holder
 
+    def _record_order_refs(self, acc, holder: dict) -> None:
+        """Wrap the account's market / limit order calls to remember each order's decision reference by client id."""
+        market, limit = acc.market_order, acc.limit_order
+
+        def remember(client_id: str, symbol: str, ref: float, reduce_only: bool) -> None:
+            if not client_id or not ref or ref <= 0:
+                return
+            eng = holder.get("engine")
+            pos = eng.positions.get(symbol) if eng is not None else None
+            self._order_refs[client_id] = (float(ref), "CLOSE" if reduce_only else "ENTRY", pos.id if pos else "")
+            while len(self._order_refs) > 5000:
+                self._order_refs.pop(next(iter(self._order_refs)))
+
+        async def market_order(symbol: str, side: str, qty: float, reduce_only: bool = False, client_id: str = ""):
+            t = self.tickers.get(symbol)
+            touch = ((t.ask if side == "BUY" else t.bid) or t.mark or t.last) if t else 0.0
+            remember(client_id, symbol, touch, reduce_only)
+            return await market(symbol, side, qty, reduce_only=reduce_only, client_id=client_id)
+
+        async def limit_order(symbol: str, side: str, qty: float, price: float, post_only: bool = True,
+                              reduce_only: bool = False, client_id: str = ""):
+            remember(client_id, symbol, price, reduce_only)
+            return await limit(symbol, side, qty, price, post_only=post_only, reduce_only=reduce_only,
+                               client_id=client_id)
+
+        acc.market_order, acc.limit_order = market_order, limit_order
+
     def _fill_row(self, name: str, pos, fill) -> dict | None:
-        """Reference price per fill kind: an entry -> the limit price of a post-only entry, else the touch the engine
-        decided at (pos.entry_price before the first fill); a stop -> its trigger; a take-profit -> the nearer of TP1 /
-        TP; a market close -> the touch on the closing side when the fill is processed (synchronous for paper; for live
-        it includes the user-stream latency)."""
-        if pos.status is PositionStatus.CLOSED:
+        """Reference price per fill: a market order -> the touch on its side when the engine sent it (an entry: the
+        price it sized at; a close: the price it decided to exit at); a post-only entry -> its limit price; a stop ->
+        its trigger; a take-profit -> the nearer of TP1 / TP. Without a recorded order (e.g. after a restart) an entry
+        falls back to the position's decision price and a close to the touch when the fill is processed."""
+        known = self._order_refs.get(fill.client_id) if fill.client_id else None
+        if fill.kind not in ("SL", "TP") and known is not None:
+            ref, kind, pid = known
+            return self._fill_quality_row(name, pid or (pos.id if pos is not None else ""), kind, ref, fill)
+        if pos is None or pos.status is PositionStatus.CLOSED:
             return None
         opens = fill.order_side == pos.side.order_side and not fill.reduce_only
         kind = "ENTRY" if opens else (fill.kind if fill.kind in ("SL", "TP") else "CLOSE")
@@ -669,13 +703,16 @@ class Heartless:
         else:
             t = self.tickers.get(fill.symbol)
             ref = float(((t.bid if fill.order_side == "SELL" else t.ask) if t else 0.0) or pos.extra.get("last_mark") or 0.0)
-        if ref <= 0:
+        return self._fill_quality_row(name, pos.id, kind, ref, fill)
+
+    def _fill_quality_row(self, name: str, position_id: str, kind: str, ref: float, fill) -> dict | None:
+        if not ref or ref <= 0:
             return None
         notional = fill.qty * fill.price
         model_fee = notional * (self.s.maker_fee if fill.maker else self.s.taker_fee)
-        return {"engine": name, "ts": int(fill.ts or now_ms()), "symbol": fill.symbol, "position_id": pos.id,
+        return {"engine": name, "ts": int(fill.ts or now_ms()), "symbol": fill.symbol, "position_id": position_id,
                 "kind": kind, "side": fill.order_side, "maker": bool(fill.maker), "qty": fill.qty, "price": fill.price,
-                "ref": ref, "notional": notional, "slip_bps": slippage_bps(fill.order_side, fill.price, ref),
+                "ref": float(ref), "notional": notional, "slip_bps": slippage_bps(fill.order_side, fill.price, ref),
                 "fee": float(fill.fee or 0.0), "model_fee": model_fee}
 
     def exec_quality(self) -> dict[str, dict]:

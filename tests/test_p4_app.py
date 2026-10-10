@@ -307,3 +307,50 @@ async def test_a_reused_slot_archives_the_previous_runs_trades():
     row = next(r for r in app.store.load_params_versions(limit=10) if r["id"] == p1.version)
     assert row["role"] == "retired" and row["metrics"]["decisions"][0]["reason"] == "test"
     await app.stop()
+
+
+async def test_a_live_fill_arriving_after_the_rest_result_keeps_the_decision_reference():
+    """Live: the engine books a market order's REST result first (entry price overwritten, a closed position gone) and
+    the user-stream fill reaches the account handlers afterwards; the reference recorded when the order was sent is
+    what the fill is measured against."""
+    from types import SimpleNamespace
+
+    from heartless.core.models import Fill
+
+    app, candles, _ = _make()
+    await _boot(app, candles)
+
+    class StreamAccount:
+        def __init__(self):
+            self.handlers = []
+
+        def on_fill(self, h):
+            self.handlers.append(h)
+
+        async def market_order(self, symbol, side, qty, reduce_only=False, client_id=""):
+            return SimpleNamespace(status="FILLED")
+
+        async def limit_order(self, symbol, side, qty, price, post_only=True, reduce_only=False, client_id=""):
+            return SimpleNamespace(status="NEW")
+
+    acc = StreamAccount()
+    pos = SimpleNamespace(id="P1", side=Side.LONG, status=None, entry_style="MARKET", limit_price=None, filled_qty=0.0,
+                          entry_price=100.1, stop=97.0, tp1=None, tp1_done=False, take_profit=None, extra={})
+    holder = app._watch_fills(acc, "live")
+    holder["engine"] = SimpleNamespace(positions={"ETHUSDT": pos})
+    app.tickers["ETHUSDT"] = Ticker("ETHUSDT", bid=99.9, ask=100.1, mark=100.0)
+    await acc.market_order("ETHUSDT", "BUY", 1.0, client_id="HLELIVE1")
+    pos.entry_price, pos.filled_qty = 100.2, 1.0  # the engine already booked the REST fill
+    await acc.handlers[0](Fill("ETHUSDT", "BUY", 1.0, 100.2, 0.05, now_ms(), "HLELIVE1", "1", kind="ENTRY"))
+    app.tickers["ETHUSDT"].bid = 99.95
+    await acc.market_order("ETHUSDT", "SELL", 1.0, reduce_only=True, client_id="HLCLIVE1")
+    holder["engine"].positions.clear()  # finalized from the REST result before the stream fill arrived
+    app.tickers["ETHUSDT"].bid = 99.0
+    await acc.handlers[0](Fill("ETHUSDT", "SELL", 1.0, 99.90, 0.05, now_ms(), "HLCLIVE1", "2", reduce_only=True,
+                               kind="CLOSE"))
+    entry, close = app.fill_rows["live"]
+    assert entry["kind"] == "ENTRY" and entry["ref"] == pytest.approx(100.1) and entry["position_id"] == "P1"
+    assert entry["slip_bps"] == pytest.approx((100.2 - 100.1) / 100.1 * 1e4)
+    assert close["kind"] == "CLOSE" and close["ref"] == pytest.approx(99.95) and close["position_id"] == "P1"
+    assert close["slip_bps"] == pytest.approx((99.95 - 99.90) / 99.95 * 1e4)
+    await app.stop()
