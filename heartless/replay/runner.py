@@ -65,6 +65,9 @@ class ReplayConfig:
     out_report: str | None = None
     messages_out: str | None = None
     trades_out: str | None = None
+    # the bot starts this long after start_ms, so its 5 s scheduler grid is not aligned to minutes and midnights (a real
+    # bot is not either; an aligned grid would hide races between the scheduler and the market data)
+    app_start_offset_ms: int = 2_500
     # Thompson-sampling RNG seed for the shared and every challenger bandit (production leaves them unseeded); with it a
     # replay is reproducible run to run. None keeps them unseeded.
     seed: int | None = 1
@@ -265,6 +268,7 @@ class _Run:
 
             tracemalloc.start()
         infos = symbol_infos(self.source, cfg.start_ms)
+        await loop.sleep_until_ms(cfg.start_ms + cfg.app_start_offset_ms)
         app = Heartless(self.settings)
         checker = self.checker = InvariantChecker(app)
         for e in self.pending_errors:

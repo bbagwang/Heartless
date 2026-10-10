@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -36,6 +38,9 @@ def build_source(path, days: int, syms=SYMS) -> str:
         st.save_candles(s, [ca.candle_at(k) for k in range(ca.n)])
         st.save_funding(s, [(t, 0.0001 if (t // (8 * MS_HOUR)) % 2 else -0.00005, 0.0)
                             for t in range(t0 + 8 * MS_HOUR - t0 % (8 * MS_HOUR), t0 + n * MS_MINUTE, 8 * MS_HOUR)])
+        st.save_metrics(s, [SimpleNamespace(ts=t, oi=1e6 + k, oi_value=1e8, top_ls_accounts=1.2, top_ls_positions=1.1,
+                                            ls_accounts=1.3, taker_ls_vol=1.0)
+                            for k, t in enumerate(range(t0, t0 + n * MS_MINUTE, 5 * MS_MINUTE))])
     st.close()
     return str(path)
 
@@ -113,6 +118,23 @@ def test_scripted_pause_blocks_entries_and_resume_reenables_them(replay3d):
     assert skipped.get("paused", 0) >= 1  # signals arrived during the pause and were refused for it
     ctrl = [m for m in msgs if m["topic"] == "control"]
     assert ctrl[0]["ts"] == PAUSE and "일시정지" in ctrl[0]["text"] and ctrl[1]["ts"] == RESUME
+
+
+def test_the_replayed_bot_keeps_collecting_funding_and_metrics(replay3d):
+    """The bot's store gains every funding settlement and every closed 5m metrics bucket of the window (research reads
+    both from there); nothing from after the end leaks in."""
+    s, d = replay3d
+    con = sqlite3.connect(str(d / "bot" / "heartless.db"))
+    try:
+        for sym in SYMS:
+            f = [t for (t,) in con.execute("SELECT funding_time FROM funding WHERE symbol=? AND funding_time>=?",
+                                           (sym, START))]
+            assert f[0] == START and max(f) == START + 2 * MS_DAY + 16 * MS_HOUR, sym
+            lo, hi, n = con.execute("SELECT MIN(ts), MAX(ts), COUNT(*) FROM metrics WHERE symbol=?", (sym,)).fetchone()
+            assert lo <= START and hi <= START + 3 * MS_DAY - 5 * MS_MINUTE and hi >= START + 3 * MS_DAY - 15 * MS_MINUTE
+            assert n >= 3 * 288
+    finally:
+        con.close()
 
 
 def test_close_commands_go_through_the_control_path(replay3d):

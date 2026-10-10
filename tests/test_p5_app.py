@@ -97,3 +97,124 @@ def test_universe_members_stay_until_well_below_the_entry_threshold():
     app.rest.vols["AVAXUSDT"] = 79e6  # a non-member needs the full threshold to (re)enter
     asyncio.run(app.refresh_universe())
     assert "AVAXUSDT" not in app.universe and "LINKUSDT" not in app.universe
+
+
+class _FundingRest:
+    def __init__(self, rows: list[tuple[int, float]]):
+        self.rows = rows
+        self.calls: list[tuple[str, int, int]] = []
+
+    async def funding_rate_history(self, symbol, start=None, end=None, limit=1000):
+        self.calls.append((symbol, start, end))
+        return [{"symbol": symbol, "fundingTime": t, "fundingRate": str(r), "markPrice": "100"}
+                for t, r in self.rows if start <= t <= end]
+
+
+def test_funding_settlements_keep_flowing_into_the_store_after_startup():
+    from heartless.util import timeutil
+
+    app = _app()
+    app.universe = ["BTCUSDT", "ETHUSDT"]
+    eight = 8 * 3_600_000
+    app.store.save_funding("BTCUSDT", [(START - eight, 0.0001, 100.0), (START, 0.0002, 100.0)])
+    app.rest = _FundingRest([(START + eight, 0.0003), (START + 2 * eight, -0.0001)])
+    prev = timeutil.set_clock(lambda: START + 2 * eight + 60_000)
+    try:
+        asyncio.run(app._refresh_funding())
+    finally:
+        timeutil.set_clock(prev)
+    assert app.store.load_funding("BTCUSDT", START, START + 3 * eight) == [
+        (START, 0.0002), (START + eight, 0.0003), (START + 2 * eight, -0.0001)]
+    assert app.rest.calls == [("BTCUSDT", START + 1, START + 2 * eight + 60_000)]  # ETHUSDT has no backfill yet
+    # nothing due: no request
+    prev = timeutil.set_clock(lambda: START + 2 * eight + 120_000)
+    try:
+        asyncio.run(app._refresh_funding())
+    finally:
+        timeutil.set_clock(prev)
+    assert len(app.rest.calls) == 1
+
+
+class _MetricsRest:
+    def __init__(self, stamps: list[int]):
+        self.stamps = stamps
+
+    async def open_interest_hist(self, symbol, period="5m", limit=30):
+        return [{"symbol": symbol, "sumOpenInterest": "1000", "sumOpenInterestValue": "5000000", "timestamp": t}
+                for t in self.stamps]
+
+    async def top_long_short_ratio(self, symbol, period="5m", limit=30):
+        return [{"longShortRatio": "1.5", "timestamp": t} for t in self.stamps]
+
+    top_long_short_account_ratio = top_long_short_ratio
+    global_long_short_account_ratio = top_long_short_ratio
+
+    async def taker_long_short_ratio(self, symbol, period="5m", limit=30):
+        return [{"buySellRatio": "0.9", "timestamp": t} for t in self.stamps[:-1]]  # newest bucket not yet published
+
+
+def test_polled_metrics_are_persisted_for_the_research_backtests():
+    app = _app()
+    app.universe = ["BTCUSDT"]
+    bucket = 300_000
+    app.rest = _MetricsRest([START + bucket, START + 2 * bucket])  # REST stamps the bucket end
+    asyncio.run(app._poll_metrics())
+    rows = app.store.load_metrics("BTCUSDT")
+    assert [r["ts"] for r in rows] == [START, START + bucket]  # stored by bucket start, as the archive does
+    assert rows[0]["oi"] == 1000 and rows[0]["top_ls_positions"] == 1.5 and rows[0]["taker_ls_vol"] == 0.9
+    assert rows[1]["taker_ls_vol"] is None
+    app.rest.stamps = [START + 2 * bucket]  # the next poll re-reads the bucket, now complete
+    app.rest.taker_long_short_ratio = lambda *a, **k: _ret([{"buySellRatio": "1.1", "timestamp": START + 2 * bucket}])
+    asyncio.run(app._poll_metrics())
+    assert app.store.load_metrics("BTCUSDT")[-1]["taker_ls_vol"] == 1.1
+
+
+async def _ret(v):
+    return v
+
+
+def test_a_trade_closed_seconds_after_midnight_counts_for_the_new_day():
+    """The engines' daily counters (the "today" line of close messages) were reset only when the 5 s scheduler noticed
+    the new day: a stop filled in between was booked into the old day's counter and then wiped. The day now rolls
+    before any tick, bar or owner close reaches an engine."""
+    from synth import synth_symbols
+
+    from heartless.core.models import Decision, EntryStyle, Regime, Side, Signal, Ticker
+    from heartless.strategy.base import Context
+    from heartless.util import timeutil
+
+    clock = {"t": START + MS_DAY - 60_000}  # 23:59 of day 1 (UTC)
+    prev = timeutil.set_clock(lambda: clock["t"])
+    try:
+        app = _app(TIMEZONE="UTC")
+        app.symbols = synth_symbols(["BTCUSDT"])
+        asyncio.run(_open_long(app, Ticker, Signal, Decision, EntryStyle, Regime, Side, Context))
+        eng = app.engines["paper"]
+        clock["t"] = START + MS_DAY + 1_000  # 00:00:01 of day 2: the open tick of the new day hits the stop
+        tk = Ticker("BTCUSDT", bid=96.99, ask=97.01, mark=97.0, last=97.0, ts=clock["t"])
+        asyncio.run(app._tick("BTCUSDT", tk))
+        assert "BTCUSDT" not in eng.positions
+        app._roll_day(START + MS_DAY + 5_000)  # the scheduler's own check, seconds later
+        today = sum(t["pnl"] for t in app.store.load_trades(engine="paper", since=START + MS_DAY))
+        assert today < 0 and eng.stats.realized_today == today and eng.stats.trades_today == 1
+    finally:
+        timeutil.set_clock(prev)
+
+
+async def _open_long(app, Ticker, Signal, Decision, EntryStyle, Regime, Side, Context) -> None:
+    await app._create_engines()
+    eng = app.engines["paper"]
+    tk = Ticker("BTCUSDT", bid=99.99, ask=100.01, mark=100.0, last=100.0, ts=START)
+    await app.paper_accounts["paper"].on_ticker(tk)
+    sig = Signal(alpha="htf_trend", symbol="BTCUSDT", side=Side.LONG, confidence=0.7, reason="t", stop=98.0,
+                 take_profit=None, tp1=None, entry_style=EntryStyle.MARKET, atr=2.0, timeframe="1h")
+    d = Decision(symbol="BTCUSDT", side=Side.LONG, score=0.7, confidence=0.7, alphas=["htf_trend"], primary=sig,
+                 reason="t", regime=Regime.RANGE)
+
+    class _View:
+        frames: dict = {}
+        price = 100.0
+
+    await eng._open(d, _View(), Context(symbol="BTCUSDT", info=app.symbols["BTCUSDT"], ticker=tk, regime=Regime.RANGE,
+                                        now=START), await eng.equity())
+    assert eng.positions["BTCUSDT"].status.value == "OPEN"
