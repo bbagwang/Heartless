@@ -10,7 +10,7 @@ import numpy as np
 from heartless.config import Settings
 from heartless.core.models import Candle, Regime, SymbolInfo, Ticker
 from heartless.data.candles import CandleArrays
-from heartless.data.extras import MetricsSeries
+from heartless.data.extras import AVAILABLE_AFTER_MS, MetricsSeries
 from heartless.data.features import MarketView
 from heartless.exchange.base import OrderResult
 from heartless.exchange.paper import PaperAccount, PaperOrder
@@ -93,6 +93,8 @@ class Backtester:
         self.funding = funding or {}
         self.metrics = metrics or {}  # symbol -> MetricsSeries (open interest / long-short ratios)
         self._extras_cache: dict[str, tuple[int, dict]] = {}
+        self._extras_bounds: dict[str, tuple[int, int, int]] = {}  # symbol -> (usable row, valid from, valid until)
+        self._fund_cache: dict[str, tuple] = {}  # symbol -> cached settlement neighbourhood (_upcoming_funding_rate)
         self.views: dict[str, MarketView] = {}
         self.now = 0
         self._timeline: np.ndarray | None = None
@@ -119,11 +121,21 @@ class Backtester:
         return MetaLabeler(min_samples=getattr(self.s, "meta_min_samples", 120))  # starts empty: walk-forward
 
     def _extras(self, sym: str, t: int) -> dict:
-        """Positioning snapshot at t, recomputed only when a new 5-minute metrics row becomes usable."""
+        """Positioning snapshot at t, recomputed only when a new 5-minute metrics row becomes usable.
+
+        The usable row index (ms._idx(t)) only changes when t passes the next row's availability time, so the bar
+        loop keeps that interval per symbol instead of searching the metrics series on every bar."""
         ms = self.metrics.get(sym)
         if ms is None or len(ms) == 0:
             return {}
-        idx = ms._idx(t)
+        b = self._extras_bounds.get(sym)
+        if b is not None and b[1] <= t < b[2]:
+            idx = b[0]
+        else:
+            idx = ms._idx(t)
+            lo = int(ms.ts[idx]) + AVAILABLE_AFTER_MS if idx >= 0 else -(2**62)
+            hi = int(ms.ts[idx + 1]) + AVAILABLE_AFTER_MS if idx + 1 < len(ms) else 2**62
+            self._extras_bounds[sym] = (idx, lo, hi)
         cached = self._extras_cache.get(sym)
         if cached is not None and cached[0] == idx and idx >= 0:
             snap = cached[1]
@@ -157,13 +169,23 @@ class Backtester:
         rows = self.funding.get(sym)
         if not rows:
             return 0.0
-        idx = int(np.searchsorted(self._fund_idx[sym], t, side="right"))  # first row strictly after t
-        prev = rows[idx - 1][1] if idx >= 1 else 0.0
-        next_due = (t // FUNDING_INTERVAL + 1) * FUNDING_INTERVAL
-        if idx >= len(rows) or rows[idx][0] >= next_due + FUNDING_INTERVAL // 2:
+        bucket = t // FUNDING_INTERVAL
+        c = self._fund_cache.get(sym)
+        if c is None or not (c[0] == bucket and c[1] <= t < c[2]):
+            # the neighbourhood (previous settled rate, next row) is constant between two stored settlements and the
+            # due time within one 8h bucket, so it is looked up once per change instead of on every bar
+            idx = int(np.searchsorted(self._fund_idx[sym], t, side="right"))  # first row strictly after t
+            prev = rows[idx - 1][1] if idx >= 1 else 0.0
+            next_due = (bucket + 1) * FUNDING_INTERVAL
+            nxt = None if (idx >= len(rows) or rows[idx][0] >= next_due + FUNDING_INTERVAL // 2) else rows[idx][1]
+            lo = rows[idx - 1][0] if idx >= 1 else -(2**62)
+            hi = rows[idx][0] if idx < len(rows) else 2**62
+            c = self._fund_cache[sym] = (bucket, lo, hi, prev, nxt)
+        prev, nxt = c[3], c[4]
+        if nxt is None:
             return prev
         w = (t % FUNDING_INTERVAL) / FUNDING_INTERVAL
-        return (1 - w) * prev + w * rows[idx][1]
+        return (1 - w) * prev + w * nxt
 
     def run(self, params: StrategyParams, start: int | None = None, end: int | None = None, only_alpha: str | None = None,
             initial_balance: float = 10_000.0, bandit: AlphaBandit | None = None) -> BacktestResult:

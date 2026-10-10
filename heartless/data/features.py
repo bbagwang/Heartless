@@ -1,6 +1,7 @@
 """Feature frames: all indicators for one symbol/timeframe, plus a causal multi-timeframe cursor."""
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -22,6 +23,7 @@ class FeatureFrame:
         self.open_time = bars.view("open_time")
         self.close_time = bars.view("close_time")
         self.f: dict[str, np.ndarray] = {}
+        self._ct: list[int] | None = None
         self._compute(bars)
 
     def _compute(self, b: CandleArrays) -> None:
@@ -51,13 +53,10 @@ class FeatureFrame:
         f["kc_mid"], f["kc_up"], f["kc_lo"] = kmid, kup, klo
         sq = (up < kup) & (lo > klo)
         f["squeeze"] = sq.astype(float)
-        # consecutive squeeze bar count
-        cnt = np.zeros(n)
-        run = 0
-        for i in range(n):
-            run = run + 1 if sq[i] else 0
-            cnt[i] = run
-        f["squeeze_bars"] = cnt
+        # consecutive squeeze bar count: distance to the last non-squeeze bar (integer valued, so exact as float)
+        pos = np.arange(n)
+        last_off = np.maximum.accumulate(np.where(sq, -1, pos))
+        f["squeeze_bars"] = np.where(sq, pos - last_off, 0).astype(float)
         vw, vsd = I.session_vwap(ot, h, l, c, v)
         f["vwap"], f["vwap_sd"] = vw, vsd
         st, sdir = I.supertrend(h, l, c, 10, 3.0)
@@ -89,6 +88,14 @@ class FeatureFrame:
 
     def names(self) -> list[str]:
         return list(self.f.keys())
+
+    def close_times(self) -> list[int]:
+        """close_time as a Python list (built once per frame): seek() bisects it on every bar of a backtest, which is
+        several times cheaper than a numpy searchsorted call on a scalar."""
+        ct = self._ct
+        if ct is None:
+            ct = self._ct = self.close_time.tolist()
+        return ct
 
 
 @dataclass
@@ -153,9 +160,10 @@ class MarketView:
         self.cursor_time = close_time
         self.just_closed = set()
         for tf, fr in self.frames.items():
-            idx = int(np.searchsorted(fr.close_time, close_time, side="right")) - 1
+            ct = fr.close_times()
+            idx = bisect_right(ct, close_time) - 1  # == searchsorted(close_time, side="right") - 1
             self.cursors[tf] = FrameCursor(fr, idx)
-            if idx >= 0 and int(fr.close_time[idx]) > close_time - 60_000:
+            if idx >= 0 and ct[idx] > close_time - 60_000:
                 self.just_closed.add(tf)
 
     def tf(self, tf: str) -> FrameCursor:
