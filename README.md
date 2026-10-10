@@ -4,7 +4,7 @@
 
 Heartless 는 Binance API 키만 넣으면 나머지는 전부 알아서 판단합니다. 종목 선정, 레짐 분류, 기본 활성 알파들의 신호 결합, 포지션 사이징, 손절/익절/트레일링, 리스크 한도, 그리고 **파라미터 최적화와 챔피언/챌린저 승격**까지 모두 자동입니다. 모든 결정은 Telegram 으로 "왜 잡았고, 얼마를 노리고, 어디서 자르는지" 설명과 함께 실시간 전송되며, 웹 대시보드에서도 확인·제어할 수 있습니다. **소유자(당신) 외에는 아무도 제어할 수 없습니다.**
 
-> 📉 **실데이터 검증 현황** ([docs/RESEARCH.md](docs/RESEARCH.md)): 2026년 1~10월 Binance 선물 실데이터(12종목 1분봉·펀딩·미결제약정)로 검증한 결과, 초기 6개 알파(1~5분 스캘핑)는 모두 손실이었습니다(학습 구간 1,755건, 평균 -0.35R, PF 0.33). 5분 중앙 이동폭(5~9bp)이 왕복 비용(~13bp)보다 작기 때문입니다. 1시간봉 기반으로 재설계·신규 개발한 9개 알파 가운데 **`momentum_burst`, `htf_trend`, `intraday_levels` 3개만** 학습·비용 스트레스·검증 구간·독립 감사를 통과해 기본 활성화되어 있습니다(앙상블 검증 구간 +0.21R, PF 1.51). 하지만 **마지막에 한 번만 평가한 봉인 구간(2026-09-01~10-06)에서는 -0.03R, PF 0.96(공동 포트폴리오 -1.2%)으로 엣지가 확인되지 않았습니다.** 수익이 검증된 봇이 아닙니다. PAPER 모드로 운용하며 계속 재검증하세요.
+> 📉 **실데이터 검증 현황** ([docs/RESEARCH.md](docs/RESEARCH.md), [docs/OOS_2022_2024.md](docs/OOS_2022_2024.md)): **현재 출하 기본값에서 켜진 알파는 0개입니다. 봇은 PAPER 모드에서 신규 진입 없이 데이터 수집·리서치·알파 발굴만 합니다.** 경과는 다음과 같습니다. 2026년 1~10월 실데이터로 검증한 결과 초기 6개 알파(1~5분 스캘핑)는 모두 손실이었습니다(학습 구간 1,755건, 평균 -0.35R). 5분 중앙 이동폭(5~9bp)이 왕복 비용(~13bp)보다 작기 때문입니다. 1시간봉으로 재설계한 9개 알파 중 `momentum_burst`, `htf_trend`, `intraday_levels`가 2026년 학습·검증 구간을 통과해 켜졌지만, 봉인 구간(2026-09-01~10-06)에서는 -0.03R이었습니다. 이어서 설계에 쓰지 않은 **2022~2024년 3년(12종목)에서 사전 등록 기준으로 한 번 판정한 결과 9개 알파 모두 기준에 미달**했습니다(세 알파 -0.04R / -0.13R / -0.16R, t_day -1.1 / -3.9 / -3.8). 그래서 세 알파도 기본 비활성으로 바뀌었습니다. 이전 구성의 공동 포트폴리오는 2022 -4.7%, 2023 -13.6%, 2024 -2.5%였고 매년 고점 대비 -15% 정지에 걸렸습니다. 수익이 검증된 봇이 아닙니다. 실거래하지 마세요.
 
 > ⚠️ **정직한 고지**: 어떤 소프트웨어도 수익을 보장할 수 없습니다. 레버리지 선물은 원금 전액 손실이 가능합니다. Heartless 는 기본값이 **PAPER(모의) 모드**이며, 페이퍼 성과가 졸업 기준을 넘기 전까지는 실거래를 권하지 않습니다. 실거래 전환은 반드시 당신의 명시적 확인(Telegram 버튼 또는 `/mode live`)으로만 이루어집니다. 잃어도 되는 금액만 사용하세요.
 
@@ -15,7 +15,7 @@ Heartless 는 Binance API 키만 넣으면 나머지는 전부 알아서 판단�
 | 영역 | 내용 |
 |---|---|
 | **완전 자동 거래** | 유동성 상위 USDT 무기한 선물을 매시간 자동 선정(기본 16종목, BTC/ETH/SOL 상시 포함). 1분봉 스트림 → 5m/15m/1h 멀티 타임프레임 피처 → 알파 → 앙상블 → 리스크 → 주문. 최대 5개 포지션 동시 보유(같은 방향 3개). |
-| **알파 (자동 등록)** | `heartless/strategy/alphas/` 의 파일 하나가 알파 하나입니다(파라미터 범위·레짐 친화도·기본 활성 여부를 스스로 선언). 기본 활성(학습·검증 구간 통과, 봉인 구간에서는 엣지 미확인): `momentum_burst`(1h 거래량 폭발 버스트 소진 역추세), `htf_trend`(1주 추세 + 2일 조정 진입), `intraday_levels`(고변동성 날 UTC 일중 모멘텀). 기본 비활성(검증 실패): `trend_pullback`, `squeeze_breakout`, `mean_reversion`, `funding_fade`, `sweep_reversal`, `positioning`. 꺼진 알파도 리서치 사이클이 계속 평가하고, 다시 검증되면 켠 챌린저로 되살립니다. `discovered` 알파는 자동 발굴 엔진이 찾은 규칙을 거래합니다. |
+| **알파 (자동 등록)** | `heartless/strategy/alphas/` 의 파일 하나가 알파 하나입니다(파라미터 범위·레짐 친화도·기본 활성 여부를 스스로 선언). 2022~2024 표본 외 판정(P1) 이후 **모든 알파가 기본 비활성**입니다. 2026년 검증을 통과했다가 P1에서 탈락한 알파는 `momentum_burst`(1h 거래량 폭발 버스트 소진 역추세), `htf_trend`(1주 추세 + 2일 조정 진입), `intraday_levels`(고변동성 날 UTC 일중 모멘텀)입니다. 2026년 검증에서 이미 탈락한 알파는 `trend_pullback`, `squeeze_breakout`, `mean_reversion`, `funding_fade`, `sweep_reversal`, `positioning`입니다. 꺼진 알파도 리서치 사이클이 계속 평가하고, 다시 검증되면 켠 챌린저로 되살립니다. 단, 지금의 승격 규칙은 챔피언의 같은 기간 거래 12건 이상을 요구하므로 켜진 알파가 없는 동안에는 챌린저가 승격되지 않습니다(ROADMAP P4에서 수정 예정). `discovered` 알파는 자동 발굴 엔진이 찾은 규칙을 거래합니다. |
 | **포지셔닝 데이터** | 5분 단위 미결제약정(1h/4h/24h 변화, z-점수), 탑트레이더·전체 롱숏비율, 테이커 매수/매도 비율을 라이브(REST 폴링)와 백테스트(공개 아카이브)에서 **동일한 코드**로 계산해 알파에 제공. |
 | **레짐 인식** | 1h EMA 정렬 + 15m ADX/기울기/슈퍼트렌드/허스트 → TREND_UP / TREND_DOWN / RANGE / VOLATILE. 레짐별 알파 친화도와 사이즈 조절. |
 | **자기 강화 학습** | ① Thompson sampling 밴딧이 (알파 × 레짐)별 신뢰도를 매 거래마다 갱신 ② 4시간마다 워크포워드 최적화 + **3개 시간 구간 확인**(평균 − 0.5×표준편차) ③ 검증 통과한 꺼진 알파는 켠 챌린저로, 모든 구간에서 지는 알파는 끈 챌린저로 자동 제안 ④ **매일 자동 알파 발굴**(수만 개 규칙 탐색, 일 단위 군집 t-통계·시장 방향 제거·다중검정 기준·별도 검증 구간) ⑤ 챌린저는 실시간 페이퍼로 챔피언을 이겨야만 승격 ⑥ (선택) 메타 라벨링: 알파별로 이기는 시장 상황을 학습해 신호를 거르거나 사이즈 조절 ⑦ (선택) AI 어드바이저 가설 → 백테스트 통과 시에만 채택. |
@@ -41,7 +41,7 @@ git clone <this repo> heartless && cd heartless
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[advisor]"        # advisor 는 선택 (Anthropic 키가 있을 때만 동작)
 cp .env.example .env               # (선택) TELEGRAM_BOT_TOKEN 정도만 넣어도 됩니다
-heartless run                      # 페이퍼 모드로 바로 시작 (키 없이도 실시간 시세로 모의 거래)
+heartless run                      # 페이퍼 모드로 바로 시작 (키 없이도 실시간 시세로 동작; 현재 켜진 알파가 없어 진입 없이 학습만)
 ```
 
 Binance 키는 파일을 편집하지 않고 등록할 수 있습니다: 웹 대시보드의 **설정** 카드(HTTPS 또는 로컬 접속) 또는 Telegram `/setkeys API키 시크릿` (메시지는 즉시 삭제). 키는 검증(선물 거래 권한 확인) 후 `data/secrets.json`(권한 0600)에 저장되고 즉시 적용되며, 실거래 전환은 별도로 `/golive` 확인이 필요합니다. `.env` 에 넣는 방식도 그대로 지원합니다(환경변수가 우선). `heartless doctor` 로 키·연결·권한을 점검할 수 있습니다.
@@ -121,19 +121,30 @@ heartless backtest --download --days 21 --alpha squeeze_breakout
 heartless research --days 14          # 오프라인 리서치 사이클 (결과 출력)
 heartless params                      # 현재 챔피언 파라미터 JSON
 
-# 실데이터 연구 (Binance 공개 아카이브, API 키·가중치 불필요) — 결과는 docs/RESEARCH.md
+# 실데이터 연구 (Binance 공개 아카이브, API 키·가중치 불필요) — 결과는 docs/RESEARCH.md, docs/OOS_2022_2024.md
 heartless fetch --days 280 --symbols BTCUSDT,ETHUSDT,SOLUSDT   # 1분봉·펀딩·5분 미결제약정/롱숏비율 다운로드
+heartless fetch --start 2022-01-01 --end 2026-10-09 --symbols BTCUSDT,ETHUSDT   # 장기 수집(연 단위, 끊겨도 이어받기, 저장 구간 건너뜀)
+heartless coverage                                             # 종목별 1분봉·펀딩·지표 행 수, 구멍, 범위 → <데이터 폴더>/coverage.json
 heartless lab --split train                                    # 활성 알파 앙상블, 심볼별 병렬 백테스트 (train/valid/holdout 분리)
 heartless lab --split train --alpha trend_pullback             # 알파 하나만 단독 평가 (꺼진 알파도 가능)
 heartless lab --split valid --stress                           # 수수료 1.5배·슬리피지 2배 스트레스
 heartless lab --split train --set htf_trend.pull_bars=54 --json --trades-out t.json   # 파라미터 덮어쓰기, JSON/거래 내보내기
 heartless lab --split train --meta                             # 메타 라벨링 필터 효과 측정
+heartless lab --alpha htf_trend --years 2022,2023,2024 --by-side --out docs/results/x.json   # 연도별·롱숏별 결과, 결과 JSON 저장
+heartless lab --alpha htf_trend --start 2022-01-13 --end 2025-01-01                          # 임의 기간(날짜만 쓴 --end 는 그날 0시 미포함)
+heartless backtest --start 2024-01-01 --end 2025-01-01 --params p.json --out docs/results/j.json  # 공동 포트폴리오: 계정 하나 + 운영 리스크 설정
 heartless discover --tf 15m                                    # 규칙 자동 발굴 + 다중검정 + 검증 구간
 ```
 
 `lab` 구간: 저장된 이력의 마지막 35일이 HOLDOUT, 그 앞 62일이 VALID, 나머지(12일 워밍업 이후)가 TRAIN 입니다. 탐색·튜닝은 TRAIN 에서만, 후보 선택은 VALID 에서, HOLDOUT 은 최종 구성에 한 번만 쓰세요. `lab` 은 종목별로 따로 돌리고 계정 손실 정지를 끄므로, 동시 보유 한도가 있는 실제 계정보다 성과가 높게 나옵니다(현실 비교는 docs/RESEARCH.md 6절).
 
-연구용 데이터는 별도 폴더에 두는 것을 권합니다: `HEARTLESS_DATA_DIR=data/research heartless fetch ...` (봇 DB 는 `DATA_RETENTION_DAYS` 이후 오래된 캔들을 정리합니다).
+긴 기간(`--years`, `--start/--end`)은 (종목 × 달력 연도) 작업으로 쪼개 병렬로 돌립니다. 각 조각은 7일 번인·런오프로 이어 붙이고, 조각 경계에서 강제 청산된 거래는 `boundary`로 표시해 포함/제외 수치를 함께 보여줍니다. `--out` 결과 파일에는 요약·연도별·알파별·종목별·월별·롱숏별 통계와 함께 실행 커밋(`git_commit`), 커밋되지 않은 코드 변경 여부(`git_dirty`), 봉인 상태, 실행 명령이 남습니다.
+
+`backtest --start/--end` 는 lab 과 달리 모든 종목을 **계정 하나**(1만 USDT)에서 운영 리스크 설정(출하 기본값: 최대 5포지션·같은 방향 3개, 일/주 손실 정지, 고점 대비 낙폭 정지, 거래당 0.5%)으로 함께 돌립니다. 로컬 `.env` 는 적용하지 않고, 종목 필터는 lab 처럼 데이터에서 추정하며(오프라인), 시작 전 12일 워밍업을 읽고 끝 시각 이후는 아무것도 읽지 않습니다. 수익률, 최대낙폭, PF, 평균R, 알파별 거래, 한도로 거부된 신호 수를 출력하고 `--out` 으로 JSON 을 남깁니다.
+
+**봉인 구간(2025년)**: 2025-01-01 ~ 2025-12-31 은 최종 시험용으로 코드에서 봉인되어 있습니다(`heartless/learning/seal.py`). lab, discover, backtest, 리서치·발굴 사이클이 이 구간과 겹치는 평가를 거부하거나 잘라냅니다. 개봉은 lab/discover 의 `--unseal 2025` 로만 가능하며 `docs/results/seal_ledger.jsonl` 에 시각·명령·커밋이 기록됩니다. 사전 등록된 최종 시험(docs/ROADMAP.md P2) 전에는 쓰지 마세요.
+
+연구용 데이터는 별도 폴더에 두는 것을 권합니다: `HEARTLESS_DATA_DIR=data/research heartless fetch ...` (봇 DB 는 `DATA_RETENTION_DAYS` 이후 오래된 캔들을 정리합니다). 장기 연구 DB 는 `HEARTLESS_DATA_DIR=data/longhist`(2022-01 ~ 2026-10-08, 핵심 12종목 + 비교용 8종목)입니다.
 
 ## 설정(.env)
 
@@ -174,6 +185,9 @@ heartless/
   web/                FastAPI API + 대시보드
 tests/                pytest (지표, 시뮬레이터, 리스크, 엔진 E2E, 알파별·공통 브래킷 불변식, REST 서명, 밴딧, Telegram 인증, 오케스트레이터/웹)
 docs/RESEARCH.md      실데이터 연구·검증 결과(구간, 비용, 알파별 결과, 앙상블, 공동 포트폴리오, HOLDOUT, 한계)
+docs/ROADMAP.md       남은 작업 계획과 사전 등록 판정 기준, 패키지별 진행 상태
+docs/OOS_2022_2024.md 2022~2024 표본 외 판정(P1): 알파별 결과, 기본값 변경, 공동 포트폴리오
+docs/results/         lab·공동 포트폴리오 결과 JSON, 데이터 커버리지, (개봉 시) 봉인 원장
 ```
 
 ## 테스트
