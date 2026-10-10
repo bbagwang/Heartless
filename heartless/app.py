@@ -5,7 +5,7 @@ import asyncio
 import logging
 import math
 from collections import deque
-from typing import Any
+from typing import Any, Callable
 
 from heartless.config import Settings
 from heartless.core.bus import EventBus
@@ -38,9 +38,23 @@ log = logging.getLogger(__name__)
 CHALLENGER_MIN_AGE_MS = 2 * MS_DAY
 # how often the scheduler re-runs the history fetch for symbols whose backfill failed
 BACKFILL_RETRY_MS = 5 * MS_MINUTE
+# 1m history kept in memory per symbol: the longest live frame (1h x LIVE_WINDOW["1h"] = 21.7 days) plus margin. Older
+# bars can never reach a feature frame (each frame is the tail of the resampled history), so dropping them changes no
+# feature, while keeping them grew memory ~1.4 MB/day for 12 symbols and the per-boundary resample cost without bound.
+LIVE_HISTORY_DAYS = math.ceil(LIVE_WINDOW["1h"] / 24) + 2
+# universe hysteresis: a member stays until its 24h quote volume drops below this fraction of the entry threshold. A
+# symbol hovering around UNIVERSE_MIN_QUOTE_VOLUME was otherwise added and removed at hourly refreshes (a 2-day replay
+# of July 2026 flipped AVAXUSDT 6 times), each time reloading its history, rebuilding its views and messaging the owner.
+UNIVERSE_KEEP_FRACTION = 0.8
+# how often the scheduler stores the funding settlements published since the last stored one
+FUNDING_REFRESH_MS = MS_HOUR
 
 
 class Heartless:
+    # next local midnight (set in __init__); the class default keeps the day roll inert on instances built without
+    # __init__ (tests drive _tick on such partial apps)
+    _next_day_ms: int = 2**62
+
     def __init__(self, settings: Settings):
         self.s = settings
         self.store = Store(settings.db_path)
@@ -81,6 +95,8 @@ class Heartless:
         self._stopping = False
         self.last_bar_ts: dict[str, int] = {}
         self.telegram = None
+        # builds the Telegram bot in run(); None = the production TelegramBot (the replay harness injects its capture bot)
+        self.telegram_factory: Callable[["Heartless"], Any] | None = None
         self.web = None
         self._backfilling: set[str] = set()
         self.archive = None  # BinanceArchive, created lazily for bulk backfill
@@ -89,10 +105,12 @@ class Heartless:
         self._next_report_ts = next_local_time(settings.daily_report_hour, 0, settings.timezone)
         self._last_prune = 0
         self._last_oi_poll = 0
+        self._last_funding_refresh = 0
         self._last_universe = 0
         self._last_reconcile = 0
         self._last_equity_tick = 0
         self._last_day_key = local_day_start(now_ms(), settings.timezone)
+        self._next_day_ms = next_local_time(0, 0, settings.timezone, now_ms())
         self.health: dict[str, Any] = {}
 
     # --- helpers -------------------------------------------------------------------------------
@@ -171,9 +189,12 @@ class Heartless:
         self.tasks.append(asyncio.create_task(self._kline_worker(), name="kline-worker"))
         self.tasks.append(asyncio.create_task(self._scheduler(), name="scheduler"))
         if self.s.telegram_bot_token:
-            from heartless.notify.telegram import TelegramBot
+            if self.telegram_factory is not None:
+                self.telegram = self.telegram_factory(self)
+            else:
+                from heartless.notify.telegram import TelegramBot
 
-            self.telegram = TelegramBot(self)
+                self.telegram = TelegramBot(self)
             self.tasks.append(asyncio.create_task(self.telegram.run(), name="telegram"))
         if self.s.web_enabled:
             from heartless.web.app import WebServer
@@ -244,6 +265,8 @@ class Heartless:
             return
         new = select_universe(self.symbols, tickers, self.s.universe_size, self.s.universe_min_quote_volume,
                               self.s.always_include_list)
+        if not initial:
+            self._keep_members(new, tickers)
         # keep symbols with open positions
         held = {p.symbol for eng in self.engines.values() for p in eng.open_positions()}
         for sym in held:
@@ -266,6 +289,23 @@ class Heartless:
             self.market.set_symbols(self.universe)
             await self.emit("universe", {"message": f"유니버스 갱신: +{','.join(added) or '-'} / -{','.join(removed) or '-'}",
                                          "added": added, "removed": removed, "universe": self.universe})
+
+    def _keep_members(self, new: list[str], tickers: list[dict]) -> None:
+        """Universe hysteresis (UNIVERSE_KEEP_FRACTION): current members that fell out of `new` only because their 24h
+        volume dipped a little under the entry threshold are kept, best volume first, within the universe size."""
+        vol: dict[str, float] = {}
+        for t in tickers:
+            try:
+                vol[t["symbol"]] = float(t.get("quoteVolume", 0.0) or 0.0)
+            except (KeyError, TypeError, ValueError):
+                continue
+        keep_min = self.s.universe_min_quote_volume * UNIVERSE_KEEP_FRACTION
+        for sym in sorted((s for s in self.universe if s not in new), key=lambda s: -vol.get(s, 0.0)):
+            info = self.symbols.get(sym)
+            if len(new) >= self.s.universe_size:
+                break
+            if info is not None and info.status == "TRADING" and vol.get(sym, 0.0) >= keep_min:
+                new.append(sym)
 
     async def _backfill(self, symbols: list[str]) -> set[str]:
         """Fetch the missing 1m history (and funding) into the store. Returns the symbols whose fetch failed; they
@@ -582,6 +622,7 @@ class Heartless:
         mark = t.mark or t.mid
         if not mark:
             return
+        self._roll_day(now_ms())  # before a stop filled by this tick can book a trade into the previous day
         # snapshots: a live close inside on_tick yields to the loop, during which the scheduler may retire/install
         # a challenger or switch modes (dict mutation mid-iteration would tear down the market stream)
         for acc in list(self.paper_accounts.values()):
@@ -606,6 +647,7 @@ class Heartless:
                 log.exception("bar processing failed for %s", sym)
 
     async def _process_bar(self, sym: str, c: Candle) -> None:
+        self._roll_day(now_ms())
         ca = self.candles.get(sym)
         if ca is None:
             return
@@ -620,6 +662,10 @@ class Heartless:
             except Exception as e:  # noqa: BLE001
                 log.warning("gap fill %s failed: %s", sym, e)
         ca.append(c)
+        if c.open_time % MS_DAY == 0:
+            # once a day per symbol, here and not in the scheduler: the feature rebuild thread reads `ca` and only this
+            # worker mutates it, between rebuilds
+            self._trim_history(ca, c.open_time)
         self.store.save_candles(sym, [c])
         self.last_bar_ts[sym] = c.close_time
         view = self.views.get(sym)
@@ -650,6 +696,12 @@ class Heartless:
                 log.exception("engine %s on_bar failed for %s", eng.name, sym)
         if sym == "BTCUSDT":
             await self._btc_shock_check(view)
+
+    def _trim_history(self, ca: CandleArrays, now: int) -> None:
+        """Drop 1m bars older than max(HISTORY_DAYS, LIVE_HISTORY_DAYS) days, cut at a UTC midnight so every 5m/15m/1h
+        group that remains is whole."""
+        keep = max(self.s.history_days, LIVE_HISTORY_DAYS) * MS_DAY
+        ca.trim_before(now - now % MS_DAY - keep)
 
     @staticmethod
     def _rebuild_view(view: MarketView, ca: CandleArrays, tfs: list[str]) -> None:
@@ -700,6 +752,7 @@ class Heartless:
         while True:
             now = now_ms()
             try:
+                self._roll_day(now)  # first: the reconcile and challenger checks below can book trades
                 if now - self._last_equity_tick >= 30_000:
                     self._last_equity_tick = now
                     for eng in list(self.engines.values()):
@@ -716,6 +769,9 @@ class Heartless:
                 if now - self._last_oi_poll >= 5 * MS_MINUTE:
                     self._last_oi_poll = now
                     asyncio.create_task(self._poll_metrics())
+                if now - self._last_funding_refresh >= FUNDING_REFRESH_MS:
+                    self._last_funding_refresh = now
+                    asyncio.create_task(self._refresh_funding())
                 if now - self._last_universe >= self.s.universe_refresh_minutes * MS_MINUTE:
                     await self.refresh_universe()
                 if self.research.due(now) and not self.research.running:
@@ -727,11 +783,6 @@ class Heartless:
                 if now >= self._next_report_ts:
                     self._next_report_ts = next_local_time(self.s.daily_report_hour, 0, self.s.timezone, now)
                     asyncio.create_task(self.daily_report())
-                day_key = local_day_start(now, self.s.timezone)
-                if day_key != self._last_day_key:
-                    self._last_day_key = day_key
-                    for eng in self.engines.values():
-                        eng.reset_daily()
                 if now - self._last_prune >= 6 * MS_HOUR:
                     self._last_prune = now
                     self.store.prune_candles(now - (max(self.s.history_days, self.s.data_retention_days) + 5) * MS_DAY)
@@ -739,6 +790,19 @@ class Heartless:
             except Exception:  # noqa: BLE001
                 log.exception("scheduler iteration failed")
             await asyncio.sleep(5)
+
+    def _roll_day(self, now: int) -> None:
+        """Start a new reporting day (the engines' daily counters) once `now` passed the local midnight. Runs before
+        any tick, bar or owner close reaches an engine, not only in the 5 s scheduler: a trade closed in between was
+        booked into the old day's counter and then wiped, so the day's "today" PnL in close messages missed it."""
+        if now < self._next_day_ms:
+            return
+        self._next_day_ms = next_local_time(0, 0, self.s.timezone, now)
+        day_key = local_day_start(now, self.s.timezone)
+        if day_key != self._last_day_key:
+            self._last_day_key = day_key
+            for eng in self.engines.values():
+                eng.reset_daily()
 
     def _persist_paper_accounts(self) -> None:
         for name, acc in self.paper_accounts.items():
@@ -775,8 +839,10 @@ class Heartless:
                     self.rest.top_long_short_account_ratio(sym, "5m", limit),
                     self.rest.global_long_short_account_ratio(sym, "5m", limit),
                     self.rest.taker_long_short_ratio(sym, "5m", limit))
-                fresh = MetricsSeries.from_rows(rows_from_rest(oi, tp, ta, ga, tk))
+                rows = rows_from_rest(oi, tp, ta, ga, tk)
+                fresh = MetricsSeries.from_rows(rows)
                 merged = fresh if have is None else have.merge(fresh)
+                self._store_metrics(sym, rows)
                 self.metrics_series[sym] = merged.tail(1200)
                 # keep the 15m OI deque fed for anything still reading it
                 dq = self.oi_hist.setdefault(sym, deque(maxlen=64))
@@ -787,6 +853,47 @@ class Heartless:
             except Exception as e:  # noqa: BLE001
                 log.debug("metrics poll %s failed: %s", sym, e)
             await asyncio.sleep(0.25)
+
+    def _store_metrics(self, sym: str, rows: list[dict]) -> None:
+        """Persist polled positioning rows (archive-shaped, keyed by bucket start). The research worker's backtests read
+        metrics from the store like the lab does; with polled rows kept in memory only, every research cycle evaluated
+        the metrics alphas (positioning, funding_fade) without data, so they could never pass and be switched back on.
+        A bucket polled while still incomplete is completed by the next polls (each re-reads the newest buckets). A value
+        missing from this poll keeps the stored one: a bucket that only some series answered (one series lagging a
+        bucket behind the others, or answering empty) would otherwise erase what an earlier poll stored, and with a
+        steady one-bucket lag every bucket would end up holding a single series once it left the poll window."""
+        from types import SimpleNamespace
+
+        cols = ("oi", "oi_value", "top_ls_accounts", "top_ls_positions", "ls_accounts", "taker_ls_vol")
+        try:
+            if not rows:
+                return
+            ts = [int(r["ts"]) for r in rows]
+            stored = {int(r["ts"]): r for r in self.store.load_metrics(sym, min(ts), max(ts))}
+            out = []
+            for t, r in zip(ts, rows):
+                old = stored.get(t) or {}
+                out.append(SimpleNamespace(ts=t, **{c: r.get(c) if r.get(c) is not None else old.get(c) for c in cols}))
+            self.store.save_metrics(sym, out)
+        except Exception as e:  # noqa: BLE001 - persistence must never break the live series
+            log.warning("metrics store %s failed: %s", sym, e)
+
+    async def _refresh_funding(self) -> None:
+        """Store the funding settlements published since the last stored one, for every universe symbol. _backfill
+        only fetched them at start-up and on universe changes, so on a long-running bot the funding table stopped at
+        the start: research backtests charge the latest stored rate at every later settlement, i.e. they kept applying
+        the start-up rate for weeks (and the funding-avoidance exit saw it too)."""
+        now = now_ms()
+        for sym in list(self.universe):
+            _, f_hi = self.store.funding_range(sym)
+            if f_hi is None or now < f_hi + 8 * MS_HOUR:
+                continue  # never backfilled (the backfill owns that) or no settlement due since the last stored one
+            try:
+                fr = await self.rest.funding_rate_history(sym, start=f_hi + 1, end=now)
+                self.store.save_funding(sym, [(int(r["fundingTime"]), float(r["fundingRate"]),
+                                               float(r.get("markPrice", 0) or 0)) for r in fr])
+            except Exception as e:  # noqa: BLE001
+                log.debug("funding refresh %s failed: %s", sym, e)
 
     async def _poll_open_interest(self) -> None:
         for sym in list(self.universe):
@@ -826,6 +933,7 @@ class Heartless:
         await self.emit("control", {"message": "▶️ 거래 재개"})
 
     async def close_symbol(self, symbol: str, engine: str | None = None) -> int:
+        self._roll_day(now_ms())
         n = 0
         targets = [self.engines[engine]] if engine and engine in self.engines else [e for e in (self.primary_engine,) if e]
         for eng in targets:
@@ -834,6 +942,7 @@ class Heartless:
         return n
 
     async def close_all(self, engine: str | None = None) -> int:
+        self._roll_day(now_ms())
         targets = [self.engines[engine]] if engine and engine in self.engines else [e for e in (self.primary_engine,) if e]
         n = 0
         for eng in targets:
@@ -899,6 +1008,7 @@ class Heartless:
         eng = self.engines.get("live")
         n = 0
         if eng:
+            self._roll_day(now_ms())  # the flatten below reaches the engine directly, not through close_all
             eng.entries_enabled = False
             err = ""
             remaining: set[str] = set()
