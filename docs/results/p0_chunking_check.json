@@ -1,0 +1,102 @@
+{
+ "window": "TRAIN 2026-01-13 05:35 .. 2026-07-01 23:58 UTC (data/research, ensemble, stored champion)",
+ "reference_reproduction": {
+  "reference_trades": 674,
+  "reproduced_trades": 674,
+  "identical_in_order": true,
+  "compared": "symbol, entry_time, exit_time, r_multiple, side, alpha, exit_reason"
+ },
+ "unchunked": {
+  "n": 674,
+  "n_vs_unchunked_pct": 0.0,
+  "avg_r": 0.3856,
+  "profit_factor": 2.196,
+  "t_day": 3.7,
+  "boundary_trades": 0,
+  "excl_boundary": {
+   "n": 674,
+   "avg_r": 0.3856
+  },
+  "chunks": [
+   [
+    "2026-01-13 05:35",
+    "2026-07-01 23:58"
+   ]
+  ],
+  "lab_seconds_2_workers": 153.2
+ },
+ "chunk45_handoff": {
+  "n": 686,
+  "n_vs_unchunked_pct": 1.78,
+  "avg_r": 0.3813,
+  "profit_factor": 2.252,
+  "t_day": 3.71,
+  "boundary_trades": 0,
+  "excl_boundary": {
+   "n": 686,
+   "avg_r": 0.3813
+  },
+  "chunks": [
+   [
+    "2026-01-13 05:35",
+    "2026-02-27 05:34"
+   ],
+   [
+    "2026-02-27 05:35",
+    "2026-04-13 05:34"
+   ],
+   [
+    "2026-04-13 05:35",
+    "2026-05-28 05:34"
+   ],
+   [
+    "2026-05-28 05:35",
+    "2026-07-01 23:58"
+   ]
+  ],
+  "lab_seconds_2_workers": 202.3,
+  "burn_in_days": 7,
+  "runoff_days": 7,
+  "trade_match": {
+   "same_entry_and_exit": 658,
+   "entries_only_unchunked": 16,
+   "entries_only_chunked": 28,
+   "first_chunk_identical": true,
+   "cause": "later chunks restart the bandit's Thompson-sampling path (fresh posterior and RNG), so a few vetoes differ"
+  }
+ },
+ "chunk45_pure_cut": {
+  "n": 692,
+  "n_vs_unchunked_pct": 2.67,
+  "avg_r": 0.3601,
+  "profit_factor": 2.205,
+  "t_day": 3.54,
+  "boundary_trades": 17,
+  "excl_boundary": {
+   "n": 675,
+   "avg_r": 0.3756
+  },
+  "chunks": [
+   [
+    "2026-01-13 05:35",
+    "2026-02-27 05:34"
+   ],
+   [
+    "2026-02-27 05:35",
+    "2026-04-13 05:34"
+   ],
+   [
+    "2026-04-13 05:35",
+    "2026-05-28 05:34"
+   ],
+   [
+    "2026-05-28 05:35",
+    "2026-07-01 23:58"
+   ]
+  ],
+  "lab_seconds_2_workers": 158.6,
+  "burn_in_days": 0,
+  "runoff_days": 0,
+  "note": "measured before the hand-off was added (pure cut: force-close at each chunk end)"
+ }
+}

@@ -17,6 +17,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 
 from heartless.execution.stats import objective, summarize
+from heartless.learning import seal
 from heartless.learning.optimizer import run_research_cycle
 from heartless.strategy.params import StrategyParams
 from heartless.util.ids import short_id
@@ -237,6 +238,11 @@ class ResearchManager:
             await self.app.emit("research_done", {"message": f"알파 발굴 건너뜀: 저장된 이력 {days:.0f}일 < {self.s.discovery_min_days}일", "notify": False})
             return None
         start = first + 14 * MS_DAY  # indicator warm-up
+        win = seal.clip_window(start, last)  # the automated loop never mines or validates on a sealed period
+        if win is None or win[1] - win[0] < (self.s.discovery_min_days - 14) * MS_DAY:
+            await self.app.emit("research_done", {"message": "알파 발굴 건너뜀: 봉인 구간을 제외하면 이력이 부족함", "notify": False})
+            return None
+        start, last = win
         split = start + int((last - start) * 0.7)
         self.running = True
         try:

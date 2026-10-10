@@ -591,11 +591,15 @@ def _build_job(job: dict) -> SymbolData | None:
     from heartless.core.store import Store
     from heartless.data.candles import CandleArrays, resample
     from heartless.data.features import FeatureFrame
+    from heartless.learning import seal
 
+    seal.check_window(job["start"], job["end"], job.get("unseal", ()))
     store = Store(job["db_path"])
     sym, tf = job["symbol"], job["tf"]
     warm = 14 * 86_400_000
-    rows = store.load_candles(sym, start=job["start"] - warm, end=job["end"] + 13 * 3_600_000)
+    # exits of the last decisions are simulated up to 13h past the window, but never inside a sealed period
+    fwd = seal.readable_until(job["end"], job["end"] + 13 * 3_600_000, job.get("unseal", ()))
+    rows = store.load_candles(sym, start=job["start"] - warm, end=fwd)
     mrows = store.load_metrics(sym, job["start"] - 4 * 86_400_000, job["end"]) if hasattr(store, "load_metrics") else []
     store.close()
     if len(rows) < 5000:
@@ -609,11 +613,17 @@ def _build_job(job: dict) -> SymbolData | None:
 
 
 def build_dataset(db_path: str, symbols: list[str], start: int, end: int, tf: str = "15m", workers: int = 2,
-                  cost: dict | None = None) -> Dataset:
+                  cost: dict | None = None, unseal=()) -> Dataset:
+    """Decision rows of [start, end] for every symbol. Raises SealedError for a window touching a sealed period."""
     import multiprocessing
     from concurrent.futures import ProcessPoolExecutor
 
-    jobs = [{"db_path": db_path, "symbol": s, "start": int(start), "end": int(end), "tf": tf, "cost": cost or {}} for s in symbols]
+    from heartless.learning import seal
+
+    seal.check_window(int(start), int(end), unseal)
+    unseal = seal.opened(int(start), int(end), unseal)  # exit simulation may only read into a period this window opens
+    jobs = [{"db_path": db_path, "symbol": s, "start": int(start), "end": int(end), "tf": tf, "cost": cost or {},
+             "unseal": sorted(unseal or ())} for s in symbols]
     if workers <= 1:
         parts = [_build_job(j) for j in jobs]
     else:
@@ -626,13 +636,19 @@ def build_dataset(db_path: str, symbols: list[str], start: int, end: int, tf: st
 
 
 def mine(db_path: str, symbols: list[str], train: tuple[int, int], valid: tuple[int, int], tf: str = "15m",
-         cfg: SearchConfig | None = None, workers: int = 2, progress=None) -> dict:
-    """Full discovery run: build TRAIN/VALID datasets, beam-search on TRAIN, validate on VALID."""
+         cfg: SearchConfig | None = None, workers: int = 2, progress=None, unseal=()) -> dict:
+    """Full discovery run: build TRAIN/VALID datasets, beam-search on TRAIN, validate on VALID.
+
+    Both windows pass the seal check before any data is read (SealedError unless the period is in `unseal`)."""
     import time as _t
 
+    from heartless.learning import seal
+
+    seal.check_window(int(train[0]), int(train[1]), unseal)
+    seal.check_window(int(valid[0]), int(valid[1]), unseal)
     t0 = _t.time()
-    ds_tr = build_dataset(db_path, symbols, train[0], train[1], tf, workers)
-    ds_va = build_dataset(db_path, symbols, valid[0], valid[1], tf, workers)
+    ds_tr = build_dataset(db_path, symbols, train[0], train[1], tf, workers, unseal=unseal)
+    ds_va = build_dataset(db_path, symbols, valid[0], valid[1], tf, workers, unseal=unseal)
     if progress:
         progress(f"datasets: train {len(ds_tr.times)} rows, valid {len(ds_va.times)} rows ({_t.time() - t0:.0f}s)")
     rules, tested = search(ds_tr, cfg, progress)

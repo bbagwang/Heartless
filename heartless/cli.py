@@ -33,13 +33,29 @@ def main(argv: list[str] | None = None) -> None:
     rs.add_argument("--apply", action="store_true", help="promote the best candidates straight to champion (offline use)")
     fe = sub.add_parser("fetch", help="download history from the Binance public data archive (no API weight)")
     fe.add_argument("--symbols", default=None, help="comma separated (default: ALWAYS_INCLUDE + stored symbols)")
-    fe.add_argument("--days", type=int, default=90)
+    fe.add_argument("--days", type=int, default=90, help="the last N days (default mode, ignored with --start)")
+    fe.add_argument("--start", default=None, help="ISO date: long-range mode, fetched in ascending calendar-year chunks")
+    fe.add_argument("--end", default=None, help="ISO date, exclusive (default: now); --end 2026-10-09 ends 10-08 23:59")
     fe.add_argument("--no-metrics", action="store_true", help="skip open-interest / long-short metrics")
+    fe.add_argument("--retry-holes", action="store_true",
+                    help="re-request candle ranges the archive previously did not have")
+    cv = sub.add_parser("coverage", help="report stored history per symbol (rows, gaps, funding, metrics) to coverage.json")
+    cv.add_argument("--symbols", default=None, help="comma separated (default: all stored symbols)")
+    cv.add_argument("--start", default=None, help="ISO date: only count history from here")
+    cv.add_argument("--end", default=None, help="ISO date, exclusive")
+    cv.add_argument("--out", default=None, help="JSON path (default: <data_dir>/coverage.json)")
     lb = sub.add_parser("lab", help="research lab: parallel per-symbol backtests on stored history with train/valid/holdout splits")
     lb.add_argument("--alpha", default=None, help="evaluate a single alpha in isolation")
     lb.add_argument("--split", default="train", choices=["train", "valid", "holdout", "all"])
     lb.add_argument("--start", default=None, help="ISO date, overrides --split")
-    lb.add_argument("--end", default=None)
+    lb.add_argument("--end", default=None, help="ISO date; a date-only end is exclusive")
+    lb.add_argument("--years", default=None, help="contiguous years, e.g. 2022,2023,2024 (window = their union)")
+    lb.add_argument("--by-side", action="store_true", help="add long/short breakdowns (overall and per year)")
+    lb.add_argument("--chunk-days", type=int, default=None,
+                    help="split the window into N-day jobs per symbol (default: calendar years; 0 = no split)")
+    lb.add_argument("--unseal", action="append", default=[], metavar="PERIOD",
+                    help="deliberately evaluate a sealed period (e.g. 2025); loud warning + seal ledger entry")
+    lb.add_argument("--out", default=None, help="write the full result JSON here (e.g. docs/results/<name>.json)")
     lb.add_argument("--symbols", default=None)
     lb.add_argument("--params", default=None, help="StrategyParams JSON file (default: stored champion)")
     lb.add_argument("--set", action="append", default=[], help="override, e.g. trend_pullback.adx_min=24")
@@ -56,9 +72,14 @@ def main(argv: list[str] | None = None) -> None:
     dc.add_argument("--min-trades", type=int, default=150)
     dc.add_argument("--workers", type=int, default=2)
     dc.add_argument("--out", default=None, help="write the full result JSON here")
+    dc.add_argument("--train", default=None, metavar="START:END", help="TRAIN window as ISO dates (default: stored split)")
+    dc.add_argument("--valid", default=None, metavar="START:END", help="VALID window as ISO dates (default: stored split)")
+    dc.add_argument("--unseal", action="append", default=[], metavar="PERIOD",
+                    help="deliberately mine/validate on a sealed period; loud warning + seal ledger entry")
     sub.add_parser("doctor", help="check configuration and connectivity")
     sub.add_parser("params", help="print the champion parameters")
     args = parser.parse_args(argv)
+    args.argv = ["heartless", *argv] if argv is not None else list(sys.argv)
     cmd = args.cmd or "run"
     settings = load_settings()
     setup_logging(settings.log_level, settings.data_dir)
@@ -70,6 +91,8 @@ def main(argv: list[str] | None = None) -> None:
         _research(settings, args)
     elif cmd == "fetch":
         asyncio.run(_fetch(settings, args))
+    elif cmd == "coverage":
+        _coverage(settings, args)
     elif cmd == "lab":
         from heartless.learning.lab import main_cli
 
@@ -166,9 +189,15 @@ async def _ensure_candles(rest, store, universe: list[str], days: int) -> None:
 async def _backtest(settings, args) -> None:
     from heartless.core.store import Store
     from heartless.execution.stats import by_alpha
+    from heartless.learning import seal
     from heartless.learning.backtester import load_backtester
     from heartless.learning.research import ResearchManager
 
+    try:
+        seal.check_window(now_ms() - args.days * MS_DAY, now_ms())
+    except seal.SealedError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
     store = Store(settings.db_path)
     rest, symbols, universe = await _load_symbols_and_universe(settings, store, args.download, args.symbols)
     if args.download:
@@ -223,6 +252,11 @@ def _research(settings, args) -> None:
                      if k not in ("BINANCE_API_KEY", "BINANCE_API_SECRET", "TELEGRAM_BOT_TOKEN", "ANTHROPIC_API_KEY")}
     result = run_research_cycle(str(settings.db_path), settings_dict, params.to_dict(), {k: asdict(v) for k, v in symbols.items()},
                                 args.days or settings.research_lookback_days, args.candidates or settings.research_candidates)
+    if result.get("window", {}).get("sealed_clipped"):
+        print(f"note: research window clipped to stay out of sealed period(s) {result['window']['sealed_clipped']}",
+              file=sys.stderr)
+    if "error" in result:
+        print(f"research: {result['error']}", file=sys.stderr)
     print(json.dumps({a: {"base": r["base"]["test"], "best": r["best"]["test"], "best_params": r["best"]["params"],
                           "improved": not r["best"].get("is_base")} for a, r in result.get("alphas", {}).items()},
                      indent=2, default=str))
@@ -248,17 +282,45 @@ async def _symbols_offline(settings):
         await rest.close()
 
 
+def _window_arg(text: str) -> tuple[int, int]:
+    from heartless.learning.lab import parse_when
+
+    a, sep, b = text.partition(":")
+    if not sep or not a.strip() or not b.strip():
+        raise ValueError(f"expected START:END (ISO dates), got {text!r}")
+    return parse_when(a), parse_when(b, end=True)
+
+
 def _discover(settings, args) -> None:
     from heartless.core.store import Store
     from heartless.learning import discovery as D
+    from heartless.learning import seal
     from heartless.learning.lab import store_splits
 
     store = Store(settings.db_path)
     symbols = [x.strip().upper() for x in args.symbols.split(",")] if args.symbols else store.candle_symbols()
-    sp = store_splits(store, symbols)
+    unseal = sorted(set(args.unseal or []))
+    try:
+        sp = store_splits(store, symbols) if not (args.train and args.valid) else {}
+        train = _window_arg(args.train) if args.train else sp["train"]
+        valid = _window_arg(args.valid) if args.valid else sp["valid"]
+        for w in (train, valid):
+            seal.check_window(w[0], w[1], unseal)
+    except (ValueError, seal.SealedError) as e:
+        store.close()
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    touched = set(seal.overlapping(*train)) | set(seal.overlapping(*valid))
+    for period in unseal:
+        if period in touched:
+            print(f"\n{'!' * 78}\n!!! UNSEALING {period} for discovery: the sealed final-exam period is being mined "
+                  f"or validated on.\n!!! Recorded in {seal.LEDGER}\n{'!' * 78}\n", file=sys.stderr, flush=True)
+            seal.record_unseal(period, args.argv)
+        else:
+            print(f"note: --unseal {period} has no effect: neither window overlaps it (not recorded)", file=sys.stderr)
     cfg = D.SearchConfig(min_trades=args.min_trades, beam=args.beam, depth=args.depth)
-    res = D.mine(str(settings.db_path), symbols, sp["train"], sp["valid"], args.tf, cfg, workers=args.workers,
-                 progress=lambda m: print(m, file=sys.stderr, flush=True))
+    res = D.mine(str(settings.db_path), symbols, train, valid, args.tf, cfg, workers=args.workers,
+                 progress=lambda m: print(m, file=sys.stderr, flush=True), unseal=[p for p in unseal if p in touched])
     store.set("discovery.last", {"tf": args.tf, "tested": res["tested"], "t_bar": res["t_bar"], "passed": res["passed"],
                                  "ts": now_ms()})
     store.close()
@@ -278,28 +340,92 @@ def _discover(settings, args) -> None:
 
 
 async def _fetch(settings, args) -> None:
-    from heartless.core.store import Store
-    from heartless.data.archive import BinanceArchive, sync_symbol
+    """Archive download. --days N fetches the recent tail; --start/--end fetches a long range symbol by symbol in
+    ascending calendar-year chunks (at most about a year of 1m klines in memory), skipping what is stored, so an
+    interrupted run simply resumes. Interior holes are re-requested once and reported."""
+    import time
 
+    from heartless.core.store import Store
+    from heartless.data.archive import BinanceArchive, sync_symbol, year_spans
+    from heartless.learning.lab import parse_when
+
+    now = now_ms()
+    try:
+        if args.start:
+            start = parse_when(args.start)
+            end = min(parse_when(args.end, end=True), now) if args.end else now
+        elif args.end:
+            raise ValueError("--end needs --start")
+        else:
+            start, end = now - args.days * MS_DAY, now
+        if end <= start:
+            raise ValueError("empty fetch window")
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
     store = Store(settings.db_path)
     if args.symbols:
         symbols = [x.strip().upper() for x in args.symbols.split(",") if x.strip()]
     else:
         symbols = list(dict.fromkeys(settings.always_include_list + store.candle_symbols()))
-    now = now_ms()
-    start = now - args.days * MS_DAY
+    chunks = year_spans(start, end)
+    print(f"fetching {len(symbols)} symbol(s) {_iso(start)} .. {_iso(end)} UTC in {len(chunks)} chunk(s)", flush=True)
     async with BinanceArchive() as archive:
         for sym in symbols:
-            try:
-                res = await sync_symbol(store, archive, sym, start, now, now, metrics=not args.no_metrics)
-            except Exception as e:  # noqa: BLE001
-                print(f"{sym}: failed ({e})", file=sys.stderr)
-                continue
+            for a, b in chunks:
+                tag = f"{sym} {_iso(a)[:4] if len(chunks) > 1 else ''}".rstrip()
+                t0 = time.time()
+                try:
+                    res = await sync_symbol(store, archive, sym, a, b, now, metrics=not args.no_metrics,
+                                            retry_holes=args.retry_holes)
+                except Exception as e:  # noqa: BLE001
+                    print(f"{tag}: failed ({e!r}); rerun to resume", file=sys.stderr, flush=True)
+                    continue
+                gaps = res["gaps"]
+                extra = ""
+                if gaps:
+                    big = max(gaps, key=lambda g: g[2])
+                    extra = (f", {len(gaps)} gap(s) >= 5m ({sum(g[2] for g in gaps)} min, largest {big[2]}m at "
+                             f"{_iso(big[0])})")
+                if res["known_holes"]:
+                    extra += f", {res['known_holes']} known archive hole(s) skipped"
+                print(f"{tag}: +{res['candles']} candles, +{res['funding']} funding, +{res['metrics']} metrics{extra} "
+                      f"({time.time() - t0:.0f}s)", flush=True)
             lo, hi, n = store.candle_range(sym)
-            span = f"{(hi - lo) / MS_DAY:.1f}d" if lo else "-"
-            print(f"{sym}: +{res['candles']} candles (total {n}, {span}), +{res['funding']} funding, +{res['metrics']} metrics")
+            span = f"{_iso(lo)} .. {_iso(hi)}" if lo else "-"
+            print(f"{sym}: total {n} candles ({span})", flush=True)
         print(f"downloaded {archive.downloaded_bytes / 1e6:.1f} MB from {archive._good or '-'}")
     store.close()
+
+
+def _iso(ms: int | None) -> str:
+    from heartless.util.timeutil import fmt_ts
+
+    return fmt_ts(ms, "UTC", "%Y-%m-%d %H:%M") if ms is not None else "-"
+
+
+def _coverage(settings, args) -> None:
+    from pathlib import Path
+
+    from heartless.core.store import Store
+    from heartless.data.archive import coverage, coverage_table
+    from heartless.learning.lab import parse_when
+
+    store = Store(settings.db_path)
+    symbols = [x.strip().upper() for x in args.symbols.split(",") if x.strip()] if args.symbols else sorted(store.candle_symbols())
+    start = parse_when(args.start) if args.start else None
+    end = parse_when(args.end, end=True) if args.end else None
+    cov = coverage(store, symbols, start, end)
+    store.close()
+    cov["db"] = str(settings.db_path)
+    out = Path(args.out) if args.out else settings.data_dir / "coverage.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(cov, indent=1))
+    print(coverage_table(cov))
+    tot = sum(e["rows"] for e in cov["symbols"].values())
+    exp = sum(e["expected"] for e in cov["symbols"].values())
+    print(f"{len(symbols)} symbol(s), {tot:,} candles, missing {((exp - tot) / exp * 100) if exp else 0:.4f}% of the "
+          f"expected minutes between each symbol's first and last candle; wrote {out}")
 
 
 async def _doctor(settings) -> None:

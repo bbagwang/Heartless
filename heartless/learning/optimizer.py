@@ -121,12 +121,16 @@ def _has_own_params(alpha: str) -> bool:
 def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, symbols_dict: dict,
                        lookback_days: int, n_candidates: int, seed: int | None = None,
                        alphas: list[str] | None = None, seeds: dict[str, list[dict]] | None = None,
-                       folds: int = 3) -> dict:
-    """Entry point executed in a worker process. Returns a JSON-serialisable summary."""
+                       folds: int = 3, unseal=()) -> dict:
+    """Entry point executed in a worker process. Returns a JSON-serialisable summary.
+
+    The lookback window never touches a sealed period (heartless.learning.seal): an automated loop cannot ask for
+    an unseal, so the window is clipped to its unsealed recent side (noted in `window.sealed_clipped`)."""
     import logging as _logging
 
     from heartless.core.models import SymbolInfo
     from heartless.core.store import Store
+    from heartless.learning import seal
 
     _logging.basicConfig(level=_logging.WARNING)
     t0 = time.time()
@@ -139,7 +143,15 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
     if not now:
         return {"error": "no candles", "alphas": {}}
     since = now - lookback_days * MS_DAY
-    bt = load_backtester(settings, store, symbols, since)
+    clipped = seal.overlapping(since, now, unseal)
+    if clipped:
+        win = seal.clip_window(since, now, unseal)
+        if win is None or win[1] - win[0] < max(1, lookback_days // 2) * MS_DAY:
+            store.close()
+            return {"error": f"research window overlaps sealed period(s) {clipped}", "alphas": {}}
+        since, now = win
+    seal.check_window(since, now, unseal)
+    bt = load_backtester(settings, store, symbols, since, until=now if clipped else None)
     if not bt.candles:
         return {"error": "not enough candles", "alphas": {}}
     # screening: train on the first 60% of the window, test on the next 20%; confirmation: the last K windows
@@ -151,7 +163,8 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
     conf_start = since + int(span * 0.4)
     step = (now - conf_start) // k
     fold_windows = [(conf_start + i * step, conf_start + (i + 1) * step if i < k - 1 else now) for i in range(k)]
-    out: dict = {"alphas": {}, "window": {"since": since, "split": split, "until": now, "folds": fold_windows},
+    out: dict = {"alphas": {}, "window": {"since": since, "split": split, "until": now, "folds": fold_windows,
+                                          "sealed_clipped": clipped},
                  "symbols": list(bt.candles.keys())}
     for alpha in (alphas or list(ALPHA_SPECS)):
         if alpha not in base.alphas or not _has_own_params(alpha):

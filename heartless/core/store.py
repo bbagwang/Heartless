@@ -189,6 +189,28 @@ class Store:
         r = self.query("SELECT MIN(ts) a, MAX(ts) b FROM metrics WHERE symbol=?", (symbol,))[0]
         return r["a"], r["b"]
 
+    # --- coverage (gap scans run inside SQLite so multi-year tables never load into memory) --------
+    _SERIES = {"candles": "open_time", "funding": "funding_time", "metrics": "ts"}
+
+    def series_stats(self, table: str, symbol: str, start: int | None = None,
+                     end: int | None = None) -> tuple[int | None, int | None, int]:
+        """(first, last, rows) of one symbol's series in `table` (candles / funding / metrics) within [start, end]."""
+        col = self._SERIES[table]
+        r = self.query(f"SELECT MIN({col}) a, MAX({col}) b, COUNT(*) n FROM {table} WHERE symbol=? AND {col}>=? "
+                       f"AND {col}<=?", (symbol, -(2**62) if start is None else start, 2**62 if end is None else end))[0]
+        return r["a"], r["b"], r["n"]
+
+    def series_gaps(self, table: str, symbol: str, step_ms: int, min_missing: int, start: int | None = None,
+                    end: int | None = None) -> list[tuple[int, int, int]]:
+        """Interior holes of a fixed-step series: (first missing ts, last missing ts, missing steps) for every hole
+        of at least `min_missing` steps between consecutive stored rows within [start, end]."""
+        col = self._SERIES[table]
+        rows = self.query(
+            f"SELECT prev, t FROM (SELECT {col} t, LAG({col}) OVER (ORDER BY {col}) prev FROM {table} "
+            f"WHERE symbol=? AND {col}>=? AND {col}<=?) WHERE prev IS NOT NULL AND t - prev >= ? ORDER BY t",
+            (symbol, -(2**62) if start is None else start, 2**62 if end is None else end, (min_missing + 1) * step_ms))
+        return [(r["prev"] + step_ms, r["t"] - step_ms, (r["t"] - r["prev"]) // step_ms - 1) for r in rows]
+
     # --- positions / trades ------------------------------------------------------------------
     def save_position(self, p: Position) -> None:
         self.execute(

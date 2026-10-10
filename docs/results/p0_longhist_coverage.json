@@ -1,0 +1,1079 @@
+{
+ "generated_utc": "2026-10-10T03:43:06Z",
+ "window": [
+  null,
+  null
+ ],
+ "min_gap_min": 5,
+ "metrics_gap_days": 1.0,
+ "symbols": {
+  "AAVEUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501563,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "ADAUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501563,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "ATOMUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501562,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "AVAXUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501504,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "BCHUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501526,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "BNBUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501563,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "BTCUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501563,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "DOGEUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501563,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "DOTUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501563,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "ETCUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501426,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "ETHUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501563,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "FILUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501563,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "LINKUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501563,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "LTCUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501520,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "NEARUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501275,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 1,
+    "gaps": [
+     {
+      "start": "2023-12-18 00:00",
+      "end": "2023-12-18 23:55",
+      "days": 1.0
+     }
+    ]
+   }
+  },
+  "SOLUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5277,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501546,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "SUIUSDT": {
+   "first": "2023-05-03 16:00",
+   "last": "2026-10-08 23:59",
+   "rows": 1806240,
+   "expected": 1806240,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2023": {
+     "rows": 348960,
+     "expected": 348960,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 3739,
+    "first": "2023-05-03 16:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 360826,
+    "first": "2023-05-03 16:05",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 1,
+    "gaps": [
+     {
+      "start": "2023-12-13 00:00",
+      "end": "2023-12-13 23:55",
+      "days": 1.0
+     }
+    ]
+   }
+  },
+  "TRXUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501555,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "UNIUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501554,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  },
+  "XRPUSDT": {
+   "first": "2022-01-01 00:00",
+   "last": "2026-10-08 23:59",
+   "rows": 2508480,
+   "expected": 2508480,
+   "missing": 0,
+   "missing_pct": 0.0,
+   "gaps": [],
+   "n_gaps": 0,
+   "gap_minutes": 0,
+   "largest_gap": null,
+   "by_year": {
+    "2022": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2023": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2024": {
+     "rows": 527040,
+     "expected": 527040,
+     "missing_pct": 0.0
+    },
+    "2025": {
+     "rows": 525600,
+     "expected": 525600,
+     "missing_pct": 0.0
+    },
+    "2026": {
+     "rows": 404640,
+     "expected": 404640,
+     "missing_pct": 0.0
+    }
+   },
+   "funding": {
+    "rows": 5202,
+    "first": "2022-01-01 00:00",
+    "last": "2026-09-30 16:00",
+    "n_gaps": 0,
+    "gaps": []
+   },
+   "metrics": {
+    "rows": 501562,
+    "first": "2022-01-01 00:00",
+    "last": "2026-10-08 23:55",
+    "n_gaps": 0,
+    "gaps": []
+   }
+  }
+ },
+ "db": "data/longhist/heartless.db"
+}
