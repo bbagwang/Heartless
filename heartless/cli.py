@@ -342,11 +342,21 @@ async def _backtest_window(settings, args) -> None:
     if not bt.candles:
         fail(f"no stored candles for {', '.join(symbols)} in {_iso(start)} .. {_iso(end)}")
     t0 = time.time()
+    commit, dirty = seal.git_commit(), lab.git_dirty()  # the code state the run starts from
     res = await bt.arun(params, start=start, end=end, only_alpha=args.alpha,
                         initial_balance=run_settings.paper_initial_balance)
     st, trades = res.stats, res.trades
     loaded = sorted(bt.candles)
     risk = {k: getattr(run_settings, k) for k in JOINT_RISK_KEYS}
+    # when the account's drawdown pause latched (it waits for an owner /resume, so nothing trades after it); read off
+    # the hourly equity curve, the engine itself checks every bar
+    peak, pause_at, daily = run_settings.paper_initial_balance, None, {}
+    for ts, eq in res.equity_curve:
+        peak = max(peak, eq)
+        if pause_at is None and peak > 0 and (eq - peak) / peak * 100 <= -risk["max_drawdown_halt_pct"]:
+            pause_at = ts
+        daily[_iso(ts)[:10]] = round(eq, 2)
+    entries = sorted(int(t.get("entry_time") or 0) for t in trades)
     summary = {**lab.group_stats(trades), "return_pct": round(st["return_pct"], 3), "max_dd_pct": round(st["max_dd_pct"], 3),
                "final_equity": round(st["final_equity"], 2), "fees": round(st["fees"], 1), "funding": round(st["funding"], 1),
                "avg_hold_min": round(st["avg_hold_min"], 1),
@@ -360,8 +370,11 @@ async def _backtest_window(settings, args) -> None:
            "by_side": {k: lab.group_stats(v) for k, v in sorted(lab._bucket(trades, lambda t: t.get("side") or "?").items())},
            "by_year": {k: lab.group_stats(v) for k, v in sorted(lab._bucket(trades, lab._year).items())},
            "by_symbol": {k: lab.group_stats(v) for k, v in sorted(lab._bucket(trades, lambda t: t.get("symbol") or "?").items())},
+           "by_month": {k: lab.group_stats(v) for k, v in sorted(lab._bucket(trades, lab._month).items())},
            "rejected": dict(sorted(res.skipped.items(), key=lambda kv: -kv[1])),
-           "seconds": round(time.time() - t0, 1), "git_commit": seal.git_commit(), "git_dirty": lab.git_dirty(),
+           "first_entry": _iso(entries[0]) if entries else None, "last_entry": _iso(entries[-1]) if entries else None,
+           "drawdown_pause": _iso(pause_at) if pause_at is not None else None, "equity_daily": daily,
+           "seconds": round(time.time() - t0, 1), "git_commit": commit, "git_dirty": dirty,
            "seal": seal.status(start, end), "argv": list(getattr(args, "argv", None) or sys.argv),
            "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     if args.json:
@@ -381,6 +394,9 @@ async def _backtest_window(settings, args) -> None:
         for a, g in doc["by_alpha"].items():
             print(f"  alpha {a:18s} n={g['n']:5d} avgR={g['avg_r']:+.3f} PF={g['profit_factor']:5.2f} net={g['net']:+.1f}")
         print("  rejected / skipped entries: " + (", ".join(f"{k} {v}" for k, v in doc["rejected"].items()) or "none"))
+        if pause_at is not None:
+            print(f"  drawdown pause (-{risk['max_drawdown_halt_pct']}% from the peak) latched about {doc['drawdown_pause']} UTC; "
+                  f"it waits for an owner /resume, last entry {doc['last_entry']} UTC")
     if args.out:
         out = os.path.abspath(args.out)
         os.makedirs(os.path.dirname(out), exist_ok=True)

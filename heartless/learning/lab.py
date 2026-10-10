@@ -570,6 +570,7 @@ def main_cli(settings, args) -> None:
     if getattr(args, "meta", False):
         extra_settings["META_LABEL"] = True
     chunk_days = getattr(args, "chunk_days", None)
+    commit, dirty = seal.git_commit(), git_dirty()  # the code state the run starts from (it may change while it runs)
     res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers,
                    settings=extra_settings, chunk_days=chunk_days, unseal=[p for p in unseal if p in touched])
     if args.json:
@@ -585,8 +586,8 @@ def main_cli(settings, args) -> None:
     if getattr(args, "out", None):
         doc = {**res.to_json(), "params_version": params.version, "alpha": args.alpha, "symbols": symbols,
                "overrides": list(args.set or []), "override_adjustments": notes, "settings_overrides": extra_settings,
-               "chunk_days": chunk_days, "workers": args.workers, "git_commit": seal.git_commit(),
-               "git_dirty": git_dirty(), "seal": seal.status(start, end, unseal), "argv": argv,
+               "chunk_days": chunk_days, "workers": args.workers, "git_commit": commit,
+               "git_dirty": dirty, "seal": seal.status(start, end, unseal), "argv": argv,
                "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
         out = os.path.abspath(args.out)
         os.makedirs(os.path.dirname(out), exist_ok=True)

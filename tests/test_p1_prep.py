@@ -204,7 +204,32 @@ def test_backtest_window_runs_one_shared_account_with_production_risk(tmp_path, 
     # four symbols fire LONG at the same close: the shared account takes three, the fourth is rejected
     assert doc["rejected"].get("max same-direction positions", 0) >= sm["n"] // 4
     assert doc["seal"]["clean"] and "git_commit" in doc and "git_dirty" in doc
+    assert sum(m["n"] for m in doc["by_month"].values()) == sm["n"] and start <= lab.parse_when(doc["first_entry"]) <= end
+    assert doc["drawdown_pause"] is None and min(doc["equity_daily"]) == "2023-03-02"
     assert "Joint backtest" in printed and "rejected" in printed and "4/5 symbols" in printed
+
+
+def test_backtest_window_reports_when_the_drawdown_pause_latched(tmp_path, monkeypatch, capsys):
+    """A latched -15% drawdown pause ends trading for the rest of the window (live it waits for the owner's /resume):
+    the result says when, so a short loss-capped year is not mistaken for a mild one."""
+    orig = Ensemble.__init__
+    monkeypatch.setattr(Ensemble, "__init__", lambda self, params, bandit, alphas=None, only_alpha=None:
+                        orig(self, params, bandit, [Burst()], only_alpha))
+    monkeypatch.setattr(lab, "WARMUP_MS", DAY)
+    monkeypatch.setenv("HEARTLESS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAX_DRAWDOWN_HALT_PCT", "0.3")  # the shipped 15% would need a long losing stretch
+    st = Store(tmp_path / "heartless.db")
+    for k, s in enumerate(["AAAUSDT", "BBBUSDT", "CCCUSDT"]):
+        _save(st, s, _ms(2023, 3, 1), 4, seed=20 + k)
+    st.close()
+    params = StrategyParams.default()
+    params.enabled = {a: a == "htf_trend" for a in params.enabled}
+    pfile = tmp_path / "p.json"
+    pfile.write_text(json.dumps(params.to_dict()))
+    cli.main(["backtest", "--start", "2023-03-02", "--end", "2023-03-04", "--params", str(pfile), "--json"])
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["risk_settings"]["max_drawdown_halt_pct"] == 0.3 and doc["rejected"].get("paused", 0) > 0
+    assert doc["drawdown_pause"] is not None and doc["last_entry"] <= doc["drawdown_pause"]
 
 
 def test_backtest_window_without_params_uses_shipped_defaults_read_only(tmp_path, monkeypatch, capsys):
