@@ -489,6 +489,20 @@ def apply_overrides(params, overrides: list[str], notes: list | None = None):
     return p
 
 
+def git_dirty(paths: tuple[str, ...] = ("heartless",)) -> bool | None:
+    """Whether the code that produced a result differs from the commit recorded with it: uncommitted (staged or not)
+    or untracked files under `paths` (the package). Other paths, such as the result files a batch of runs writes into
+    docs/results, do not count. None when git is unavailable."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", *paths], cwd=seal.REPO_ROOT,
+                             capture_output=True, text=True, timeout=10)
+        return bool(out.stdout.strip()) if out.returncode == 0 else None
+    except Exception:  # noqa: BLE001 - best effort only, like seal.git_commit()
+        return None
+
+
 def _clean(obj):
     """JSON-safe copy: non-finite floats (profit factor of a lossless group) become None."""
     if isinstance(obj, float):
@@ -572,7 +586,7 @@ def main_cli(settings, args) -> None:
         doc = {**res.to_json(), "params_version": params.version, "alpha": args.alpha, "symbols": symbols,
                "overrides": list(args.set or []), "override_adjustments": notes, "settings_overrides": extra_settings,
                "chunk_days": chunk_days, "workers": args.workers, "git_commit": seal.git_commit(),
-               "seal": seal.status(start, end, unseal), "argv": argv,
+               "git_dirty": git_dirty(), "seal": seal.status(start, end, unseal), "argv": argv,
                "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
         out = os.path.abspath(args.out)
         os.makedirs(os.path.dirname(out), exist_ok=True)

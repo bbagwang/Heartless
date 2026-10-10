@@ -269,25 +269,34 @@ class Backtester:
 
 
 def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], since: int, until: int | None = None,
-                    symbol_list: list[str] | None = None) -> Backtester:
-    """Build a Backtester from candles stored in the DB."""
+                    symbol_list: list[str] | None = None, warmup_ms: int = 0, lookahead: bool = True) -> Backtester:
+    """Build a Backtester from candles stored in the DB.
+
+    Window use (an evaluation over [since, until], e.g. `heartless backtest --start/--end`): `warmup_ms` also loads
+    that much history before `since` so indicators are warm when the run starts at `since` (pass it as `arun(start=)`);
+    `lookahead=False` reads nothing stamped after `until` - not even the next settlement's funding rate, which the
+    default loads one interval past `until` - so a window that ends at a sealed period never touches it. With the
+    defaults (no warm-up, look-ahead on) the behaviour is unchanged."""
     syms = symbol_list or store.candle_symbols()
+    lo = since - max(0, int(warmup_ms))
     candles: dict[str, CandleArrays] = {}
     funding: dict[str, list[tuple[int, float]]] = {}
     metrics: dict = {}
     for s in syms:
         if s not in symbols:
             continue
-        rows = store.load_candles(s, start=since, end=until)
+        rows = store.load_candles(s, start=lo, end=until)
         if len(rows) < 500:
             continue
         ca = CandleArrays("1m", capacity=len(rows) + 16)
         ca.extend(rows)
         candles[s] = ca
-        # one interval past `until` so the last bucket's upcoming (next-settlement) rate is known to the Context
-        funding[s] = store.load_funding(s, since - FUNDING_INTERVAL, until + FUNDING_INTERVAL if until else 2**62)
+        # by default one interval past `until`, so the last bucket's upcoming (next-settlement) rate is known to the
+        # Context; without look-ahead the last bucket sees the settled rate instead (Backtester._upcoming_funding_rate)
+        f_end = (until + FUNDING_INTERVAL if lookahead else until) if until else 2**62
+        funding[s] = store.load_funding(s, lo - FUNDING_INTERVAL, f_end)
         if hasattr(store, "load_metrics"):
-            mrows = store.load_metrics(s, since - 2 * 86_400_000, until)
+            mrows = store.load_metrics(s, lo - 2 * 86_400_000, until)
             if mrows:
                 metrics[s] = MetricsSeries.from_rows(mrows)
     return Backtester(settings, symbols, candles, funding, metrics)

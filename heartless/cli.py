@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 
@@ -21,12 +22,20 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--version", action="version", version=f"heartless {__version__}")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("run", help="run the bot (default)")
-    bt = sub.add_parser("backtest", help="backtest the champion (or one alpha) on stored/downloaded candles")
-    bt.add_argument("--days", type=int, default=14)
+    bt = sub.add_parser("backtest", help="backtest the champion (or one alpha) on stored/downloaded candles; with "
+                                        "--start/--end: one shared account over a stored-history window (offline)")
+    bt.add_argument("--days", type=int, default=14, help="the last N days (ignored with --start)")
+    bt.add_argument("--start", default=None,
+                    help="ISO date: joint-portfolio mode, all symbols in ONE account with the production risk settings "
+                         "over [start, end] of stored history (seal-checked; there is no unseal option)")
+    bt.add_argument("--end", default=None, help="ISO date; a date-only end is exclusive (default: last stored candle)")
     bt.add_argument("--alpha", default=None)
-    bt.add_argument("--symbols", default=None, help="comma separated, default: current universe")
+    bt.add_argument("--symbols", default=None,
+                    help="comma separated, default: current universe (with --start: all stored symbols)")
+    bt.add_argument("--params", default=None, help="StrategyParams JSON file (default: stored champion)")
     bt.add_argument("--download", action="store_true", help="download missing candles from Binance first")
     bt.add_argument("--json", action="store_true")
+    bt.add_argument("--out", default=None, help="with --start: write the result JSON here (e.g. docs/results/<name>.json)")
     rs = sub.add_parser("research", help="run one walk-forward research cycle offline and print the summary")
     rs.add_argument("--days", type=int, default=None)
     rs.add_argument("--candidates", type=int, default=None)
@@ -193,6 +202,12 @@ async def _backtest(settings, args) -> None:
     from heartless.learning.backtester import load_backtester
     from heartless.learning.research import ResearchManager
 
+    if getattr(args, "start", None) or getattr(args, "end", None):
+        await _backtest_window(settings, args)
+        return
+    if getattr(args, "out", None):
+        print("error: --out needs --start (joint-portfolio window mode)", file=sys.stderr)
+        sys.exit(2)
     try:
         seal.check_window(now_ms() - args.days * MS_DAY, now_ms())
     except seal.SealedError as e:
@@ -208,7 +223,10 @@ async def _backtest(settings, args) -> None:
         s = settings
 
     _Stub.store = store
-    params = ResearchManager(_Stub()).load_champion()
+    if getattr(args, "params", None):
+        params = _params_file(args.params)
+    else:
+        params = ResearchManager(_Stub()).load_champion()
     since = now_ms() - args.days * MS_DAY
     bt = load_backtester(settings, store, symbols, since, symbol_list=universe)
     if not bt.candles:
@@ -228,6 +246,147 @@ async def _backtest(settings, args) -> None:
         print(f"    {a:18s} n={st['n']:4d} win {st['win_rate']:5.1f}% PF {min(st['profit_factor'], 99):5.2f} avgR {st['avg_r']:+.3f} net {st['net']:+9.2f}")
     if res.skipped:
         print("  skipped entries:", res.skipped)
+
+
+def _params_file(path: str):
+    from heartless.strategy.params import StrategyParams
+
+    with open(path) as f:
+        return StrategyParams.from_dict(json.load(f))
+
+
+# risk settings reported with every joint-portfolio result (the values actually used)
+JOINT_RISK_KEYS = ("risk_per_trade_pct", "max_risk_per_trade_pct", "max_positions", "max_same_direction",
+                   "max_gross_leverage", "daily_loss_limit_pct", "weekly_loss_limit_pct", "max_drawdown_halt_pct",
+                   "paper_initial_balance", "taker_fee", "maker_fee", "backtest_slippage_bps")
+
+
+async def _backtest_window(settings, args) -> None:
+    """`backtest --start/--end`: one shared account over a stored-history window (docs/RESEARCH.md section 6).
+
+    The lab backtests every symbol in its own account with the circuit breakers off, which measures the signals; this
+    runs all symbols through ONE account with the production risk settings, so symbols compete for the position limits
+    and the daily/weekly loss halts and the drawdown pause act - what a single live account would have seen. It is
+    offline and reproducible: the risk settings are the shipped Settings() defaults (the local .env is not applied),
+    symbol filters are inferred from the data as in the lab, indicators warm up on lab.WARMUP_MS of history before
+    `start`, and nothing stamped after `end` is read. The window must pass the seal check; there is deliberately no
+    unseal option (the sealed final exam is a lab run)."""
+    import time
+    from datetime import datetime, timezone
+
+    import numpy as np
+
+    from heartless.config import Settings
+    from heartless.core.store import Store
+    from heartless.learning import lab, seal
+    from heartless.learning.backtester import load_backtester
+    from heartless.strategy.params import StrategyParams
+    from heartless.util.timeutil import MS_MINUTE
+
+    def fail(msg: str) -> None:
+        print(f"error: {msg}", file=sys.stderr)
+        sys.exit(2)
+
+    if args.download:
+        fail("--download does not combine with --start/--end: the window mode reads stored history only")
+    if not args.start:
+        fail("--end needs --start")
+    try:
+        start = lab.parse_when(args.start)
+        end = lab.parse_when(args.end, end=True) if args.end else None
+    except ValueError as e:
+        fail(str(e))
+    if end is not None:  # refuse a sealed window before touching the database
+        try:
+            seal.check_window(start, end)
+        except seal.SealedError as e:
+            fail(str(e))
+    store = Store(settings.db_path)
+    try:
+        symbols = [x.strip().upper() for x in args.symbols.split(",") if x.strip()] if args.symbols \
+            else sorted(store.candle_symbols())
+        if end is None:
+            lasts = [hi for _, hi, _ in (store.candle_range(s) for s in symbols) if hi is not None]
+            if not lasts:
+                fail("no candles stored for the requested symbols; run `heartless fetch` first")
+            end = min(lasts) + MS_MINUTE - 1
+        if end <= start:
+            fail(f"empty window {_iso(start)} .. {_iso(end)}")
+        try:
+            seal.check_window(start, end)
+        except seal.SealedError as e:
+            fail(str(e))
+        # read-only parameter lookup (ResearchManager.load_champion would persist a default champion into the DB)
+        if args.params:
+            params, source = _params_file(args.params), f"file {args.params}"
+        else:
+            rows = store.load_params_versions(role="champion", limit=1)
+            if rows:
+                params, reset = StrategyParams.from_stored(rows[0]["params"])
+                params.version = rows[0]["id"]
+                source = f"stored champion {rows[0]['id']}" + (
+                    f" (shipped defaults for {', '.join(reset)}: their design changed)" if reset else "")
+            else:
+                params, source = StrategyParams.default(), "shipped defaults (no stored champion)"
+        warm = lab.WARMUP_MS
+        infos = {}
+        for sym in symbols:  # exchange filters inferred from the newest closes, like the lab (offline, period-true)
+            tail = store.load_candles(sym, start=start - warm, end=end, limit=50_000)
+            if tail:
+                infos[sym] = lab.infer_symbol_info(sym, np.array([c.close for c in reversed(tail)], dtype=float))
+        run_settings = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(settings.data_dir))
+        bt = load_backtester(run_settings, store, infos, start, end, symbol_list=symbols, warmup_ms=warm,
+                             lookahead=False)
+    finally:
+        store.close()
+    if not bt.candles:
+        fail(f"no stored candles for {', '.join(symbols)} in {_iso(start)} .. {_iso(end)}")
+    t0 = time.time()
+    res = await bt.arun(params, start=start, end=end, only_alpha=args.alpha,
+                        initial_balance=run_settings.paper_initial_balance)
+    st, trades = res.stats, res.trades
+    loaded = sorted(bt.candles)
+    risk = {k: getattr(run_settings, k) for k in JOINT_RISK_KEYS}
+    summary = {**lab.group_stats(trades), "return_pct": round(st["return_pct"], 3), "max_dd_pct": round(st["max_dd_pct"], 3),
+               "final_equity": round(st["final_equity"], 2), "fees": round(st["fees"], 1), "funding": round(st["funding"], 1),
+               "avg_hold_min": round(st["avg_hold_min"], 1),
+               "boundary": sum(1 for t in trades if t.get("exit_reason") == lab.BOUNDARY_REASON)}
+    doc = {"mode": "joint portfolio: one shared account, production risk settings",
+           "window": {"start": _iso(start), "end": _iso(end), "start_ms": start, "end_ms": end},
+           "symbols": symbols, "symbols_loaded": loaded, "symbols_missing": [s for s in symbols if s not in bt.candles],
+           "alpha": args.alpha, "params_version": params.version, "params_source": source,
+           "enabled": sorted(a for a, on in params.enabled.items() if on), "risk_settings": risk, "summary": summary,
+           "by_alpha": {k: lab.group_stats(v) for k, v in sorted(lab._bucket(trades, lambda t: t.get("alpha") or "?").items())},
+           "by_side": {k: lab.group_stats(v) for k, v in sorted(lab._bucket(trades, lambda t: t.get("side") or "?").items())},
+           "by_year": {k: lab.group_stats(v) for k, v in sorted(lab._bucket(trades, lab._year).items())},
+           "by_symbol": {k: lab.group_stats(v) for k, v in sorted(lab._bucket(trades, lambda t: t.get("symbol") or "?").items())},
+           "rejected": dict(sorted(res.skipped.items(), key=lambda kv: -kv[1])),
+           "seconds": round(time.time() - t0, 1), "git_commit": seal.git_commit(), "git_dirty": lab.git_dirty(),
+           "seal": seal.status(start, end), "argv": list(getattr(args, "argv", None) or sys.argv),
+           "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    if args.json:
+        print(json.dumps(lab._clean(doc), indent=1, default=str))
+    else:
+        missing = f" (no data: {', '.join(doc['symbols_missing'])})" if doc["symbols_missing"] else ""
+        print(f"\nJoint backtest {_iso(start)} .. {_iso(end)} UTC, {len(loaded)}/{len(symbols)} symbols{missing}, "
+              f"one {risk['paper_initial_balance']:,.0f} USDT account")
+        print(f"  params {params.version} ({source}); enabled: {', '.join(doc['enabled']) or '-'}"
+              + (f"; only alpha {args.alpha}" if args.alpha else ""))
+        print(f"  risk: {risk['risk_per_trade_pct']}% per trade, max {risk['max_positions']} positions / "
+              f"{risk['max_same_direction']} same direction, loss halts daily {risk['daily_loss_limit_pct']}% / weekly "
+              f"{risk['weekly_loss_limit_pct']}%, drawdown pause {risk['max_drawdown_halt_pct']}%")
+        print(f"  return {summary['return_pct']:+.2f}%  maxDD {summary['max_dd_pct']:.2f}%  PF {summary['profit_factor']:.2f}  "
+              f"avgR {summary['avg_r']:+.3f}  n {summary['n']}  win {summary['win_rate']:.1f}%  t_day {summary['t_day']:+.2f}  "
+              f"boundary {summary['boundary']}")
+        for a, g in doc["by_alpha"].items():
+            print(f"  alpha {a:18s} n={g['n']:5d} avgR={g['avg_r']:+.3f} PF={g['profit_factor']:5.2f} net={g['net']:+.1f}")
+        print("  rejected / skipped entries: " + (", ".join(f"{k} {v}" for k, v in doc["rejected"].items()) or "none"))
+    if args.out:
+        out = os.path.abspath(args.out)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, "w") as f:
+            json.dump(lab._clean(doc), f, indent=1, default=str)
+        print(f"wrote {args.out}", file=sys.stderr)
 
 
 def _research(settings, args) -> None:
