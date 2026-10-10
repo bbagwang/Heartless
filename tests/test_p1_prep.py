@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import heartless.cli as cli
@@ -247,4 +248,26 @@ def test_backtest_window_without_params_uses_shipped_defaults_read_only(tmp_path
     assert doc["enabled"] == sorted(a for a, on in StrategyParams.default().enabled.items() if on)
     st = Store(tmp_path / "heartless.db")
     assert st.load_params_versions() == []  # nothing persisted (load_champion would have saved a default)
+    st.close()
+
+
+def test_backtest_window_infers_symbol_filters_from_the_newest_closes(tmp_path, monkeypatch):
+    """The joint run infers the quantity step from the median of the last closes, like the lab: a symbol that fell
+    from ~300 to ~30 over the window must get the step of a ~30 coin (0.1), not that of the older ~300 prices (0.01).
+    With the tail reversed, the "last" closes were the oldest part of it, about a month before the window end."""
+    st = Store(tmp_path / "w.db")
+    t0 = _ms(2023, 3, 1)
+    old = synth_candles(4 * 1440, seed=5, start_ms=t0, price=300.0)  # 03-01 .. 03-04
+    new = synth_candles(5 * 1440, seed=6, start_ms=t0 + 4 * DAY, price=30.0)  # 03-05 .. 03-09
+    st.save_candles("AAAUSDT", [old.candle_at(i) for i in range(old.n)] + [new.candle_at(i) for i in range(new.n)])
+    seen: list = []
+    orig = lab.infer_symbol_info
+    monkeypatch.setattr(lab, "infer_symbol_info", lambda sym, close, *a: seen.append(close) or orig(sym, close, *a))
+    lo, hi = t0, _ms(2023, 3, 10) - 1
+    infos = cli._window_symbol_infos(st, ["AAAUSDT", "BBBUSDT"], lo, hi)
+    assert set(infos) == {"AAAUSDT"}  # a symbol without stored candles gets no filters (and is not loaded)
+    closes = [c.close for c in st.load_candles("AAAUSDT", start=lo, end=hi)]
+    assert list(seen[0]) == closes  # chronological, the newest close last
+    assert infos["AAAUSDT"] == orig("AAAUSDT", np.array(closes))
+    assert infos["AAAUSDT"].step_size == 0.1  # ~30 USDT coin; the old ~300 prices would give 0.01
     st.close()

@@ -261,6 +261,24 @@ JOINT_RISK_KEYS = ("risk_per_trade_pct", "max_risk_per_trade_pct", "max_position
                    "paper_initial_balance", "taker_fee", "maker_fee", "backtest_slippage_bps")
 
 
+def _window_symbol_infos(store, symbols: list[str], lo: int, hi: int) -> dict:
+    """Exchange filters inferred offline from the newest stored closes in [lo, hi], like the lab (period-true).
+
+    `Store.load_candles(limit=...)` already returns the newest rows in time order; `infer_symbol_info` takes the
+    quantity step from the median of the LAST closes, so the array must stay chronological (reversed, the step came
+    from the oldest part of the tail, about a month before `hi`)."""
+    import numpy as np
+
+    from heartless.learning import lab
+
+    infos = {}
+    for sym in symbols:
+        tail = store.load_candles(sym, start=lo, end=hi, limit=50_000)
+        if tail:
+            infos[sym] = lab.infer_symbol_info(sym, np.array([c.close for c in tail], dtype=float))
+    return infos
+
+
 async def _backtest_window(settings, args) -> None:
     """`backtest --start/--end`: one shared account over a stored-history window (docs/RESEARCH.md section 6).
 
@@ -273,8 +291,6 @@ async def _backtest_window(settings, args) -> None:
     unseal option (the sealed final exam is a lab run)."""
     import time
     from datetime import datetime, timezone
-
-    import numpy as np
 
     from heartless.config import Settings
     from heartless.core.store import Store
@@ -329,11 +345,7 @@ async def _backtest_window(settings, args) -> None:
             else:
                 params, source = StrategyParams.default(), "shipped defaults (no stored champion)"
         warm = lab.WARMUP_MS
-        infos = {}
-        for sym in symbols:  # exchange filters inferred from the newest closes, like the lab (offline, period-true)
-            tail = store.load_candles(sym, start=start - warm, end=end, limit=50_000)
-            if tail:
-                infos[sym] = lab.infer_symbol_info(sym, np.array([c.close for c in reversed(tail)], dtype=float))
+        infos = _window_symbol_infos(store, symbols, start - warm, end)
         run_settings = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(settings.data_dir))
         bt = load_backtester(run_settings, store, infos, start, end, symbol_list=symbols, warmup_ms=warm,
                              lookahead=False)
