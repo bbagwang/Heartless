@@ -143,8 +143,10 @@ def summary(entries: list[dict], family: str | None = None) -> dict[str, dict]:
     return fams
 
 
-def family_tests(family: str, ledger: Path | str | None = None) -> int:
-    return summary(load(ledger), family).get(family, {}).get("n_tests", 0)
+def family_tests(family: str, ledger: Path | str | None = None, exclude: str | None = None) -> int:
+    """N of a family; `exclude` leaves out one configuration hash (a rerun asking for the rest of its family)."""
+    entries = [e for e in load(ledger) if exclude is None or e.get("config_hash") != exclude]
+    return summary(entries, family).get(family, {}).get("n_tests", 0)
 
 
 def report(entries: list[dict], family: str | None = None) -> str:

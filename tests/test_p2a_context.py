@@ -251,6 +251,41 @@ def test_tracker_ignores_late_bars_ready_and_warm(hist, db):
     st.close()
 
 
+def test_tracker_warmed_mid_hour_after_a_settlement_matches_the_offline_build(hist, db):
+    """A bot restarted at 08:30 has missed the live 08:00 settlement and the 08:00..08:29 bars: warm() must take them
+    from the store, or the next snapshots carry the previous funding rate for 8 h and a partial hour of volume."""
+    st = Store(db)
+    now = START + 37 * DAY + 8 * H + 30 * 60_000
+    assert any(t == START + 37 * DAY + 8 * H for t, _ in hist["BTCUSDT"]["funding"])
+    offline = {s.ts: s for s in C.compute_unit(st, SYMS, now - H, now + 31 * H)}
+    tr = C.MarketContextTracker(SYMS)
+    tr.warm(st, now)
+    events = []  # the live feed from `now` on
+    for sym, d in hist.items():
+        events += [(b.close_time, 0, sym, b) for b in d["bars"] if b.close_time > now]
+        events += [(t, 1, sym, r) for t, r in d["funding"] if t > now]
+        events += [(m["ts"] + 300_000 - 1, 2, sym, m) for m in d["metrics"] if m["ts"] + 300_000 - 1 > now]
+    events.sort(key=lambda e: (e[0], e[1], e[2]))
+    compared = []
+    hour = C.hour_of(now)
+    for t, kind, sym, x in events:
+        if t > now + 31 * H:
+            break
+        while t > C.hour_close(hour + 1):  # the next hour close has passed: publish it before feeding later data
+            hour += 1
+            snap, ref = tr.snapshot(C.hour_close(hour)), offline[C.hour_close(hour)]
+            assert _bits_equal(snap.sym, ref.sym) and _bits_equal(snap.mkt, ref.mkt), C._iso(ref.ts)
+            compared.append(ref.ts)
+        if kind == 0:
+            tr.on_bar(sym, x)
+        elif kind == 1:
+            tr.on_funding(sym, t, x)
+        else:
+            tr.on_metrics(sym, x)
+    assert len(compared) == 31 and compared[0] == START + 37 * DAY + 9 * H - 1
+    st.close()
+
+
 def test_store_table_is_lazy_and_build_resumes(db, tmp_path):
     st = Store(db)
     assert not st.has_market_context()  # opening / reading never creates it

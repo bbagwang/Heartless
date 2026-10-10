@@ -562,11 +562,17 @@ def _discover(settings, args) -> None:
     if getattr(args, "context", False):
         context = {"db": str(settings.context_db_path), "universe": settings.context_universe_list,
                    "build": bool(settings.context_auto_build), "progress": lambda m: print(m, file=sys.stderr, flush=True)}
-    n_prior = 0
+    n_prior, conf = 0, None
     if tag:
         from heartless.learning import trials
 
-        n_prior = trials.family_tests(tag)
+        conf = {"tool": "discover", "grids": grids, "templates": templates, "context": bool(context),
+                "features": len(D.FEATURES_X if context else D.FEATURES), "symbols": sorted(symbols),
+                "search": {"min_trades": cfg.min_trades, "beam": cfg.beam, "depth": cfg.depth},
+                "train": [int(train[0]), int(train[1])]}
+        # the family's other configurations: an identical rerun replaces its own earlier count (the ledger keeps the
+        # largest count per configuration), so its bar must not add that count on top of this run's
+        n_prior = trials.family_tests(tag, exclude=trials.config_hash(conf))
     kw = {"workers": args.workers, "progress": lambda m: print(m, file=sys.stderr, flush=True),
           "unseal": [p for p in unseal if p in touched]}
     if templates != "classic" or context or n_prior:  # the defaults keep the call the live discovery cycle makes
@@ -578,10 +584,6 @@ def _discover(settings, args) -> None:
     trial = None
     if tag:
         best = res.get("best_train") or {}
-        conf = {"tool": "discover", "grids": grids, "templates": templates, "context": bool(context),
-                "features": len(D.FEATURES_X if context else D.FEATURES), "symbols": sorted(symbols),
-                "search": {"min_trades": cfg.min_trades, "beam": cfg.beam, "depth": cfg.depth},
-                "train": [int(train[0]), int(train[1])]}
         trial = trials.record("discover", tag, conf, train, n=best.get("n"), avg_r=best.get("avg_r"),
                               t_day=best.get("t_ex"), count=res["tested"],
                               extra={"valid": [_iso(valid[0]), _iso(valid[1])], "argv": list(args.argv)})

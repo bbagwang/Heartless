@@ -107,3 +107,30 @@ def test_discover_cli_tag_records_the_rules_evaluated_and_uses_the_family_n(tmp_
     with pytest.raises(SystemExit):
         cli.main(["discover", "--symbols", "BTCUSDT", "--grid", "4h", "--train", "2022-01-15:2025-01-01",
                   "--valid", "2026-01-01:2026-10-01"])
+
+
+def test_an_identical_discover_rerun_uses_the_same_family_n(tmp_path, monkeypatch, capsys, ledger):
+    """The ledger keeps the largest count per configuration, so rerunning the same search (e.g. to rewrite its --out
+    file) must see the same N as the first run, not its own earlier count added on top (a stricter bar each time)."""
+    import heartless.cli as cli
+
+    monkeypatch.setenv("HEARTLESS_DATA_DIR", str(tmp_path))
+    Store(tmp_path / "heartless.db").close()
+    trials.record("discover", "fam", {"earlier": 1}, (_ms(2022, 1, 1), _ms(2022, 6, 1)), count=5_000)
+    seen = []
+
+    def fake_mine(db, syms, train, valid, tf, cfg, **k):
+        n = 7_000 + k.get("n_prior", 0)
+        seen.append(n)
+        return {"tested": 7_000, "n_tests": n, "t_bar": D.multiple_testing_t(n), "passed": [], "results": [],
+                "seconds": 1.0, "rows": {"train": 10}, "tf": tf, "best_train": {"n": 300, "avg_r": 0.1, "t_ex": 2.5}}
+
+    monkeypatch.setattr(D, "mine", fake_mine)
+    argv = ["discover", "--symbols", "BTCUSDT", "--grid", "1h", "--templates", "time", "--tag", "fam",
+            "--train", "2022-01-15:2025-01-01", "--valid", "2026-01-01:2026-10-01"]
+    cli.main(argv)
+    cli.main(argv)
+    assert seen == [12_000, 12_000] and trials.family_tests("fam") == 12_000
+    cli.main([*argv[:-4], "--min-trades", "100", *argv[-4:]])  # another configuration of the family adds up
+    assert seen[-1] == 19_000 and trials.family_tests("fam") == 19_000
+    assert trials.family_tests("fam", exclude=json.loads(ledger.read_text().splitlines()[-1])["config_hash"]) == 12_000

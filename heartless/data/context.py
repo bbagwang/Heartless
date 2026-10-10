@@ -738,20 +738,26 @@ class MarketContextTracker:
     def warm(self, store, now: int, symbols=None) -> int:
         """Feed the stored history needed for exact snapshots from the next hour close on (1m candles, funding and
         metrics of the last WARMUP_HOURS before `now`) and finalise up to the last hour close <= now. Returns the
-        number of candles fed."""
+        number of candles fed.
+
+        Everything stored up to `now` itself is fed, not just up to that hour close: a bot restarted at 08:30 has
+        already missed the live 08:00 settlement and the 08:00..08:29 bars, and without them the next snapshots
+        would carry the previous funding rate for 8 h and a partial hour in the 24h volume and the 24h/168h highs
+        and lows. The tracker only reads what is due at each hour close, so this adds no look-ahead, and the live
+        feed may repeat those rows (a repeated bar or row replaces itself)."""
         h_end = hour_of(now)
         lo = (h_end - WARMUP_HOURS) * MS_H
         fed = 0
         for s in (symbols or self.symbols):
             if s not in self._col:
                 continue
-            for c in store.load_candles(s, start=lo, end=hour_close(h_end) - MS_MIN + 1):
+            for c in store.load_candles(s, start=lo, end=int(now) - MS_MIN + 1):  # every bar closed by now
                 self.on_bar(s, c)
                 fed += 1
-            for t, r in store.load_funding(s, lo - MS_H, hour_close(h_end)):
+            for t, r in store.load_funding(s, lo - MS_H, int(now)):
                 self.on_funding(s, t, r)
             if hasattr(store, "load_metrics"):
-                for row in store.load_metrics(s, lo - OI_LOOKBACK_MS - 2 * MS_H, hour_close(h_end)):
+                for row in store.load_metrics(s, lo - OI_LOOKBACK_MS - 2 * MS_H, int(now)):
                     self.on_metrics(s, row)
         self._finalise(h_end)
         return fed
