@@ -184,15 +184,24 @@ class RiskManager:
         self.save()
 
     # --- gating --------------------------------------------------------------------------------
+    def entries_blocked(self, now: int) -> str:
+        """Why no new entry may start right now on any symbol ('' = allowed): owner / drawdown pause, loss-limit
+        halt, market-shock cool-off. Also stops resting signal-TTL entries, which would otherwise open hours later."""
+        st = self.state
+        if st.paused:
+            return "paused"
+        if st.halted_until > now:
+            return "halted:" + st.halt_reason
+        if st.shock_until > now:
+            return "market shock cool-off"
+        return ""
+
     def can_open(self, decision: Decision, open_positions: list[Position], now: int,
                  equity: float) -> tuple[bool, str]:
         st = self.state
-        if st.paused:
-            return False, "paused"
-        if st.halted_until > now:
-            return False, "halted:" + st.halt_reason
-        if st.shock_until > now:
-            return False, "market shock cool-off"
+        blocked = self.entries_blocked(now)
+        if blocked:
+            return False, blocked
         if st.symbol_cooldown.get(decision.symbol, 0) > now:
             return False, "symbol cool-down after loss"
         active = [p for p in open_positions if p.status.value in ("PENDING", "OPEN", "CLOSING")]

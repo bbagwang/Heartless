@@ -165,3 +165,15 @@ def test_size_at_never_lifts_to_the_exchange_minimum_without_permission():
     assert lifted.risk_pct == pytest.approx(5.0 * 2.13 / 1_000.0 * 100)
     strict = rm.size_at(98.0, 100.0, 1_000.0, info, 0.5, lift_to_min=False)
     assert strict.qty == 0 and strict.reason == "below min notional"
+
+
+def test_entries_blocked_is_the_account_wide_part_of_can_open():
+    rm, t = _rm(), 1_700_000_000_000
+    assert rm.entries_blocked(t) == "" and rm.can_open(_decision(98.0), [], t, 10_000.0) == (True, "")
+    rm.register_market_shock(t, 15)
+    assert rm.entries_blocked(t) == "market shock cool-off" == rm.can_open(_decision(98.0), [], t, 10_000.0)[1]
+    assert rm.entries_blocked(t + 15 * 60_000) == ""
+    rm.state.halted_until, rm.state.halt_reason = t + 1, "daily"
+    assert rm.entries_blocked(t) == "halted:daily" == rm.can_open(_decision(98.0), [], t, 10_000.0)[1]
+    rm.pause("owner")
+    assert rm.entries_blocked(t) == "paused" == rm.can_open(_decision(98.0), [], t, 10_000.0)[1]

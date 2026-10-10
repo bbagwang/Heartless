@@ -481,3 +481,104 @@ async def test_live_restart_reconcile_keeps_flags_and_the_resting_ttl_order(tmp_
     assert SYM not in eng2.positions and acc.orders[oid]["status"] == "CANCELED" and "유효 기간" in p1.exit_reason
     assert "limit_order" not in acc.names()
     store.close()
+
+
+# --- review fixes: a cancel that did not take, TTL entries while new entries are blocked --------------------------
+
+class StuckCancel(FakeLive):
+    """Exchange double whose cancel does not take while `stuck` (timeout, rate limit, -1001): the live account then
+    reports failure and the order keeps working on the exchange."""
+
+    def __init__(self):
+        super().__init__()
+        self.stuck = True
+
+    async def cancel_order(self, symbol, order_id="", client_id=""):
+        if self.stuck:
+            self.calls.append(("cancel_order", symbol, order_id, client_id))
+            return False
+        return await super().cancel_order(symbol, order_id, client_id)
+
+
+async def test_requote_never_places_a_second_order_while_the_old_one_still_works():
+    from tests.test_fix_2_engine import FakeView, ctx_for, make_engine, pending
+    eng, acc, clock = make_engine(acc=StuckCancel())
+    pos = pending(eng, acc, qty=1.0)
+    oid = pos.entry_order_id
+    clock.advance(2 * MS_MINUTE + 1)
+    await eng.on_bar(FakeView(), ctx_for(eng, price=100.05, now=clock()))
+    # both orders could fill otherwise: twice the size and twice the risk budget
+    assert "limit_order" not in acc.names() and [o["orderId"] for o in await acc.open_orders()] == [oid]
+    assert pos.status is PositionStatus.PENDING and pos.requotes == 0 and pos.entry_order_id == oid
+    acc.stuck = False  # the next bar's cancel goes through: the re-quote proceeds with exactly one working order
+    clock.advance(MS_MINUTE)
+    await eng.on_bar(FakeView(), ctx_for(eng, price=100.05, now=clock()))
+    rest = await acc.open_orders()
+    assert acc.orders[oid]["status"] == "CANCELED" and pos.requotes == 1
+    assert len(rest) == 1 and rest[0]["orderId"] == pos.entry_order_id != oid
+
+
+async def test_entry_whose_cancel_did_not_take_stays_pending_instead_of_being_forgotten():
+    from tests.test_fix_2_engine import FakeView, ctx_for, make_engine, pending
+    eng, acc, clock = make_engine(acc=StuckCancel())
+    pos = pending(eng, acc, qty=1.0)
+    oid = pos.entry_order_id
+    clock.advance(2 * MS_MINUTE + 1)
+    await eng.on_bar(FakeView(), ctx_for(eng, price=102.0, now=clock()))  # ran away: the entry is abandoned...
+    # ...but the order still works on the exchange: forgetting it would let it fill into an untracked position
+    assert eng.positions.get(SYM) is pos and pos.status is PositionStatus.PENDING
+    assert acc.orders[oid]["status"] == "NEW" and events(eng, "error")
+    assert await eng.close_position(SYM, "owner") is False and pos.status is PositionStatus.PENDING
+    acc.stuck = False
+    clock.advance(MS_MINUTE)
+    await eng.on_bar(FakeView(), ctx_for(eng, price=102.0, now=clock()))
+    assert SYM not in eng.positions and pos.status is PositionStatus.CANCELLED
+    assert acc.orders[oid]["status"] == "CANCELED" and pos.exit_reason == "가격 이탈로 진입 포기"
+
+
+def _block(eng: TradingEngine, how: str) -> None:
+    st = eng.risk.state
+    if how == "pause":
+        eng.risk.pause("owner")
+    elif how == "halt":
+        st.halted_until, st.halt_reason = eng.clock() + MS_HOUR, "daily loss limit"
+    elif how == "shock":
+        eng.risk.register_market_shock(eng.clock(), 15)
+    else:
+        eng.entries_enabled = False
+
+
+@pytest.mark.parametrize("how", ["pause", "halt", "shock", "disabled"])
+async def test_ttl_entry_is_cancelled_once_new_entries_are_blocked(how):
+    eng, acc, clock = make()
+    pos = await enter(eng, acc, decision(limit=99.0, stop=97.0, ttl=4, tf="1h"))
+    await move(eng, acc, clock, 101.0, minutes=30)
+    assert pos.status is PositionStatus.PENDING
+    _block(eng, how)
+    await move(eng, acc, clock, 101.0)
+    # a retest limit resting for hours must not open a position into a pause / loss halt / market shock
+    assert SYM not in eng.positions and pos.status is PositionStatus.CANCELLED and await working(acc) == []
+    assert "신규 진입 중단" in pos.exit_reason
+
+
+async def test_default_entry_keeps_its_requote_policy_while_entries_are_blocked():
+    eng, acc, clock = make()
+    pos = await enter(eng, acc, decision(limit=100.0, stop=98.0))
+    eng.risk.pause("owner")
+    await move(eng, acc, clock, 100.5, minutes=2)
+    assert pos.status is PositionStatus.PENDING and pos.requotes == 1  # unchanged: gone within minutes anyway
+
+
+async def test_ttl_remainder_is_cancelled_once_new_entries_are_blocked():
+    eng, acc, clock = make(acc=PartialPaper(name="p", initial_balance=10_000.0))
+    acc._clock = clock
+    pos = await enter(eng, acc, decision(limit=99.0, stop=97.0, ttl=2, tf="1h"))
+    acc.partial = 0.5
+    await move(eng, acc, clock, 98.99)  # half fills -> OPEN, the remainder rests until the deadline
+    filled = pos.filled_qty
+    await move(eng, acc, clock, 101.0, minutes=10)
+    assert len(await working(acc)) == 1
+    eng.risk.pause("owner")
+    await move(eng, acc, clock, 101.0)
+    assert await working(acc) == [] and pos.status is PositionStatus.OPEN
+    assert pos.original_qty == pytest.approx(filled) and pos.qty == pytest.approx(filled)

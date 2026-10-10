@@ -603,10 +603,11 @@ class TradingEngine:
         if pos.status is not PositionStatus.OPEN or not price:
             return
         # a post-only entry that opened on a partial fill keeps its remainder working for two bars at most, or until
-        # its signal TTL runs out
+        # its signal TTL runs out (or new entries get blocked meanwhile)
         step = self.symbols[pos.symbol].step_size if pos.symbol in self.symbols else 0.0
         if (pos.entry_style == EntryStyle.LIMIT.value and pos.filled_qty < pos.original_qty - step * 0.5 - 1e-12
-                and now - pos.pending_since >= (self._entry_ttl_ms(pos) or 2 * MS_MINUTE)):
+                and (self._ttl_stop_reason(pos, now) if self._entry_ttl_ms(pos)
+                     else now - pos.pending_since >= 2 * MS_MINUTE)):
             await self._cancel_entry_remainder(pos)
             if pos.status is not PositionStatus.OPEN:
                 return
@@ -679,7 +680,9 @@ class TradingEngine:
         on every 1m bar after the simulator processed that bar, so the order works through exactly N such bars. It is
         never re-quoted, re-sized or abandoned for price drift in between (a retest limit), a partial fill keeps the
         remainder working until the same deadline (see _manage), and its state is checked every bar so an order the
-        exchange no longer works (filled with the event missed, cancelled, unknown) is settled at once."""
+        exchange no longer works (filled with the event missed, cancelled, unknown) is settled at once. It is also
+        cancelled as soon as new entries are blocked (pause, loss halt, market shock, entries disabled): unlike the
+        default entry, which is gone within minutes, it could otherwise open a position hours into a halt."""
         now = self.clock()
         age_bars = (now - pos.pending_since) / MS_MINUTE
         if pos.entry_style != EntryStyle.LIMIT.value:
@@ -695,8 +698,9 @@ class TradingEngine:
         # (a partially filled limit entry is OPEN, not PENDING: its remainder is handled in _manage / close / finalize)
         ttl = self._entry_ttl_ms(pos)
         if ttl:
-            if now - pos.pending_since >= ttl:
-                await self._cancel_pending(pos, f"진입 유효 기간({pos.entry_ttl_bars}봉) 만료로 주문 취소")
+            why = self._ttl_stop_reason(pos, now)
+            if why:
+                await self._cancel_pending(pos, why)
                 return
             try:
                 res = await self.account.query_order(pos.symbol, pos.entry_order_id, pos.entry_client_id)
@@ -730,8 +734,10 @@ class TradingEngine:
         res = await self._settle_entry_order(pos)  # cancel the resting order and credit anything that filled meanwhile
         if pos.status is not PositionStatus.PENDING:
             return
-        if res is None:
-            return  # exchange unreachable: the old order may still rest, so do not quote a second one; retry next bar
+        if res is None or res.status in ("NEW", "PARTIALLY_FILLED"):
+            # exchange unreachable, or the cancel did not take (timeout, rate limit) and the old order still works:
+            # quoting a second one on top could fill both (twice the size and the risk budget); retry next bar
+            return
         cid = client_order_id(f"E{self.tag}")
         # remember every entry id this position ever used so fills are recognised whichever order they belong to,
         # whether they arrive before the REST response (new id) or late (old id, de-duplicated via settled_orders)
@@ -812,6 +818,17 @@ class TradingEngine:
             return 0
         return int(pos.entry_ttl_bars) * TF_MS.get(pos.timeframe, MS_MINUTE)
 
+    def _ttl_stop_reason(self, pos: Position, now: int) -> str:
+        """Why a resting signal-TTL entry (or its partial-fill remainder) must stop working now ('' = keep resting):
+        its deadline passed, or new entries are blocked account-wide."""
+        ttl = self._entry_ttl_ms(pos)
+        if not ttl:
+            return ""
+        if now - pos.pending_since >= ttl:
+            return f"진입 유효 기간({pos.entry_ttl_bars}봉) 만료로 주문 취소"
+        blocked = self.risk.entries_blocked(now) if self.entries_enabled else "entries disabled"
+        return f"신규 진입 중단({blocked})으로 대기 주문 취소" if blocked else ""
+
     async def _settle_entry_order(self, pos: Position) -> OrderResult | None:
         """Cancel the working entry order, then read its final state and credit any fill that raced the cancel.
 
@@ -859,9 +876,10 @@ class TradingEngine:
         res = await self._settle_entry_order(pos)
         if pos.status is not PositionStatus.PENDING:
             return  # it filled under the cancel (in either ordering): it is a live position now, brackets placed
-        if res is None:
-            # neither the cancel nor the query could be confirmed: keep it pending rather than forgetting an order
-            # that may still fill; _manage_pending retries on the next bar
+        if res is None or res.status in ("NEW", "PARTIALLY_FILLED"):
+            # the cancel could not be confirmed, or it did not take and the order still works on the exchange: keep
+            # it pending rather than forgetting an order that may still fill into an untracked, unprotected
+            # position; _manage_pending (or the caller) retries on the next bar
             await self._emit("error", {"message": f"{pos.symbol} 진입 주문 취소 확인 실패; 다음 봉에 재시도"})
             return
         if pos.filled_qty > 0:  # partially filled: manage what we have

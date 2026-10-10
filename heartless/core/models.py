@@ -149,7 +149,8 @@ class Signal:
     # mean-reversion setups whose premise a strong counter-trend invalidates; trend followers leave it off.
     exit_on_regime_change: bool = False
     # post-only entries only: rest at limit_price for this many bars of `timeframe`, never moved, then cancel
-    # (a retest limit). None = chase the touch: re-quote every 2 minutes, cancel after two re-quotes.
+    # (a retest limit; cancelled early once new entries are blocked). None = chase the touch: re-quote every 2
+    # minutes, cancel after two re-quotes.
     entry_ttl_bars: int | None = None
 
     @property
