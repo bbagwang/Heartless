@@ -120,6 +120,9 @@ class InvariantChecker:
 
     # --- every minute ------------------------------------------------------------------------------
     async def check_minute(self) -> None:
+        # the exception / network watches are armed all the time; a minute counts as one pass of each
+        self.runs["exceptions"] += 1
+        self.runs["network"] += 1
         for name, eng in list(self.app.engines.items()):
             acc = eng.account
             if not isinstance(acc, PaperAccount):
@@ -251,7 +254,6 @@ class InvariantChecker:
 
     # --- exceptions / network ----------------------------------------------------------------------
     def loop_exception(self, context: dict) -> None:
-        self.runs["exceptions"] += 1
         exc = context.get("exception")
         what = context.get("message", "")
         task = context.get("task") or context.get("future")
@@ -266,7 +268,6 @@ class InvariantChecker:
         self.violation("exceptions", f"{record.levelname} {record.name}: {msg[:400]}")
 
     def network(self, msg: str) -> None:
-        self.runs["network"] += 1
         self.violation("network", msg)
 
     # --- reported PnL ------------------------------------------------------------------------------
@@ -338,10 +339,10 @@ class InvariantChecker:
 
             row["traced_mb"] = round(tracemalloc.get_traced_memory()[0] / 1e6, 1)
         self.memory.append(row)
+        self.runs["memory"] += 1
 
     def check_memory(self, limit_mb: float, slope_mb_per_day: float, warmup_ms: int) -> dict:
         """Growth of RSS from the first sample after `warmup_ms` to the last, and its least-squares slope."""
-        self.runs["memory"] += 1
         if len(self.memory) < 3:
             return {"samples": len(self.memory)}
         t0 = self.memory[0]["ts"] + warmup_ms
