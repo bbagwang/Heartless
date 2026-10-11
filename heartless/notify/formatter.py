@@ -137,7 +137,7 @@ def fmt_alphas(rows: list[dict], params, kill_switch: list[dict] | None = None) 
     for r in rows:
         en = params.enabled.get(r["alpha"], True)
         k = ks.get((r["alpha"], "live")) or ks.get((r["alpha"], "paper"))
-        guard = (f" · 킬 스위치 CUSUM {k['cusum']:+.2f}/-{k['h']:g}R" if k else "")
+        guard = (f" · 킬 스위치 CUSUM {k['cusum']:+.2f}/-{k['h']:g}σ" if k else "")
         lines.append(f"{'✅' if en else '⛔'} <code>{esc(r['alpha'])}</code> trust {r['trust']:.2f} · n={r['n']} · avgR {r['avg_r']:+.2f}\n"
                      f"   {esc(evidence.short(r['alpha']))}{guard}\n"
                      f"   추세↑ {r['trend_up']['mean']:.2f}({r['trend_up']['n']}) 추세↓ {r['trend_down']['mean']:.2f}({r['trend_down']['n']}) "
@@ -207,7 +207,7 @@ def fmt_learning(st: dict) -> list[str]:
         if k.get("engine") != "paper" and k.get("engine") != "live":
             continue
         out.append(f"  킬 스위치 <code>{esc(k['alpha'])}</code> ({esc(k['engine'])}): {k.get('n', 0)}건, CUSUM "
-                   f"{k.get('cusum', 0):+.2f}/-{k.get('h', 0):g}R, 최근 {k.get('window_n', 0)}건 합 "
+                   f"{k.get('cusum', 0):+.2f}/-{k.get('h', 0):g}σ (σ {k.get('scale', 1.0):.2f}R), 최근 {k.get('window_n', 0)}건 합 "
                    f"{k.get('window_sum', 0):+.2f}/{k.get('window_r', 0):g}R")
     return out
 

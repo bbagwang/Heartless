@@ -190,13 +190,15 @@ def r_stats(trades: list[dict]) -> dict:
             "max_dd_r": max_drawdown_r(trades)}
 
 
-def cusum_lower(rs: list[float], expected: float = 0.0, k: float = 0.25) -> tuple[float, float]:
-    """One-sided lower CUSUM of R multiples: S_t = min(0, S_{t-1} + (R_t - expected) + k). Returns (final S, lowest S).
-    `k` is the slack per trade: a trade that loses less than k below expectation pulls S back toward zero, so only a
-    sustained shortfall accumulates."""
+def cusum_lower(rs: list[float], expected: float = 0.0, k: float = 0.25, scale: float = 1.0) -> tuple[float, float]:
+    """One-sided lower CUSUM of R multiples: S_t = min(0, S_{t-1} + (R_t - expected) / scale + k). Returns (final S,
+    lowest S), in units of `scale`. `k` is the slack per trade: a trade that loses less than k below expectation pulls S
+    back toward zero, so only a sustained shortfall accumulates. With `scale` = the R standard deviation, k and the alarm
+    line are in standard deviations, which keeps the false-alarm rate independent of how dispersed an alpha's R is."""
     s = low = 0.0
+    sc = scale if scale and scale > 0 else 1.0
     for r in rs:
-        s = min(0.0, s + (float(r) - expected) + k)
+        s = min(0.0, s + (float(r) - expected) / sc + k)
         low = min(low, s)
     return s, low
 

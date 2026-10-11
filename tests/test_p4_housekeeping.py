@@ -136,7 +136,7 @@ def test_research_window_and_retention_defaults():
     assert s.research_lookback_days == 120 and s.data_retention_days == 180 and s.promotion_min_days == 14
     assert s.data_retention_days >= s.research_lookback_days + 30  # room for warm-up and the backfill margin
     assert (s.kill_switch, s.kill_switch_k, s.kill_switch_h, s.kill_switch_window, s.kill_switch_window_r) == \
-        (True, 0.25, 5.0, 30, -8.0)
+        (True, 0.25, 8.0, 30, -20.0)
 
 
 # --- MetricsSeries.merge --------------------------------------------------------------------------------------------

@@ -127,6 +127,25 @@ def test_relative_path_holds_on_weak_difference_mean_or_drawdown():
     assert d["checks"][f"DD <= {cap:.2f}R"] is False
 
 
+def test_relative_path_also_raises_the_bar_for_an_alpha_that_failed_out_of_sample():
+    # once the champion trades, the relative path is the usual one: a challenger re-enabling an alpha that lost over
+    # three years out of sample must not get back in on paired t >= 1 over two weeks
+    noisy = [[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6  # paired t ~3 over 21 days: promoted for an untested alpha
+    assert _judge(noisy, CHAMP)["verdict"] == "promote"
+    d = _judge(noisy, CHAMP, new_alphas=["squeeze_breakout"])
+    assert d["path"] == "relative" and d["failed_alphas"] == ["squeeze_breakout"] and d["verdict"] == "hold"
+    assert d["bar"]["min_days"] == 30 and d["bar"]["min_paired_t"] == 2.0 and d["checks"]["days >= 30"] is False
+    assert "OOS 탈락 알파 squeeze_breakout" in R.describe_decision(d) and "차이 t≥2" in R.describe_decision(d)
+    champ40 = [[0.3, -0.3]] * 40
+    mid = [[1.5, -0.3], [-0.4, -0.3]] * 20  # 40 days, paired t ~1.6: enough for an untested alpha only
+    assert _judge(mid, champ40)["verdict"] == "promote"
+    d = _judge(mid, champ40, new_alphas=["squeeze_breakout"])
+    assert d["verdict"] == "hold" and 1.0 <= d["paired"]["t"] < 2.0 and d["checks"]["paired t >= 2"] is False
+    strong = ([[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6) * 2  # 40 days, paired t ~4.4
+    d = _judge(strong, champ40, new_alphas=["squeeze_breakout"])
+    assert d["verdict"] == "promote" and d["paired"]["t"] >= 2.0
+
+
 def test_relative_path_counts_calendar_days_without_trades_as_zero():
     sparse = [[2.0]] + [[]] * 13 + [[2.0]] * 6 + [[0.5]] * 20  # few days, but they are the challenger's real record
     d = _judge(sparse, CHAMP)
@@ -233,6 +252,24 @@ def test_manager_only_counts_alphas_beyond_the_champion_and_retires_with_inputs(
     (slot, reason, d), = app.retired
     assert slot is s2 and d["verdict"] == "retire" and "절대 기준 열위" in reason and "t_day" in reason
     assert d["challenger"]["n"] == 60 and d["checks"]
+
+
+def test_manager_compares_trades_opened_since_the_challenger_started(tmp_path):
+    # champion positions opened before the challenger existed and closed after it started are not part of the
+    # comparison: here they would have made it a relative-path judgement on trades the challenger could not take
+    app = _App(tmp_path)
+    app.params.enabled["squeeze_breakout"] = True
+    start = now_ms() // MS_DAY * MS_DAY - 20 * MS_DAY
+    _slot(app, "challenger-1", ["discovered"], start)
+    early = _trades([[0.5, 0.5, 0.5]] * 10, "paper", start)
+    for t in early:
+        t["entry_time"] = start - MS_HOUR
+    _store_trades(app, early)  # 30 champion trades closed after the start, all opened before it
+    _store_trades(app, _trades([[0.2]] * 3, "paper", start + 12 * MS_DAY))  # 3 opened after the start
+    rm = ResearchManager(app)
+    asyncio.run(rm.evaluate_challengers(force=True))
+    d = rm.last_decisions["challenger-1"]
+    assert d["champion"]["n"] == 3 and d["path"] == "absolute"
 
 
 def test_manager_waits_an_hour_between_evaluations(tmp_path):

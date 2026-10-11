@@ -240,8 +240,8 @@ class Heartless:
                 f"활성 알파 {len(active)}개: {', '.join(active)}", "criteria": criteria if not active else "",
                 "evidence": ev, "evidence_counts": counts,
                 "active_evidence": {a: evidence.verdict(a) for a in active},
-                "kill_switch": (f"킬 스위치 {'켜짐' if self.s.kill_switch else '꺼짐'} (알파별 CUSUM k={self.s.kill_switch_k:g}, "
-                                f"-{self.s.kill_switch_h:g}R / 최근 {self.s.kill_switch_window}건 합 < "
+                "kill_switch": (f"킬 스위치 {'켜짐' if self.s.kill_switch else '꺼짐'} (알파별 CUSUM k={self.s.kill_switch_k:g}σ, "
+                                f"-{self.s.kill_switch_h:g}σ (σ = 그 알파 R의 표준편차) / 최근 {self.s.kill_switch_window}건 합 < "
                                 f"{self.s.kill_switch_window_r:g}R)")}
 
     def startup_summary(self) -> str:
@@ -799,7 +799,8 @@ class Heartless:
         """One-line English summary of a promotion / retirement / kill-switch decision for a version note."""
         if d.get("kind") == "kill_switch":
             return (f"kill switch {d.get('alpha')} ({d.get('rule')}): n={d.get('n', 0)} sum {d.get('sum_r', 0):+.2f}R "
-                    f"CUSUM {d.get('cusum', 0):+.2f}R last {d.get('window_n', 0)} {d.get('window_sum', 0):+.2f}R")
+                    f"CUSUM {d.get('cusum', 0):+.2f}sd (sd {d.get('scale', 1.0):.2f}R) last {d.get('window_n', 0)} "
+                    f"{d.get('window_sum', 0):+.2f}R")
         ch = d.get("challenger") or {}
         return (f"{d.get('verdict')} via the {d.get('path')} path ({d.get('rule')}): n={ch.get('n', 0)} "
                 f"days={ch.get('days', 0)} avgR {ch.get('avg_r', 0):+.3f} t_day {ch.get('t_day', 0):+.2f}"
@@ -845,8 +846,8 @@ class Heartless:
         new = old.clone(version=short_id("v"),
                         note=(f"kill switch: {alpha} off ({decision.get('engine')}: {decision.get('rule')}; "
                               f"n={decision.get('n', 0)} sum {decision.get('sum_r', 0):+.2f}R CUSUM "
-                              f"{decision.get('cusum', 0):+.2f}R last {decision.get('window_n', 0)} "
-                              f"{decision.get('window_sum', 0):+.2f}R; was {old.version})"))
+                              f"{decision.get('cusum', 0):+.2f}sd (sd {decision.get('scale', 1.0):.2f}R) last "
+                              f"{decision.get('window_n', 0)} {decision.get('window_sum', 0):+.2f}R; was {old.version})"))
         new.enabled[alpha] = False
         self.store.set_params_role(old.version, "retired")
         self.store.save_params_version(new.version, new.created, "champion", "kill-switch", new.note, new.to_dict(),

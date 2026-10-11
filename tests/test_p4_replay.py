@@ -58,8 +58,8 @@ def test_losing_alphas_trip_the_kill_switch_inside_a_replay(tmp_path, small_fram
     challenger = StrategyParams.default().clone(version="vchal", note="squeeze_breakout on")
     challenger.enabled["squeeze_breakout"] = True
     started = START - 3 * MS_DAY
-    trades = [_trade("paper", "htf_trend", i, -1.0, START - 5 * MS_DAY + i * MS_HOUR) for i in range(8)]
-    trades += [_trade("challenger-1", "squeeze_breakout", i, -1.0, started + (i + 1) * MS_HOUR) for i in range(8)]
+    trades = [_trade("paper", "htf_trend", i, -1.0, START - 5 * MS_DAY + i * MS_HOUR) for i in range(12)]
+    trades += [_trade("challenger-1", "squeeze_breakout", i, -1.0, started + (i + 1) * MS_HOUR) for i in range(12)]
     cfg = ReplayConfig(source_db=_source(tmp_path / "src.db"), start_ms=START, end_ms=START + 2 * MS_HOUR - 1,
                        work_dir=str(tmp_path / "bot"), seed_days=SEED_DAYS, settings=NO_LEARNING, commands=[],
                        params=champ.to_dict(), seed_trades=trades,
@@ -70,14 +70,14 @@ def test_losing_alphas_trip_the_kill_switch_inside_a_replay(tmp_path, small_fram
     learn = s["learning"]
     trips = {(t["engine"], t["alpha"]): t for t in learn["kill_switch_trips"]}
     assert set(trips) == {("paper", "htf_trend"), ("challenger-1", "squeeze_breakout")}
-    assert trips[("paper", "htf_trend")]["n"] == 8 and trips[("paper", "htf_trend")]["cusum"] == pytest.approx(-6.0)
+    assert trips[("paper", "htf_trend")]["n"] == 12 and trips[("paper", "htf_trend")]["cusum"] == pytest.approx(-9.0)
     assert learn["champion_enabled"] == [] and learn["champion_final"] != "vchamp"
     assert learn["challengers_retired"] and not learn["challengers_final"]
     assert s["engines"]["paper"]["params_version"] == learn["champion_final"]
     assert s["trades"]["opened"].get("paper", 0) == 0  # the champion never trades the switched-off alpha
     msgs = [json.loads(line) for line in (tmp_path / "messages.jsonl").read_text().splitlines()]
     kill = [m for m in msgs if m["topic"] == "kill_switch"]
-    assert len(kill) == 1 and "htf_trend 끔" in kill[0]["text"] and "CUSUM -6.00R" in kill[0]["text"]
+    assert len(kill) == 1 and "htf_trend 끔" in kill[0]["text"] and "CUSUM -9.00σ" in kill[0]["text"]
     retired = [m for m in msgs if m["topic"] == "challenger_retired"]
     assert len(retired) == 1 and "킬 스위치" in retired[0]["text"] and "squeeze_breakout" in retired[0]["text"]
     startup = next(m for m in msgs if m["topic"] == "startup")

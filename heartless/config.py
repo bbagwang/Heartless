@@ -86,13 +86,14 @@ class Settings(BaseSettings):
     # trades on at least PROMOTION_MIN_DAYS distinct UTC exit days (the absolute-path bar constants live in
     # heartless/learning/research.py next to the rule they belong to)
     promotion_min_days: int = Field(default=14, alias="PROMOTION_MIN_DAYS")
-    # per-alpha kill switch on live (paper or real) closed trades: one-sided lower CUSUM of (R - expected) with slack k
-    # crossing -h, or the sum of the alpha's last `window` trades below window_r. Disabling never needs a challenger.
+    # per-alpha kill switch on live (paper or real) closed trades: one-sided lower CUSUM of (R - expected) / sd with
+    # slack k crossing -h (k and h in standard deviations of the alpha's R, sd clamped to [1, 2]R), or the R sum of the
+    # alpha's last `window` trades below window_r (a backstop for absolute losses). Disabling never needs a challenger.
     kill_switch: bool = Field(default=True, alias="KILL_SWITCH")
     kill_switch_k: float = Field(default=0.25, alias="KILL_SWITCH_K")
-    kill_switch_h: float = Field(default=5.0, alias="KILL_SWITCH_H")
+    kill_switch_h: float = Field(default=8.0, alias="KILL_SWITCH_H")
     kill_switch_window: int = Field(default=30, alias="KILL_SWITCH_WINDOW")
-    kill_switch_window_r: float = Field(default=-8.0, alias="KILL_SWITCH_WINDOW_R")
+    kill_switch_window_r: float = Field(default=-20.0, alias="KILL_SWITCH_WINDOW_R")
     # execution-quality monitor: rolling window of fills per engine, and the taker-fill count from which the reports
     # suggest raising BACKTEST_SLIPPAGE_BPS (when realized slippage exceeds twice the model; never changed automatically)
     exec_quality_window: int = Field(default=200, alias="EXEC_QUALITY_WINDOW")

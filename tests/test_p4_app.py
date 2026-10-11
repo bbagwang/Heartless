@@ -196,7 +196,7 @@ async def test_a_losing_alpha_trips_the_kill_switch_and_stays_off_after_a_restar
     sent = _capture(app)
     eng = app.engines["paper"]
     t = now_ms() - 5 * MS_DAY
-    for i in range(7):  # seven full losses: CUSUM -5.25R
+    for i in range(11):  # eleven full losses: CUSUM -8.25 sd (sd floor 1R)
         rec = _rec("paper", i, "htf_trend", -1.0, t + i * MS_HOUR)
         app.store.save_trade(rec)
         await app.bus.publish("position_closed", {"engine": "paper", "trade": rec, "notify": True})
@@ -205,9 +205,9 @@ async def test_a_losing_alpha_trips_the_kill_switch_and_stays_off_after_a_restar
     row = app.store.load_params_versions(role="champion", limit=1)[0]
     assert row["source"] == "kill-switch" and row["note"].startswith("kill switch: htf_trend off")
     d = row["metrics"]["decisions"][0]
-    assert d["kind"] == "kill_switch" and d["n"] == 7 and d["cusum"] == pytest.approx(-5.25)
+    assert d["kind"] == "kill_switch" and d["n"] == 11 and d["cusum"] == pytest.approx(-8.25)
     msg = next(m for m in sent if "킬 스위치" in m)
-    assert "htf_trend 끔" in msg and "CUSUM -5.25R" in msg and "챌린저 승격 경로" in msg
+    assert "htf_trend 끔" in msg and "CUSUM -8.25σ" in msg and "챌린저 승격 경로" in msg
     assert app.store.load_events(topic="kill_switch")
     version = app.params.version
     await app.stop()
@@ -228,8 +228,8 @@ async def test_a_trip_stored_before_a_crash_is_acted_on_at_startup():
     app.store.set_params_role(app.params.version, "retired")  # the default champion the first start stored
     app.store.save_params_version(champ.version, champ.created, "champion", "test", champ.note, champ.to_dict())
     t = now_ms() - 5 * MS_DAY
-    for i in range(30):  # a slow bleed the previous process stored but never acted on: last-30 sum -9R
-        app.store.save_trade(_rec("paper", i, "htf_trend", -0.3, t + i * MS_HOUR))
+    for i in range(30):  # a bleed the previous process stored but never acted on: last-30 sum -21R
+        app.store.save_trade(_rec("paper", i, "htf_trend", -0.7, t + i * MS_HOUR))
     await app.stop()
     app, _, _ = _make(tmp, candles)
     await _boot(app, candles)  # run() checks every engine right after creating them

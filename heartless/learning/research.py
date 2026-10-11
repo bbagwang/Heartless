@@ -21,6 +21,7 @@ import asyncio
 import logging
 import multiprocessing
 import os
+import statistics
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -50,8 +51,9 @@ ABS_MIN_TRADES = 30
 ABS_MIN_T_DAY = 1.5
 ABS_MIN_PF_R = 1.15
 ABS_MAX_DD_R = 10.0
-# ... and when it switches on (beyond the champion) an alpha the evidence registry marks 'failed' out of sample, the
-# paper evidence has to be stronger: FAILED_MIN_DAYS exit days and t >= FAILED_MIN_T_DAY
+# ... and on either path, when it switches on (beyond the champion) an alpha the evidence registry marks 'failed' out
+# of sample, the paper evidence has to be stronger: FAILED_MIN_DAYS exit days and the path's t statistic (absolute:
+# t_day; relative: paired daily-difference t) >= FAILED_MIN_T_DAY
 FAILED_MIN_DAYS = 30
 FAILED_MIN_T_DAY = 2.0
 # Retirement: the early drop of a clearly bleeding challenger, else after 2x the path's minimum trades and days when
@@ -63,10 +65,16 @@ RETIRE_T = -1.0
 
 def promotion_bar(settings, path: str, failed: list[str] | tuple = ()) -> dict:
     """The thresholds a challenger must meet on `path` ('relative' | 'absolute'); `failed` = the alphas it enables
-    beyond the champion that failed out of sample (absolute path only)."""
+    beyond the champion that failed out of sample. They raise the bar on both paths: the relative bar (paired t >= 1.0
+    over two weeks) is even weaker than the absolute one, and an alpha that already lost over three years out of sample
+    needs a month and t >= 2 on either path to come back (once the champion trades, the relative path is the usual)."""
     if path == "relative":
-        return {"min_trades": settings.promotion_min_trades, "min_days": settings.promotion_min_days,
-                "min_paired_t": REL_MIN_PAIRED_T, "dd_mult": REL_DD_MULT, "dd_slack_r": REL_DD_SLACK_R}
+        bar = {"min_trades": settings.promotion_min_trades, "min_days": settings.promotion_min_days,
+               "min_paired_t": REL_MIN_PAIRED_T, "dd_mult": REL_DD_MULT, "dd_slack_r": REL_DD_SLACK_R}
+        if failed:
+            bar.update(min_days=max(FAILED_MIN_DAYS, settings.promotion_min_days), min_paired_t=FAILED_MIN_T_DAY,
+                       failed_alphas=list(failed))
+        return bar
     bar = {"min_trades": max(settings.promotion_min_trades, ABS_MIN_TRADES), "min_days": settings.promotion_min_days,
            "min_avg_r": 0.0, "min_t_day": ABS_MIN_T_DAY, "min_pf_r": ABS_MIN_PF_R, "max_dd_r": ABS_MAX_DD_R}
     if failed:
@@ -93,7 +101,7 @@ def judge_challenger(ch_trades: list[dict], champ_trades: list[dict], settings, 
     'promote' | 'retire' | 'hold', `path` 'relative' | 'absolute' (docs/SELF_IMPROVEMENT.md)."""
     ch, champ = r_stats(ch_trades), r_stats(champ_trades)
     path = "relative" if champ["n"] >= settings.promotion_min_trades else "absolute"
-    failed = evidence.failed(new_alphas) if path == "absolute" else []
+    failed = evidence.failed(new_alphas)
     bar = promotion_bar(settings, path, failed)
     d: dict = {"path": path, "since": int(start_ms), "at": int(now), "challenger": _round(ch), "champion": _round(champ),
                "new_alphas": list(new_alphas), "failed_alphas": failed, "bar": bar}
@@ -103,7 +111,7 @@ def judge_challenger(ch_trades: list[dict], champ_trades: list[dict], settings, 
         pdiff = paired_daily_diff(ch_trades, champ_trades, start_ms, now)
         d["paired"] = _round({"days": pdiff["days"], "mean": pdiff["mean"], "t": pdiff["t"]})
         dd_cap = REL_DD_MULT * champ["max_dd_r"] + REL_DD_SLACK_R
-        checks[f"paired t >= {REL_MIN_PAIRED_T:g}"] = pdiff["t"] >= REL_MIN_PAIRED_T
+        checks[f"paired t >= {bar['min_paired_t']:g}"] = pdiff["t"] >= bar["min_paired_t"]
         checks["avgR > champion"] = ch["avg_r"] > champ["avg_r"]
         checks[f"DD <= {dd_cap:.2f}R"] = ch["max_dd_r"] <= dd_cap + 1e-9
         retire_stat = pdiff["t"]
@@ -138,6 +146,8 @@ def describe_decision(d: dict) -> str:
                 f"챔피언 n={champ.get('n', 0)} 평균 {champ.get('avg_r', 0):+.3f}R 낙폭 {champ.get('max_dd_r', 0):.1f}R")
         need = (f"기준 n≥{bar.get('min_trades')}·{bar.get('min_days')}일, 차이 t≥{bar.get('min_paired_t', 0):g}, "
                 f"평균R>챔피언, 낙폭≤{bar.get('dd_mult', 0):g}×챔피언+{bar.get('dd_slack_r', 0):g}R")
+        if d.get("failed_alphas"):
+            need += f" (OOS 탈락 알파 {', '.join(d['failed_alphas'])}: 강화 기준)"
     else:
         head = f"절대 경로 (챔피언 거래 {champ.get('n', 0)}건 < 비교 최소치)"
         need = (f"기준 n≥{bar.get('min_trades')}·{bar.get('min_days')}일, 평균R>0, t_day≥{bar.get('min_t_day', 0):g}, "
@@ -401,9 +411,11 @@ class ResearchManager:
         The path is decided later by the champion's trades over the comparison period; its trade count over the last
         PROMOTION_MIN_DAYS days is the forecast."""
         champ_n = len(self.store.load_trades(engine="paper", since=now_ms() - self.s.promotion_min_days * MS_DAY))
-        if champ_n >= self.s.promotion_min_trades:
-            return f"상대 경로: 챔피언 대비 일별 차이 t≥{REL_MIN_PAIRED_T:g}, {self.s.promotion_min_days}일 이상"
         failed = evidence.failed(self.new_alphas(slot.params))
+        if champ_n >= self.s.promotion_min_trades:
+            bar = promotion_bar(self.s, "relative", failed)
+            return (f"상대 경로: 챔피언 대비 일별 차이 t≥{bar['min_paired_t']:g}, {bar['min_days']}일 이상"
+                    + (f"; OOS 탈락 알파 {', '.join(failed)} 강화 기준" if failed else ""))
         bar = promotion_bar(self.s, "absolute", failed)
         note = (f"승격 기준: 절대 경로 n≥{bar['min_trades']}·{bar['min_days']}일, t_day≥{bar['min_t_day']:g}, "
                 f"PF≥{bar['min_pf_r']:g}, 낙폭≤{bar['max_dd_r']:g}R")
@@ -429,8 +441,12 @@ class ResearchManager:
         for slot in list(self.app.challengers):
             if self.app.engines.get(slot.name) is None:
                 continue
-            ch_trades = self.store.load_trades(engine=slot.name, since=slot.started)
-            champ_trades = self.store.load_trades(engine="paper", since=slot.started)
+            # both records over the same period: trades OPENED since the challenger started (a champion position opened
+            # before it existed and closed after is not something the challenger could have taken)
+            ch_trades = [t for t in self.store.load_trades(engine=slot.name, since=slot.started)
+                         if (t.get("entry_time") or 0) >= slot.started]
+            champ_trades = [t for t in self.store.load_trades(engine="paper", since=slot.started)
+                            if (t.get("entry_time") or 0) >= slot.started]
             d = judge_challenger(ch_trades, champ_trades, self.s, slot.started, now, self.new_alphas(slot.params))
             d.update(slot=slot.name, version=slot.params.version, source=slot.source,
                      champion_version=self.app.params.version)
@@ -515,14 +531,24 @@ class ResearchManager:
 CHAMPION_ENGINES = ("paper", "live")  # engines that trade the champion's parameters
 
 
+# Kill-switch scale: the CUSUM runs on (R - expected) / sd, sd = the standard deviation of the alpha's R since its epoch,
+# clamped to [KS_SD_FLOOR, KS_SD_CAP] R. Trade R is noisy (sd ~1-1.5R for stop-based alphas, more for trend followers
+# with a low win rate) next to any real edge (~0.1R), so a CUSUM in raw R with a few R of alarm line fires on ordinary
+# losing streaks: with k = 0.25R and h = 5R, a synthetic alpha earning +0.10R a trade at a 35% win rate tripped within
+# 150 trades in 9 of 10 runs (tests/test_p4_killswitch.py). The floor keeps a run of identical losses (sd ~0) from
+# dividing by ~0; the cap keeps one outsized winner from blinding it to a run of full losses.
+KS_SD_FLOOR = 1.0
+KS_SD_CAP = 2.0
+
+
 class AlphaKillSwitch:
     """Per-alpha guard on live (paper or real) results: switches a losing alpha off at once (ROADMAP P4).
 
     For every engine (the paper champion, the live engine, each challenger) and every alpha it has switched on, the
-    alpha's closed trades since its epoch are tracked: a one-sided lower CUSUM of (R - expected) with slack
-    KILL_SWITCH_K, expected = the evidence-registry mean R if the alpha PASSED out of sample else 0, and the sum of its
-    last KILL_SWITCH_WINDOW trades (all of them while fewer). A CUSUM at or below -KILL_SWITCH_H, or a window sum below
-    KILL_SWITCH_WINDOW_R, trips it:
+    trades the engine opened with the alpha since its epoch are tracked: a one-sided lower CUSUM of
+    (R - expected) / sd with slack KILL_SWITCH_K (sd units, see KS_SD_FLOOR), expected = the evidence-registry mean R if
+    the alpha PASSED out of sample else 0, and the R sum of its last KILL_SWITCH_WINDOW trades (all of them while
+    fewer). A CUSUM at or below -KILL_SWITCH_H (sd units), or a window sum below KILL_SWITCH_WINDOW_R, trips it:
 
     * a champion engine (paper / live) -> a new champion version with the alpha off, a Telegram alert, a log line.
       Switching off is the safe direction, so it needs no challenger; switching back on only happens through a
@@ -583,22 +609,25 @@ class AlphaKillSwitch:
         return {a: int(slot.started) for a, on in slot.params.enabled.items() if on and a in slot.params.alphas}
 
     def evaluate(self, engine: str, alpha: str, since: int) -> dict:
-        trades = sorted(self.store.load_trades(engine=engine, since=since, alpha=alpha),
-                        key=lambda t: t.get("exit_time") or 0)
+        # trades the engine opened since the epoch (a position opened before it was decided under other settings)
+        trades = sorted((t for t in self.store.load_trades(engine=engine, since=since, alpha=alpha)
+                         if (t.get("entry_time") or 0) >= since), key=lambda t: t.get("exit_time") or 0)
         rs = [float(t.get("r_multiple") or 0.0) for t in trades]
         s = self.s
         exp = evidence.expected_r(alpha)
-        cusum, low = cusum_lower(rs, exp, s.kill_switch_k)
+        sd = statistics.stdev(rs) if len(rs) >= 2 else 0.0
+        scale = min(KS_SD_CAP, max(KS_SD_FLOOR, sd))
+        cusum, low = cusum_lower(rs, exp, s.kill_switch_k, scale)
         win = rs[-s.kill_switch_window:] if s.kill_switch_window > 0 else rs
         wsum = sum(win)
         by_cusum = bool(rs) and cusum <= -s.kill_switch_h
         by_window = bool(rs) and wsum < s.kill_switch_window_r
-        rule = " + ".join(x for x, hit in ((f"CUSUM <= -{s.kill_switch_h:g}R", by_cusum),
+        rule = " + ".join(x for x, hit in ((f"CUSUM <= -{s.kill_switch_h:g}sd", by_cusum),
                                            (f"last {len(win)} sum < {s.kill_switch_window_r:g}R", by_window)) if hit)
         st = {"engine": engine, "alpha": alpha, "since": int(since), "n": len(rs), "sum_r": sum(rs),
               "avg_r": sum(rs) / len(rs) if rs else 0.0, "expected": exp, "verdict": evidence.verdict(alpha),
-              "cusum": cusum, "cusum_low": low, "k": s.kill_switch_k, "h": s.kill_switch_h, "window": s.kill_switch_window,
-              "window_n": len(win), "window_sum": wsum, "window_r": s.kill_switch_window_r,
+              "sd": sd, "scale": scale, "cusum": cusum, "cusum_low": low, "k": s.kill_switch_k, "h": s.kill_switch_h,
+              "window": s.kill_switch_window, "window_n": len(win), "window_sum": wsum, "window_r": s.kill_switch_window_r,
               "tripped": by_cusum or by_window, "rule": rule, "at": now_ms()}
         self.state[(engine, alpha)] = st
         return st
@@ -645,9 +674,9 @@ class AlphaKillSwitch:
     async def _act(self, engine: str, alpha: str, st: dict) -> None:
         d = {"kind": "kill_switch", **_round(st)}
         self.trips.append(d)
-        log.warning("kill switch: %s on %s tripped (%s): n=%d sum %+.2fR CUSUM %+.2fR last %d sum %+.2fR expected "
-                    "%+.3fR", alpha, engine, st["rule"], st["n"], st["sum_r"], st["cusum"], st["window_n"],
-                    st["window_sum"], st["expected"])
+        log.warning("kill switch: %s on %s tripped (%s): n=%d sum %+.2fR CUSUM %+.2fsd (sd %.2fR) last %d sum %+.2fR "
+                    "expected %+.3fR", alpha, engine, st["rule"], st["n"], st["sum_r"], st["cusum"], st["scale"],
+                    st["window_n"], st["window_sum"], st["expected"])
         if engine in CHAMPION_ENGINES:
             await self.app.kill_alpha(alpha, d)
         else:
@@ -671,11 +700,13 @@ class AlphaKillSwitch:
 
 
 def describe_kill(d: dict) -> str:
-    """Korean rendering of a kill-switch evaluation (its inputs and thresholds)."""
+    """Korean rendering of a kill-switch evaluation (its inputs and thresholds). The CUSUM is in standard deviations
+    of the alpha's R (σ, shown in R)."""
     return (f"{d.get('alpha')} ({d.get('engine')}): 거래 {d.get('n', 0)}건, 누적 {d.get('sum_r', 0):+.2f}R "
             f"(평균 {d.get('avg_r', 0):+.3f}R, 기대 {d.get('expected', 0):+.3f}R, {evidence.short(d.get('alpha', ''))})\n"
-            f"CUSUM {d.get('cusum', 0):+.2f}R (기준 -{d.get('h', 0):g}R, k={d.get('k', 0):g}) · 최근 {d.get('window_n', 0)}건 합 "
-            f"{d.get('window_sum', 0):+.2f}R (기준 {d.get('window_r', 0):g}R)")
+            f"CUSUM {d.get('cusum', 0):+.2f}σ (기준 -{d.get('h', 0):g}σ, k={d.get('k', 0):g}σ, "
+            f"σ={d.get('scale', 1.0):.2f}R) · 최근 {d.get('window_n', 0)}건 합 {d.get('window_sum', 0):+.2f}R "
+            f"(기준 {d.get('window_r', 0):g}R)")
 
 
 def _watch_parent(ppid: int) -> None:

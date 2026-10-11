@@ -2,12 +2,14 @@
 window triggers, the evidence-based expectation, epochs, challengers, and state derived from the store (restart)."""
 import asyncio
 import json
+import random
 
 import pytest
 
 from heartless.config import Settings
 from heartless.core.models import TradeRecord
 from heartless.core.store import Store
+from heartless.execution.stats import cusum_lower
 from heartless.learning.research import AlphaKillSwitch, ChallengerSlot, describe_kill
 from heartless.strategy import evidence as E
 from heartless.strategy.params import StrategyParams
@@ -59,18 +61,80 @@ def test_cusum_trips_after_a_run_of_full_losses(tmp_path):
     ks = AlphaKillSwitch(app)
     ks.sync_champion(app.params)
     t = now_ms() - 50 * MS_HOUR
-    for i in range(6):  # each -1R adds -(1 - 0.25): -4.5R after six
+    for i in range(10):  # identical losses: sd 0 -> the 1R floor; each -1R adds -(1 - 0.25): -7.5 after ten
         _close(app, ks, "paper", "htf_trend", -1.0, t + i * MS_HOUR)
-    assert app.killed == [] and ks.state[("paper", "htf_trend")]["cusum"] == pytest.approx(-4.5)
-    _close(app, ks, "paper", "htf_trend", -1.0, t + 7 * MS_HOUR)  # -5.25R <= -5R
+    st = ks.state[("paper", "htf_trend")]
+    assert app.killed == [] and st["cusum"] == pytest.approx(-7.5) and st["scale"] == 1.0
+    _close(app, ks, "paper", "htf_trend", -1.0, t + 11 * MS_HOUR)  # -8.25 <= -8
     (alpha, d), = app.killed
     assert alpha == "htf_trend" and d["kind"] == "kill_switch" and d["engine"] == "paper"
-    assert d["n"] == 7 and d["cusum"] == pytest.approx(-5.25) and d["expected"] == 0.0 and d["verdict"] == "failed"
+    assert d["n"] == 11 and d["cusum"] == pytest.approx(-8.25) and d["expected"] == 0.0 and d["verdict"] == "failed"
     assert d["rule"].startswith("CUSUM") and d["tripped"] is True
-    assert "CUSUM -5.25R" in describe_kill(d) and "OOS 탈락" in describe_kill(d)
+    assert "CUSUM -8.25σ" in describe_kill(d) and "σ=1.00R" in describe_kill(d) and "OOS 탈락" in describe_kill(d)
     # the alpha is off now: later trades of it (open positions closing) do not act again
-    _close(app, ks, "paper", "htf_trend", -1.0, t + 8 * MS_HOUR)
+    _close(app, ks, "paper", "htf_trend", -1.0, t + 12 * MS_HOUR)
     assert len(app.killed) == 1
+
+
+def _synthetic_r(n: int, mean: float, win_rate: float, seed: int) -> list[float]:
+    """Stop-based trade R: 60% of losers at the stop (-1.0..-1.1R), the rest smaller; right-skewed winners sized so
+    the expected R is `mean`."""
+    rng = random.Random(seed)
+    w = (mean - (1 - win_rate) * (0.6 * -1.05 + 0.4 * -0.4)) / win_rate
+    out = []
+    for _ in range(n):
+        if rng.random() < win_rate:
+            out.append(rng.gammavariate(2.0, w / 2.0))
+        else:
+            out.append(-1.0 - rng.uniform(0, 0.1) if rng.random() < 0.6 else -rng.uniform(0, 0.8))
+    return out
+
+
+def _first_trip(app, ks, rs: list[float], engine: str = "paper", alpha: str = "htf_trend") -> int | None:
+    t = app.params.created + MS_HOUR  # every trade after the champion's epoch (created 100 h ago), 10 minutes apart
+    for i, r in enumerate(rs):
+        _close(app, ks, engine, alpha, r, t + i * 600_000)
+        if app.killed:
+            return i + 1
+    return None
+
+
+def test_an_alpha_with_a_real_edge_survives_ordinary_losing_streaks(tmp_path):
+    # A trend follower earning +0.10R a trade at a 35% win rate loses 7+ trades in a row every few dozen trades. The
+    # first P4 calibration (raw R, k 0.25, alarm -5R, last 30 < -8R) switched such an alpha off within 150 trades in
+    # 9 of 10 synthetic runs; on (R - expected) / sd with an alarm at -8 sd it survives 300 trades in most runs.
+    survived, old_rule_tripped = 0, 0
+    for seed in range(10):
+        rs = _synthetic_r(300, 0.10, 0.35, seed)
+        (tmp_path / str(seed)).mkdir()
+        app = _App(tmp_path / str(seed))
+        ks = AlphaKillSwitch(app)
+        survived += _first_trip(app, ks, rs) is None
+        old_cusum = [cusum_lower(rs[:m], 0.0, 0.25)[0] for m in range(1, 151)]
+        old_window = [sum(rs[max(0, m - 30):m]) for m in range(1, 151)]
+        old_rule_tripped += any(c <= -5.0 for c in old_cusum) or any(w < -8.0 for w in old_window)
+    assert old_rule_tripped >= 8 and survived >= 8
+
+
+def test_a_broken_alpha_is_still_switched_off_within_a_few_dozen_trades(tmp_path):
+    for seed in range(5):  # -0.5R a trade at a 30% win rate
+        (tmp_path / str(seed)).mkdir()
+        app = _App(tmp_path / str(seed))
+        ks = AlphaKillSwitch(app)
+        n = _first_trip(app, ks, _synthetic_r(120, -0.5, 0.30, 100 + seed))
+        assert n is not None and n <= 70
+
+
+def test_the_cusum_is_measured_in_standard_deviations_of_the_alphas_r(tmp_path):
+    app = _App(tmp_path)
+    ks = AlphaKillSwitch(app)
+    t = now_ms() - 80 * MS_HOUR
+    for i, r in enumerate([3.0, -3.0] * 10):  # a volatile record that nets 0: sd ~3.1R, clamped to 2R
+        _close(app, ks, "paper", "htf_trend", r, t + i * MS_HOUR)
+    for i in range(12):  # twelve full losses: -1 / 2 + 0.25 = -0.25 sd each, nowhere near -8 sd
+        _close(app, ks, "paper", "htf_trend", -1.0, t + (20 + i) * MS_HOUR)
+    st = ks.state[("paper", "htf_trend")]
+    assert app.killed == [] and st["scale"] == 2.0 and st["sd"] > 2.0 and st["cusum"] > -8.0
 
 
 def test_wins_pull_the_cusum_back_and_other_alphas_are_ignored(tmp_path):
@@ -87,17 +151,21 @@ def test_wins_pull_the_cusum_back_and_other_alphas_are_ignored(tmp_path):
     assert ("paper", "momentum_burst") not in ks.state
 
 
-def test_rolling_window_trips_on_a_slow_bleed(tmp_path):
+def test_rolling_window_backstops_absolute_losses(tmp_path):
+    # a volatile early record inflates the sd (to the 2R cap), so a later bleed moves the CUSUM slowly; the R sum of
+    # the last 30 trades still catches -20R
     app = _App(tmp_path)
     ks = AlphaKillSwitch(app)
-    t = now_ms() - 50 * MS_HOUR
-    for i in range(29):  # -0.27R each: CUSUM drifts only -0.02R a trade, the 30-trade sum reaches -8.1R
-        _close(app, ks, "paper", "htf_trend", -0.27, t + i * 60_000)
-    assert app.killed == [] and ks.state[("paper", "htf_trend")]["window_sum"] == pytest.approx(-7.83)
-    _close(app, ks, "paper", "htf_trend", -0.27, t + 30 * 60_000)
+    t = now_ms() - 80 * MS_HOUR
+    for i, r in enumerate([-3.0, 3.0] * 15):
+        _close(app, ks, "paper", "htf_trend", r, t + i * MS_HOUR)
+    for i in range(29):  # -0.7R each, CUSUM only -0.1 sd a trade; last 30: +3 - 20.3 = -17.3R
+        _close(app, ks, "paper", "htf_trend", -0.7, t + (30 + i) * MS_HOUR)
+    assert app.killed == [] and ks.state[("paper", "htf_trend")]["window_sum"] == pytest.approx(-17.3)
+    _close(app, ks, "paper", "htf_trend", -0.7, t + 59 * MS_HOUR)  # last 30: -21R
     (alpha, d), = app.killed
-    assert d["window_n"] == 30 and d["window_sum"] == pytest.approx(-8.1) and d["cusum"] > -5
-    assert d["rule"] == "last 30 sum < -8R"
+    assert d["window_n"] == 30 and d["window_sum"] == pytest.approx(-21.0) and d["cusum"] == pytest.approx(-3.0)
+    assert d["scale"] == 2.0 and d["rule"] == "last 30 sum < -20R"
 
 
 def test_a_passed_alpha_is_held_to_its_out_of_sample_mean(tmp_path, monkeypatch):
@@ -107,17 +175,17 @@ def test_a_passed_alpha_is_held_to_its_out_of_sample_mean(tmp_path, monkeypatch)
     app = _App(tmp_path)
     ks = AlphaKillSwitch(app)
     t = now_ms() - 50 * MS_HOUR
-    for i in range(19):  # -0.2R vs an expected +0.3R: -0.25R a trade
+    for i in range(31):  # -0.2R vs an expected +0.3R (sd floor 1R): -0.25 sd a trade
         _close(app, ks, "paper", "htf_trend", -0.2, t + i * MS_HOUR)
     assert app.killed == []
-    _close(app, ks, "paper", "htf_trend", -0.2, t + 19 * MS_HOUR)
-    assert app.killed and app.killed[0][1]["expected"] == pytest.approx(0.3)
+    _close(app, ks, "paper", "htf_trend", -0.2, t + 31 * MS_HOUR)
+    assert app.killed and app.killed[0][1]["expected"] == pytest.approx(0.3) and app.killed[0][1]["n"] == 32
     # the same record for an alpha that FAILED out of sample (expected 0) never accumulates: -0.2 + 0.25 > 0
     monkeypatch.undo()
     (tmp_path / "b").mkdir()
     app2 = _App(tmp_path / "b")
     ks2 = AlphaKillSwitch(app2)
-    for i in range(20):
+    for i in range(32):
         _close(app2, ks2, "paper", "htf_trend", -0.2, t + i * MS_HOUR)
     assert app2.killed == [] and ks2.state[("paper", "htf_trend")]["cusum"] == 0.0
 
@@ -146,13 +214,27 @@ def test_epochs_reset_when_a_promotion_switches_an_alpha_on_or_retunes_it(tmp_pa
 def test_trades_before_the_epoch_do_not_count(tmp_path):
     app = _App(tmp_path)
     t = now_ms() - 50 * MS_HOUR
-    for i in range(10):  # an old losing streak from before the alpha was (re-)enabled
+    for i in range(12):  # an old losing streak from before the alpha was (re-)enabled
         app.store.save_trade(_trade("paper", "htf_trend", -1.0, t + i * MS_HOUR))
-    app.params.created = t + 11 * MS_HOUR
+    app.params.created = t + 13 * MS_HOUR
     ks = AlphaKillSwitch(app)
     ks.sync_champion(app.params)
     assert asyncio.run(ks.check_all()) == [] and app.killed == []
     assert ks.state[("paper", "htf_trend")]["n"] == 0
+
+
+def test_positions_opened_before_the_epoch_do_not_count(tmp_path):
+    # positions opened under the previous settings that close after the epoch judged those settings, not these
+    app = _App(tmp_path)
+    epoch = now_ms() - 40 * MS_HOUR
+    app.params.created = epoch
+    for i in range(12):
+        rec = _trade("paper", "htf_trend", -1.0, epoch + (i + 1) * 60_000)
+        rec.entry_time = epoch - MS_HOUR  # opened an hour before the epoch, closed after it
+        app.store.save_trade(rec)
+    ks = AlphaKillSwitch(app)
+    ks.sync_champion(app.params)
+    assert asyncio.run(ks.check_all()) == [] and ks.state[("paper", "htf_trend")]["n"] == 0
 
 
 def test_state_is_derived_from_the_store_after_a_restart(tmp_path):
@@ -160,11 +242,11 @@ def test_state_is_derived_from_the_store_after_a_restart(tmp_path):
     ks = AlphaKillSwitch(app)
     ks.sync_champion(app.params)
     t = now_ms() - 50 * MS_HOUR
-    for i in range(7):  # stored, but the process died before acting on the trip
+    for i in range(11):  # stored, but the process died before acting on the trip
         app.store.save_trade(_trade("paper", "htf_trend", -1.0, t + i * MS_HOUR))
     restarted = AlphaKillSwitch(app)
     trips = asyncio.run(restarted.check_all())
-    assert [x["alpha"] for x in trips] == ["htf_trend"] and app.killed[0][1]["n"] == 7
+    assert [x["alpha"] for x in trips] == ["htf_trend"] and app.killed[0][1]["n"] == 11
 
 
 def test_a_challenger_that_trips_is_retired(tmp_path):
@@ -178,16 +260,16 @@ def test_a_challenger_that_trips_is_retired(tmp_path):
     old = now_ms() - 70 * MS_HOUR
     app.store.save_trade(_trade("challenger-1", "squeeze_breakout", -9.0, old))  # before its start: ignored
     t = now_ms() - 50 * MS_HOUR
-    for i in range(7):
+    for i in range(11):
         _close(app, ks, "challenger-1", "squeeze_breakout", -1.0, t + i * MS_HOUR)
     (name, reason, d), = app.retired
-    assert name == "challenger-1" and "킬 스위치" in reason and d["n"] == 7 and app.killed == []
+    assert name == "challenger-1" and "킬 스위치" in reason and d["n"] == 11 and app.killed == []
 
 
 def test_disabled_kill_switch_never_acts(tmp_path):
     app = _App(tmp_path, KILL_SWITCH=False)
     ks = AlphaKillSwitch(app)
     t = now_ms() - 50 * MS_HOUR
-    for i in range(12):
+    for i in range(15):
         _close(app, ks, "paper", "htf_trend", -1.0, t + i * MS_HOUR)
     assert app.killed == []
