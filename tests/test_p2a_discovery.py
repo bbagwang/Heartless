@@ -175,7 +175,8 @@ def test_non_overlap_selection_matches_the_previous_greedy_rule():
 
 
 def test_seal_holds_for_both_windows_and_the_72h_lookahead(tmp_path, monkeypatch):
-    s25 = seal.SEALED["2025"][0]
+    s25 = 1_735_689_600_000  # a synthetic seal of calendar 2025 (the real one is spent, docs/SEALED_2025.md)
+    monkeypatch.setattr(seal, "SEALED", {"2025": (s25, 1_767_225_600_000)})
     with pytest.raises(seal.SealedError):
         D.mine(str(tmp_path / "none.db"), ["X"], (_ms(2024, 6, 1), _ms(2025, 2, 1)), VALID, "1h", templates="time")
     with pytest.raises(seal.SealedError):

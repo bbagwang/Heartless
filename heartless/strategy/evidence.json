@@ -1,6 +1,6 @@
 {
  "schema_version": 1,
- "about": "Out-of-sample evidence per alpha (heartless/strategy/evidence.py). Verdicts come from the pre-registered judgements (P1: OOS window 2022-2024; P2: TRAIN 2022-2024 gate, then the VALID window 2026-01-13..09-30 as oos_window, avg_r = min(TRAIN, VALID) avg_r); 'param_schema' is the parameter-schema fingerprint the alpha was judged with (a redesign makes the entry stale, i.e. 'untested'). Alphas without an entry are 'untested'.",
+ "about": "Out-of-sample evidence per alpha (heartless/strategy/evidence.py). Verdicts come from the pre-registered judgements (P1: OOS window 2022-2024; P2: TRAIN 2022-2024 gate, then the VALID window 2026-01-13..09-30 as oos_window, avg_r = min(TRAIN, VALID) avg_r); 'param_schema' is the parameter-schema fingerprint the alpha was judged with (a redesign makes the entry stale, i.e. 'untested'). A 'sealed2025' block records the one-shot sealed-2025 confirmation test of an entry that took it (its verdict already applied to 'verdict'; the top-level fields keep their P2 meaning). Alphas without an entry are 'untested'.",
  "judgements": {
   "p1": {
    "what": "ROADMAP P1: one-shot pre-registered OOS judgement of the shipped alphas",
@@ -23,6 +23,17 @@
    "decided": "2026-10-11",
    "source": "docs/RESEARCH_P2.md",
    "data": "docs/results/p2_decisions.json"
+  },
+  "sealed2025": {
+   "what": "ROADMAP section 6 (2026-10-11): one-shot confirmation test of vol_breakout_dbox (comp_q=1.0) on the sealed calendar year 2025, after it failed only the VALID t_day bar",
+   "window": "2025-01-01..2025-12-31",
+   "universe": "20 extended symbols",
+   "costs": "nominal (taker 5bp, maker 2bp, slippage 1.5bp); stress = 1.5x fees, 2x slippage",
+   "rule": "pass iff 2025 avg_r > 0 and 2025 stress avg_r > 0 and the day-clustered t_day of the VALID and 2025 trades pooled >= 1.65; on a pass verdict 'passed' with avg_r = min(TRAIN, VALID, 2025) avg_r",
+   "preregistration_commit": "ae0b511",
+   "decided": "2026-10-11",
+   "source": "docs/SEALED_2025.md",
+   "data": "docs/results/p2_sealed2025_decision.json"
   }
  },
  "alphas": {
@@ -263,7 +274,26 @@
     "vol_breakout_dbox.comp_q=1.0"
    ],
    "source": "docs/RESEARCH_P2.md",
-   "param_schema": "aa198f9bd458"
+   "param_schema": "aa198f9bd458",
+   "sealed2025": {
+    "window": "2025-01-01..2025-12-31",
+    "n": 454,
+    "avg_r": -0.0308,
+    "t_day": -0.61,
+    "profit_factor": 0.854,
+    "stress_avg_r": -0.0373,
+    "long_avg_r": 0.139,
+    "short_avg_r": -0.1241,
+    "pooled_valid_2025": {
+     "n": 765,
+     "avg_r": 0.02293,
+     "t_day": 0.3902
+    },
+    "result": "fail",
+    "file": "docs/results/p2_sealed2025_vol_breakout_dbox.json",
+    "decision": "docs/results/p2_sealed2025_decision.json",
+    "source": "docs/SEALED_2025.md"
+   }
   },
   "discovery_daily_capdisp": {
    "verdict": "failed",

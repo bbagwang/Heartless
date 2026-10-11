@@ -167,13 +167,14 @@ def test_metrics_merge_keeps_fields_a_newer_partial_row_does_not_provide():
 
 
 # --- seal wording --------------------------------------------------------------------------------------------------
-def test_the_seal_error_only_points_to_the_commands_that_can_unseal():
-    a = seal.SEALED["2025"][0]
+def test_the_seal_error_only_points_to_the_commands_that_can_unseal(monkeypatch):
+    a = 1_735_689_600_000  # a synthetic seal of calendar 2025 (the real one is spent, docs/SEALED_2025.md)
+    monkeypatch.setattr(seal, "SEALED", {"2025": (a, 1_767_225_600_000)})
     with pytest.raises(seal.SealedError) as e:
         seal.check_window(a, a + MS_DAY)
     msg = str(e.value)
-    assert "Only `heartless lab` and `heartless discover` can open it" in msg and "--unseal 2025" in msg
-    assert "other commands have no unseal option" in msg
+    assert "Only `heartless lab`, `heartless discover` and `heartless backtest --start/--end` can open it" in msg
+    assert "--unseal 2025" in msg and "other commands have no unseal option" in msg
 
 
 # --- metrics archive backfill -----------------------------------------------------------------------------------------

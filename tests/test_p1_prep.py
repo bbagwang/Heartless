@@ -132,6 +132,8 @@ def test_load_backtester_window_warms_up_before_and_reads_nothing_after(tmp_path
 
 # --- (c) backtest --start/--end: joint portfolio -------------------------------------------------------------------
 def test_backtest_window_refuses_the_sealed_period(tmp_path, monkeypatch, capsys):
+    # a synthetic seal of calendar 2025 (the real one is spent, docs/SEALED_2025.md)
+    monkeypatch.setattr(seal, "SEALED", {"2025": (_ms(2025, 1, 1), _ms(2026, 1, 1))})
     monkeypatch.setenv("HEARTLESS_DATA_DIR", str(tmp_path))
     with pytest.raises(SystemExit) as e:
         cli.main(["backtest", "--start", "2024-12-01", "--end", "2025-01-02"])

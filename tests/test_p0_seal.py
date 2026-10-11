@@ -1,4 +1,8 @@
-"""P0 seal: the 2025 final-exam period is refused by every evaluation path unless explicitly unsealed (and logged)."""
+"""P0 seal: a sealed final-exam period is refused by every evaluation path unless explicitly unsealed (and logged).
+
+The real 2025 seal was spent by the one-shot confirmation test of 2026-10-11 (docs/SEALED_2025.md) and 2025 is
+ordinary history now. These tests seal calendar 2025 again through monkeypatch (a synthetic sealed period with the
+dates the tests were written for), so the mechanism stays covered for the next sealed period."""
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -18,7 +22,7 @@ from heartless.learning.research import ResearchManager
 from heartless.strategy.params import StrategyParams
 
 DAY = 86_400_000
-S25, E25 = seal.SEALED["2025"]
+S25, E25 = 1_735_689_600_000, 1_767_225_600_000  # 2025-01-01 .. 2026-01-01 UTC
 
 
 def _ms(y, m, d, hh=0, mm=0):
@@ -37,6 +41,12 @@ def _walk(start: int, n: int, seed: int = 0) -> list[Candle]:
     return out
 
 
+@pytest.fixture(autouse=True)
+def _sealed_2025(monkeypatch):
+    """Seal calendar 2025 for every test of this module (the real seal is spent)."""
+    monkeypatch.setattr(seal, "SEALED", {"2025": (S25, E25)})
+
+
 @pytest.fixture
 def ledger(tmp_path, monkeypatch):
     """Tests must never write the real docs/results/seal_ledger.jsonl."""
@@ -45,8 +55,9 @@ def ledger(tmp_path, monkeypatch):
     return path
 
 
-def test_sealed_period_is_calendar_2025():
+def test_synthetic_period_is_calendar_2025_whose_real_seal_is_spent():
     assert S25 == _ms(2025, 1, 1) and E25 == _ms(2026, 1, 1)
+    assert seal.SPENT["2025"] == (S25, E25)
 
 
 def test_check_window_refuses_any_overlap_unless_unsealed():

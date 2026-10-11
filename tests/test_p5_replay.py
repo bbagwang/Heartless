@@ -251,9 +251,12 @@ def test_command_specs_parse_offsets_and_dates():
         parse_command("/pause", START)
 
 
-def test_a_window_touching_the_sealed_period_is_refused(tmp_path):
+def test_a_window_touching_the_sealed_period_is_refused(tmp_path, monkeypatch):
+    from heartless.learning import seal
     from heartless.learning.seal import SealedError
 
+    # a synthetic seal of calendar 2025 (the real one is spent, docs/SEALED_2025.md)
+    monkeypatch.setattr(seal, "SEALED", {"2025": (1_735_689_600_000, 1_767_225_600_000)})
     src = build_source(tmp_path / "src.db", 1, ["ETHUSDT"])
     with pytest.raises(SealedError):  # the seed history (the 60 days before start) reaches into 2025
         run_replay(ReplayConfig(source_db=src, start_ms=START, end_ms=START + MS_DAY - 1))

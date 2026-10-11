@@ -9,6 +9,11 @@ appended to an audit ledger (`record_unseal()`), so opening the period is a visi
 Only the *evaluated* window counts. Indicator warm-up loaded before the window start never produces evaluated trades
 and is allowed; look-ahead reads past the window end (exit simulation, next funding rate) are capped at the next
 sealed period with `readable_until()`.
+
+No period is sealed now. Calendar 2025 was sealed from P0 until the one-shot confirmation test of 2026-10-11 opened it
+(docs/SEALED_2025.md); a seal opened once is spent, so 2025 is ordinary history (TRAIN for later research) and sits in
+SPENT. The mechanism stays for the next sealed period (e.g. a slice of the FORWARD paper data), which is added to
+SEALED before anyone evaluates on it.
 """
 from __future__ import annotations
 
@@ -17,8 +22,11 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-# name -> [start_ms, end_ms): 2025-01-01T00:00Z .. 2026-01-01T00:00Z
-SEALED: dict[str, tuple[int, int]] = {"2025": (1_735_689_600_000, 1_767_225_600_000)}
+# name -> [start_ms, end_ms) of the periods still sealed: none since the 2025 exam (module docstring)
+SEALED: dict[str, tuple[int, int]] = {}
+# name -> [start_ms, end_ms) of the periods whose seal was spent. `--unseal NAME` is still accepted, so the exam
+# commands in docs/SEALED_2025.md stay reproducible, but it opens and records nothing: the period is ordinary history
+SPENT: dict[str, tuple[int, int]] = {"2025": (1_735_689_600_000, 1_767_225_600_000)}  # 2025-01-01 .. 2026-01-01 UTC
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LEDGER = REPO_ROOT / "docs" / "results" / "seal_ledger.jsonl"
 
@@ -32,11 +40,14 @@ def _iso(ms: int) -> str:
 
 
 def _norm(unseal) -> set[str]:
+    """The sealed periods named in `unseal`: a spent period's name is accepted and dropped (it has nothing to open),
+    an unknown name (a typo) raises instead of silently opening nothing."""
     names = {str(u).strip() for u in (unseal or ()) if str(u).strip()}
-    unknown = names - set(SEALED)
+    unknown = names - set(SEALED) - set(SPENT)
     if unknown:
-        raise ValueError(f"unknown sealed period(s) {sorted(unknown)}; known: {sorted(SEALED)}")
-    return names
+        raise ValueError(f"unknown sealed period(s) {sorted(unknown)}; sealed: {sorted(SEALED)}, "
+                         f"spent: {sorted(SPENT)}")
+    return names & set(SEALED)
 
 
 def overlapping(start_ms: int, end_ms: int, unseal=()) -> list[str]:
@@ -60,13 +71,14 @@ def check_window(start_ms: int, end_ms: int, unseal=()) -> None:
     hit = overlapping(int(start_ms), int(end_ms), unseal)
     if hit:
         spans = ", ".join(f"{n} ({_iso(SEALED[n][0])} .. {_iso(SEALED[n][1] - 1)} UTC)" for n in hit)
-        # the wording must hold for every caller: only `heartless lab` and `heartless discover` take --unseal (the
-        # backtest / replay commands and the automated loops deliberately have no way to open a sealed period)
+        # the wording must hold for every caller: only `heartless lab`, `heartless discover` and the window mode of
+        # `heartless backtest` take --unseal (the --days backtest, replay and the automated loops deliberately have no
+        # way to open a sealed period)
         raise SealedError(f"evaluation window {_iso(int(start_ms))} .. {_iso(int(end_ms))} UTC overlaps sealed period "
                           f"{spans}. It is reserved for the one-time final exam (docs/ROADMAP.md section 1). Pick a "
-                          f"window outside it. Only `heartless lab` and `heartless discover` can open it, deliberately, "
-                          f"with `--unseal {hit[0]}` (recorded in docs/results/seal_ledger.jsonl); other commands "
-                          f"have no unseal option.")
+                          f"window outside it. Only `heartless lab`, `heartless discover` and `heartless backtest "
+                          f"--start/--end` can open it, deliberately, with `--unseal {hit[0]}` (recorded in "
+                          f"docs/results/seal_ledger.jsonl); other commands have no unseal option.")
 
 
 def clip_window(start_ms: int, end_ms: int, unseal=()) -> tuple[int, int] | None:

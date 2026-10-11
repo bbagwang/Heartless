@@ -188,12 +188,14 @@ def test_lab_cli_universe_and_tag_append_to_the_trial_ledger(db, tmp_path, monke
     assert "family N=2" in capsys.readouterr().err
 
 
-def test_context_for_a_window_right_after_the_seal_builds_only_what_it_reads(tmp_path, probe):
+def test_context_for_a_window_right_after_the_seal_builds_only_what_it_reads(tmp_path, probe, monkeypatch):
     """A VALID-style window starting 2026-01-01: the 2025 history is read as warm-up only; the one 2025 row written
-    is the snapshot at 2025-12-31 23:59:59.999 that the window's first bars see."""
+    is the snapshot at 2025-12-31 23:59:59.999 that the window's first bars see. 2025 is sealed synthetically here
+    (the real seal is spent, docs/SEALED_2025.md)."""
     from heartless.learning import seal
 
-    s25_end = seal.SEALED["2025"][1]
+    s25_end = 1_767_225_600_000
+    monkeypatch.setattr(seal, "SEALED", {"2025": (1_735_689_600_000, s25_end)})
     db = tmp_path / "s.db"
     st = Store(db)
     rng = np.random.default_rng(4)
