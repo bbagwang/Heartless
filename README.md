@@ -176,7 +176,7 @@ python tools/calibrate_promotion.py --out docs/results/c2b_promotion_calibration
 | `ARCHIVE_BACKFILL` | true | 공개 아카이브로 대량 백필 |
 | `META_LABEL` | false | 메타 라벨링 필터 |
 | **학습 (P4)** | | |
-| `RESEARCH_INTERVAL_MINUTES` | 240 | 리서치 주기 |
+| `RESEARCH_INTERVAL_MINUTES` | 360 | 리서치 주기(한 사이클 약 2.2시간, 작업자 가동률 50% 이하가 되도록 4시간에서 늘림) |
 | `RESEARCH_LOOKBACK_DAYS` / `RESEARCH_FOLDS` / `RESEARCH_CANDIDATES` | 120 / 3 / 10 | 워크포워드 기간 / 확인 구간 수 / 알파당 후보 수 |
 | `DATA_RETENTION_DAYS` | 180 | 연구·발굴용 저장 이력(아카이브로 백필) |
 | `DISCOVERY_INTERVAL_HOURS` / `DISCOVERY_MIN_DAYS` | 24 / 45 | 자동 알파 발굴 주기 / 최소 이력 |

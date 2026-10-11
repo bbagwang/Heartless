@@ -61,7 +61,9 @@ class Settings(BaseSettings):
     backtest_slippage_bps: float = Field(default=1.5, alias="BACKTEST_SLIPPAGE_BPS")  # simulated market-order slippage
 
     # --- learning ----------------------------------------------------------------------------
-    research_interval_minutes: int = Field(default=240, alias="RESEARCH_INTERVAL_MINUTES")
+    # 360 (was 240, C2-B): one 120-day cycle takes ~2.2 h of a core (docs/SELF_IMPROVEMENT.md 3.1), 54% of a 4-hour
+    # interval; 6 hours keep the research worker busy at most ~36% of the time and leave room for the daily discovery
+    research_interval_minutes: int = Field(default=360, alias="RESEARCH_INTERVAL_MINUTES")
     # 120 days (was 30): a 30-day window holds too few independent days for 1h alphas (docs/SELF_IMPROVEMENT.md)
     research_lookback_days: int = Field(default=120, alias="RESEARCH_LOOKBACK_DAYS")
     research_folds: int = Field(default=3, alias="RESEARCH_FOLDS")  # walk-forward confirmation windows
