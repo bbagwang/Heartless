@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_registry_agrees_with_the_p1_decision_table():
     p1 = json.loads((ROOT / "docs" / "results" / "p1_decisions.json").read_text())
-    reg = E.registry()["alphas"]
-    assert set(reg) == set(p1["alphas"])  # the nine judged alphas, nothing else
+    reg = {a: e for a, e in E.registry()["alphas"].items() if e.get("judgement") == "p1"}
+    assert set(reg) == set(p1["alphas"])  # the nine judged alphas, nothing else (P2 entries: tests/test_p2_gate.py)
     for name, d in p1["alphas"].items():
         e, inp = reg[name], d["inputs"]
         assert e["verdict"] == ("passed" if d["after"] else "failed"), name

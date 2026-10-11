@@ -1,6 +1,6 @@
 {
  "schema_version": 1,
- "about": "Out-of-sample evidence per alpha (heartless/strategy/evidence.py). Verdicts come from the pre-registered judgements; 'param_schema' is the parameter-schema fingerprint the alpha was judged with (a redesign makes the entry stale, i.e. 'untested'). Alphas without an entry are 'untested'.",
+ "about": "Out-of-sample evidence per alpha (heartless/strategy/evidence.py). Verdicts come from the pre-registered judgements (P1: OOS window 2022-2024; P2: TRAIN 2022-2024 gate, then the VALID window 2026-01-13..09-30 as oos_window, avg_r = min(TRAIN, VALID) avg_r); 'param_schema' is the parameter-schema fingerprint the alpha was judged with (a redesign makes the entry stale, i.e. 'untested'). Alphas without an entry are 'untested'.",
  "judgements": {
   "p1": {
    "what": "ROADMAP P1: one-shot pre-registered OOS judgement of the shipped alphas",
@@ -11,6 +11,18 @@
    "decision_commit": "0d238e7",
    "source": "docs/OOS_2022_2024.md",
    "data": "docs/results/p1_decisions.json"
+  },
+  "p2": {
+   "what": "ROADMAP P2: pre-registered TRAIN gate per hypothesis family, then one VALID run per TRAIN-gate candidate",
+   "train_window": "2022-01-13..2024-12-31",
+   "valid_window": "2026-01-13..2026-09-30",
+   "universe": "20 extended symbols (core 12 + DOT ATOM NEAR FIL ETC TRX UNI AAVE; SUI from 2023-05-03)",
+   "costs": "nominal (taker 5bp, maker 2bp, slippage 1.5bp); TRAIN stress = 1.5x fees, 2x slippage",
+   "gates": "TRAIN: t_day >= max(3, sqrt(2 ln N_family)), avg_r >= 0.05, >= 2 of 3 years avg_r > 0, stress avg_r > 0; VALID: avg_r > 0, t_day >= 1.0",
+   "expected_r_rule": "avg_r = min(TRAIN avg_r, VALID avg_r): the kill switch's expectation if the alpha passed",
+   "decided": "2026-10-11",
+   "source": "docs/RESEARCH_P2.md",
+   "data": "docs/results/p2_decisions.json"
   }
  },
  "alphas": {
@@ -139,6 +151,156 @@
    "stress_avg_r": -0.124,
    "source": "docs/OOS_2022_2024.md",
    "param_schema": "6e63f1e63af0"
+  },
+  "ts_trend_tsmom": {
+   "verdict": "failed",
+   "judgement": "p2",
+   "rule": "p2-gate",
+   "family": "ts_trend",
+   "oos_window": "2026-01-13..2026-09-30",
+   "n": 327,
+   "avg_r": -0.0141,
+   "t_day": -0.26,
+   "years_positive": 3,
+   "years": 3,
+   "stress_avg_r": 0.0861,
+   "train": {
+    "window": "2022-01-13..2024-12-31",
+    "n": 1335,
+    "avg_r": 0.0912,
+    "t_day": 3.03,
+    "years_positive": 3,
+    "stress_avg_r": 0.0861,
+    "n_family": 27,
+    "t_day_bar": 3.0,
+    "file": "docs/results/p2_ts_trend_tsmom28_h10_renew.json"
+   },
+   "valid": {
+    "window": "2026-01-13..2026-09-30",
+    "n": 327,
+    "avg_r": -0.0141,
+    "t_day": -0.26,
+    "long_avg_r": -0.0761,
+    "short_avg_r": 0.0452,
+    "file": "docs/results/p2_valid_ts_trend_tsmom.json"
+   },
+   "config_hash": "ce111fcb3c7bbc7e",
+   "overrides": [],
+   "source": "docs/RESEARCH_P2.md",
+   "param_schema": "af23705cf2b0"
+  },
+  "positioning_flow_oimom": {
+   "verdict": "failed",
+   "judgement": "p2",
+   "rule": "p2-gate",
+   "family": "positioning_flow",
+   "oos_window": "2026-01-13..2026-09-30",
+   "n": 82,
+   "avg_r": -0.0054,
+   "t_day": -0.07,
+   "years_positive": 3,
+   "years": 3,
+   "stress_avg_r": 0.0792,
+   "train": {
+    "window": "2022-01-13..2024-12-31",
+    "n": 624,
+    "avg_r": 0.0855,
+    "t_day": 3.29,
+    "years_positive": 3,
+    "stress_avg_r": 0.0792,
+    "n_family": 21,
+    "t_day_bar": 3.0,
+    "file": "docs/results/p2_positioning_flow_oimom48_retail.json"
+   },
+   "valid": {
+    "window": "2026-01-13..2026-09-30",
+    "n": 82,
+    "avg_r": -0.0054,
+    "t_day": -0.07,
+    "long_avg_r": -0.023,
+    "short_avg_r": 0.0528,
+    "file": "docs/results/p2_valid_positioning_flow_oimom.json"
+   },
+   "config_hash": "1c3d8915ee9fa943",
+   "overrides": [],
+   "source": "docs/RESEARCH_P2.md",
+   "param_schema": "ee1c94bef486"
+  },
+  "vol_breakout_dbox": {
+   "verdict": "failed",
+   "judgement": "p2",
+   "rule": "p2-gate",
+   "family": "vol_breakout",
+   "oos_window": "2026-01-13..2026-09-30",
+   "n": 311,
+   "avg_r": 0.1013,
+   "t_day": 0.82,
+   "years_positive": 3,
+   "years": 3,
+   "stress_avg_r": 0.1196,
+   "train": {
+    "window": "2022-01-13..2024-12-31",
+    "n": 1148,
+    "avg_r": 0.1282,
+    "t_day": 3.21,
+    "years_positive": 3,
+    "stress_avg_r": 0.1196,
+    "n_family": 23,
+    "t_day_bar": 3.0,
+    "file": "docs/results/p2_vol_breakout_nocomp.json"
+   },
+   "valid": {
+    "window": "2026-01-13..2026-09-30",
+    "n": 311,
+    "avg_r": 0.1013,
+    "t_day": 0.82,
+    "long_avg_r": 0.0689,
+    "short_avg_r": 0.1327,
+    "file": "docs/results/p2_valid_vol_breakout_dbox.json"
+   },
+   "config_hash": "a8356702eb374c77",
+   "overrides": [
+    "vol_breakout_dbox.comp_q=1.0"
+   ],
+   "source": "docs/RESEARCH_P2.md",
+   "param_schema": "aa198f9bd458"
+  },
+  "discovery_daily_capdisp": {
+   "verdict": "failed",
+   "judgement": "p2",
+   "rule": "p2-gate",
+   "family": "discovery_daily",
+   "oos_window": "2026-01-13..2026-09-30",
+   "n": 69,
+   "avg_r": -0.0371,
+   "t_day": -0.12,
+   "years_positive": 3,
+   "years": 3,
+   "stress_avg_r": 0.2147,
+   "train": {
+    "window": "2022-01-13..2024-12-31",
+    "n": 327,
+    "avg_r": 0.2245,
+    "t_day": 4.89,
+    "years_positive": 3,
+    "stress_avg_r": 0.2147,
+    "n_family": 105068,
+    "t_day_bar": 4.809,
+    "file": "docs/results/p2_discovery_daily_capdisp_alpha.json"
+   },
+   "valid": {
+    "window": "2026-01-13..2026-09-30",
+    "n": 69,
+    "avg_r": -0.0371,
+    "t_day": -0.12,
+    "long_avg_r": -0.0371,
+    "short_avg_r": null,
+    "file": "docs/results/p2_valid_discovery_daily_capdisp.json"
+   },
+   "config_hash": "2a59beb9ef0af63a",
+   "overrides": [],
+   "source": "docs/RESEARCH_P2.md",
+   "param_schema": "2d931441ea1f"
   }
  }
 }

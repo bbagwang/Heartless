@@ -108,10 +108,10 @@ async def test_messages_state_that_nothing_trades_and_what_starts_trading():
     assert NO_ALPHA_TEXT in text and "활성 알파 없음" in text and "거래하지 않고 연구·발굴·챌린저 검증만 진행" in text
     assert "거래 시작 조건" in text and "거래 30건 이상·청산일 14일 이상" in text and "t ≥ 1.5" in text
     assert "PF ≥ 1.15" in text and "최대낙폭 ≤ 10R" in text and "30일·t ≥ 2" in text
-    assert "OOS 판정: 9개 중 탈락 9, 통과 0" in text and "킬 스위치 켜짐" in text
+    assert "OOS 판정: 13개 중 탈락 13, 통과 0" in text and "킬 스위치 켜짐" in text  # P1: 9, P2 candidates: 4
     assert "리서치 사이클이 통과 알파를 켭니다" not in text  # the old, untrue claim
     st = app.status()
-    assert st["learning"]["no_alpha"] is True and st["learning"]["evidence_counts"]["failed"] == 9
+    assert st["learning"]["no_alpha"] is True and st["learning"]["evidence_counts"]["failed"] == 13
     status = F.fmt_status(st, "UTC")
     assert NO_ALPHA_TEXT in status and "거래 시작 조건" in status
     daily = F.fmt_daily(app.pnl_report("today"), app.pnl_report("week"), st, "UTC")

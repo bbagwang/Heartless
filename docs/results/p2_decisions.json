@@ -1,0 +1,823 @@
+{
+ "purpose": "ROADMAP P2: pre-registered TRAIN gate (family researchers) and one-shot VALID gate (gatekeeper) of the P2 candidates",
+ "pre_registration": "docs/ROADMAP.md section 6 (2026-10-10, commit e2fb1fe): P2 protocol; VALID bar lowered to t_day >= 1.0 before any P2 result",
+ "train_window": "2022-01-13 00:00 .. 2024-12-31 23:59 UTC (lab --start 2022-01-13 --end 2025-01-01)",
+ "valid_window": "2026-01-13 00:00 .. 2026-09-30 23:59 UTC (lab --start 2026-01-13 --end 2026-10-01)",
+ "universe": "extended: 20 symbols (core 12 + DOT ATOM NEAR FIL ETC TRX UNI AAVE), SUI from 2023-05-03",
+ "params": "shipped defaults (data/longhist has no stored champion; params_version v0-default+lab) plus the listed overrides",
+ "train_gate": {
+  "t_day_ge": "max(3, sqrt(2 ln N_family))",
+  "avg_r_ge": 0.05,
+  "years_positive_ge": 2,
+  "stress_avg_r_gt": 0.0
+ },
+ "valid_gate": {
+  "avg_r_gt": 0.0,
+  "t_day_ge": 1.0
+ },
+ "expected_r_rule": "a passed alpha's kill-switch expectation (evidence.json avg_r) = min(TRAIN avg_r, VALID avg_r)",
+ "numbers": "pooled over all trades as rounded in the result files (avg_r 4 decimals, t_day 2 decimals); years by entry time",
+ "valid_runs": "2026-10-11 19:59..20:10 UTC, commit 81de74a (git_dirty false), --workers 3, one run per candidate; the scratch --trades-out lists are output only",
+ "audit": {
+  "verdict": "no look-ahead or protocol defect found; no candidate disqualified before VALID",
+  "inventory": "every docs/results/p2_<family>_*.json lab result matches a ledger line (config hash, utc, n, avg_r, t_day); screen files match the ledger screen lines; ledger code hashes equal the committed alpha files; no VALID or 2025 evaluation before the gate (no seal ledger)",
+  "causality": "closed bars only via the cursor (1h / 4h / 1d decision on the minute the bar closed, the daily frame cursor never reaches an unclosed day), ctx.market = last hour close at or before the decision, ctx.extras = 5m rows usable from bucket start + 5 min; tests/test_p2_gate.py sweeps decisions cut exactly at the decision bar for all four (a mutation that lets the daily cursor see the open day fails it for the three long-frame alphas)",
+  "shared_approximation": "ctx.funding_rate in backtests blends the last settled rate linearly towards the next charged rate (backtester._upcoming_funding_rate): at the mid-window 4h decisions (03:59, 11:59, 19:59) the fund_max filter sees half of a rate settled 4h later; it flips the filter on 1,671 of 127,226 side-decisions in TRAIN (1.3%); ts_trend decides 1 min before settlement where live and backtest agree",
+  "selection_notes": [
+   "ts_trend: the renewal fix (hold - 1 min) came after the first lab run, recorded as a new trial",
+   "positioning_flow: direction reversed from the rejected H1, four choices after one screen each",
+   "vol_breakout: the candidate switches the family's compression premise off (comp_q = 1.0); ts_trend + vol_breakout pooled N = 50 keeps the bar at 3.00",
+   "discovery_daily: thresholds mined on 2022-2023 (in-sample part of TRAIN), bar 4.81"
+  ],
+  "no_symbol_or_year_logic": true
+ },
+ "families": {
+  "ts_trend": {
+   "n_family": 27,
+   "threshold": 3.0,
+   "configs": 27,
+   "ledger_lines": 34,
+   "tools": {
+    "screen": 25,
+    "lab": 9
+   },
+   "final_candidates": [
+    "ts_trend_tsmom"
+   ]
+  },
+  "xs_rank": {
+   "n_family": 20,
+   "threshold": 3.0,
+   "configs": 20,
+   "ledger_lines": 22,
+   "tools": {
+    "screen": 18,
+    "lab": 4
+   },
+   "final_candidates": [],
+   "best_lab": {
+    "file": "docs/results/p2_xs_rank_mom24_vol_h72.json",
+    "n": 2213,
+    "avg_r": 0.0027,
+    "t_day": 0.25,
+    "stress_avg_r": -0.0007,
+    "years_positive": 1
+   }
+  },
+  "funding_carry": {
+   "n_family": 7,
+   "threshold": 3.0,
+   "configs": 7,
+   "ledger_lines": 8,
+   "tools": {
+    "screen": 6,
+    "lab": 2
+   },
+   "final_candidates": [],
+   "best_lab": {
+    "file": "docs/results/p2_funding_carry_xsdev.json",
+    "n": 563,
+    "avg_r": 0.0375,
+    "t_day": 1.36,
+    "stress_avg_r": 0.032,
+    "years_positive": 2
+   }
+  },
+  "positioning_flow": {
+   "n_family": 21,
+   "threshold": 3.0,
+   "configs": 21,
+   "ledger_lines": 26,
+   "tools": {
+    "screen": 21,
+    "lab": 5
+   },
+   "final_candidates": [
+    "positioning_flow_oimom"
+   ]
+  },
+  "vol_breakout": {
+   "n_family": 23,
+   "threshold": 3.0,
+   "configs": 23,
+   "ledger_lines": 29,
+   "tools": {
+    "screen": 24,
+    "lab": 5
+   },
+   "final_candidates": [
+    "vol_breakout_dbox"
+   ]
+  },
+  "discovery_daily": {
+   "n_family": 105068,
+   "threshold": 4.809,
+   "configs": 8,
+   "ledger_lines": 14,
+   "tools": {
+    "discover": 1,
+    "screen": 2,
+    "lab": 11
+   },
+   "final_candidates": [
+    "discovery_daily_capdisp"
+   ]
+  }
+ },
+ "candidates": {
+  "ts_trend_tsmom": {
+   "family": "ts_trend",
+   "valid_info": {
+    "train_exit_days": 624,
+    "valid_exit_days": 155,
+    "valid_t_day_expected_if_train_t_held": 1.51,
+    "p_valid_t_day_ge_1_if_train_t_held": 0.7,
+    "note": "information only: TRAIN t scaled by sqrt(VALID / TRAIN exit days); optimistic, the TRAIN t is the best of N_family configurations"
+   },
+   "config": {
+    "overrides": [],
+    "config_hash": "ce111fcb3c7bbc7e"
+   },
+   "train": {
+    "file": "docs/results/p2_ts_trend_tsmom28_h10_renew.json",
+    "config_hash": "ce111fcb3c7bbc7e",
+    "ledger_utc": "2026-10-11T13:21:41Z",
+    "window": "2022-01-13 00:00 .. 2024-12-31 23:59",
+    "n": 1335,
+    "avg_r": 0.0912,
+    "t_day": 3.03,
+    "profit_factor": 1.478,
+    "win_rate": 54.1,
+    "boundary": 0,
+    "months_positive": 20,
+    "months": 35,
+    "symbols_positive": 19,
+    "symbols": 20,
+    "by_side": {
+     "LONG": {
+      "n": 748,
+      "avg_r": 0.135,
+      "t_day": 2.84,
+      "profit_factor": 1.643
+     },
+     "SHORT": {
+      "n": 587,
+      "avg_r": 0.0353,
+      "t_day": 1.07,
+      "profit_factor": 1.207
+     }
+    },
+    "git_commit": "852ba08413a68b1c0df4f96d52effa5deb4a782b",
+    "git_dirty": false,
+    "overrides": [],
+    "years": {
+     "2022": {
+      "n": 369,
+      "avg_r": 0.0205,
+      "t_day": 0.35
+     },
+     "2023": {
+      "n": 470,
+      "avg_r": 0.1285,
+      "t_day": 2.67
+     },
+     "2024": {
+      "n": 496,
+      "avg_r": 0.1083,
+      "t_day": 2.18
+     }
+    },
+    "years_positive": 3,
+    "stress_file": "docs/results/p2_ts_trend_tsmom28_h10_renew_stress.json",
+    "stress_avg_r": 0.0861,
+    "stress_t_day": 2.88,
+    "by_year_side": {
+     "2022 LONG": {
+      "n": 127,
+      "avg_r": -0.082
+     },
+     "2022 SHORT": {
+      "n": 242,
+      "avg_r": 0.0743
+     },
+     "2023 LONG": {
+      "n": 290,
+      "avg_r": 0.2267
+     },
+     "2023 SHORT": {
+      "n": 180,
+      "avg_r": -0.0297
+     },
+     "2024 LONG": {
+      "n": 331,
+      "avg_r": 0.1379
+     },
+     "2024 SHORT": {
+      "n": 165,
+      "avg_r": 0.049
+     }
+    }
+   },
+   "valid": {
+    "file": "docs/results/p2_valid_ts_trend_tsmom.json",
+    "config_hash": "ce111fcb3c7bbc7e",
+    "ledger_utc": "2026-10-11T20:02:24Z",
+    "window": "2026-01-13 00:00 .. 2026-09-30 23:59",
+    "n": 327,
+    "avg_r": -0.0141,
+    "t_day": -0.26,
+    "profit_factor": 0.944,
+    "win_rate": 48.9,
+    "boundary": 0,
+    "months_positive": 3,
+    "months": 9,
+    "symbols_positive": 11,
+    "symbols": 20,
+    "by_side": {
+     "LONG": {
+      "n": 160,
+      "avg_r": -0.0761,
+      "t_day": -0.89,
+      "profit_factor": 0.774
+     },
+     "SHORT": {
+      "n": 167,
+      "avg_r": 0.0452,
+      "t_day": 0.69,
+      "profit_factor": 1.228
+     }
+    },
+    "git_commit": "81de74a0e872bde94b5cd0edf77abe2b476b68d1",
+    "git_dirty": false,
+    "overrides": [],
+    "by_month": {
+     "2026-01": {
+      "n": 17,
+      "avg_r": -0.822
+     },
+     "2026-02": {
+      "n": 53,
+      "avg_r": 0.2535
+     },
+     "2026-03": {
+      "n": 27,
+      "avg_r": -0.1439
+     },
+     "2026-04": {
+      "n": 21,
+      "avg_r": -0.2804
+     },
+     "2026-05": {
+      "n": 32,
+      "avg_r": -0.2171
+     },
+     "2026-06": {
+      "n": 43,
+      "avg_r": 0.2171
+     },
+     "2026-07": {
+      "n": 39,
+      "avg_r": -0.1107
+     },
+     "2026-08": {
+      "n": 38,
+      "avg_r": -0.1839
+     },
+     "2026-09": {
+      "n": 57,
+      "avg_r": 0.2564
+     }
+    }
+   },
+   "train_checks": {
+    "t_day >= 3.0": true,
+    "avg_r >= 0.05": true,
+    ">= 2 of 3 years avg_r > 0": true,
+    "stress avg_r > 0": true
+   },
+   "valid_checks": {
+    "avg_r > 0": false,
+    "t_day >= 1.0": false
+   },
+   "checks": {
+    "train": true,
+    "valid": false
+   },
+   "verdict": "failed",
+   "expected_r": -0.0141,
+   "decision": "keep disabled"
+  },
+  "positioning_flow_oimom": {
+   "family": "positioning_flow",
+   "valid_info": {
+    "train_exit_days": 438,
+    "valid_exit_days": 63,
+    "valid_t_day_expected_if_train_t_held": 1.25,
+    "p_valid_t_day_ge_1_if_train_t_held": 0.6,
+    "note": "information only: TRAIN t scaled by sqrt(VALID / TRAIN exit days); optimistic, the TRAIN t is the best of N_family configurations"
+   },
+   "config": {
+    "overrides": [],
+    "config_hash": "1c3d8915ee9fa943"
+   },
+   "train": {
+    "file": "docs/results/p2_positioning_flow_oimom48_retail.json",
+    "config_hash": "1c3d8915ee9fa943",
+    "ledger_utc": "2026-10-11T15:58:11Z",
+    "window": "2022-01-13 00:00 .. 2024-12-31 23:59",
+    "n": 624,
+    "avg_r": 0.0855,
+    "t_day": 3.29,
+    "profit_factor": 1.567,
+    "win_rate": 49.4,
+    "boundary": 0,
+    "months_positive": 23,
+    "months": 35,
+    "symbols_positive": 18,
+    "symbols": 20,
+    "by_side": {
+     "LONG": {
+      "n": 571,
+      "avg_r": 0.0843,
+      "t_day": 3.06,
+      "profit_factor": 1.548
+     },
+     "SHORT": {
+      "n": 53,
+      "avg_r": 0.0984,
+      "t_day": 1.23,
+      "profit_factor": 1.792
+     }
+    },
+    "git_commit": "bab485d979a7389ada6bf2f6fe563a39f65e4cdd",
+    "git_dirty": true,
+    "overrides": [],
+    "years": {
+     "2022": {
+      "n": 211,
+      "avg_r": 0.0853,
+      "t_day": 1.8
+     },
+     "2023": {
+      "n": 236,
+      "avg_r": 0.0575,
+      "t_day": 1.35
+     },
+     "2024": {
+      "n": 177,
+      "avg_r": 0.1232,
+      "t_day": 2.72
+     }
+    },
+    "years_positive": 3,
+    "stress_file": "docs/results/p2_positioning_flow_oimom48_retail_stress.json",
+    "stress_avg_r": 0.0792,
+    "stress_t_day": 3.06,
+    "by_year_side": {
+     "2022 LONG": {
+      "n": 195,
+      "avg_r": 0.0818
+     },
+     "2022 SHORT": {
+      "n": 16,
+      "avg_r": 0.1274
+     },
+     "2023 LONG": {
+      "n": 213,
+      "avg_r": 0.0532
+     },
+     "2023 SHORT": {
+      "n": 23,
+      "avg_r": 0.0967
+     },
+     "2024 LONG": {
+      "n": 163,
+      "avg_r": 0.128
+     },
+     "2024 SHORT": {
+      "n": 14,
+      "avg_r": 0.068
+     }
+    }
+   },
+   "valid": {
+    "file": "docs/results/p2_valid_positioning_flow_oimom.json",
+    "config_hash": "1c3d8915ee9fa943",
+    "ledger_utc": "2026-10-11T20:05:01Z",
+    "window": "2026-01-13 00:00 .. 2026-09-30 23:59",
+    "n": 82,
+    "avg_r": -0.0054,
+    "t_day": -0.07,
+    "profit_factor": 1.054,
+    "win_rate": 39.0,
+    "boundary": 0,
+    "months_positive": 2,
+    "months": 8,
+    "symbols_positive": 6,
+    "symbols": 14,
+    "by_side": {
+     "LONG": {
+      "n": 63,
+      "avg_r": -0.023,
+      "t_day": -0.22,
+      "profit_factor": 0.984
+     },
+     "SHORT": {
+      "n": 19,
+      "avg_r": 0.0528,
+      "t_day": 0.51,
+      "profit_factor": 1.605
+     }
+    },
+    "git_commit": "81de74a0e872bde94b5cd0edf77abe2b476b68d1",
+    "git_dirty": false,
+    "overrides": [],
+    "by_month": {
+     "2026-01": {
+      "n": 6,
+      "avg_r": -0.0597
+     },
+     "2026-02": {
+      "n": 13,
+      "avg_r": -0.1406
+     },
+     "2026-03": {
+      "n": 6,
+      "avg_r": -0.0989
+     },
+     "2026-04": {
+      "n": 9,
+      "avg_r": -0.0396
+     },
+     "2026-05": {
+      "n": 9,
+      "avg_r": 0.0741
+     },
+     "2026-06": {
+      "n": 7,
+      "avg_r": -0.0327
+     },
+     "2026-07": {
+      "n": 2,
+      "avg_r": 0.0441
+     },
+     "2026-08": {
+      "n": 10,
+      "avg_r": 0.2295
+     },
+     "2026-09": {
+      "n": 20,
+      "avg_r": -0.0065
+     }
+    }
+   },
+   "train_checks": {
+    "t_day >= 3.0": true,
+    "avg_r >= 0.05": true,
+    ">= 2 of 3 years avg_r > 0": true,
+    "stress avg_r > 0": true
+   },
+   "valid_checks": {
+    "avg_r > 0": false,
+    "t_day >= 1.0": false
+   },
+   "checks": {
+    "train": true,
+    "valid": false
+   },
+   "verdict": "failed",
+   "expected_r": -0.0054,
+   "decision": "keep disabled"
+  },
+  "vol_breakout_dbox": {
+   "family": "vol_breakout",
+   "valid_info": {
+    "train_exit_days": 439,
+    "valid_exit_days": 113,
+    "valid_t_day_expected_if_train_t_held": 1.63,
+    "p_valid_t_day_ge_1_if_train_t_held": 0.74,
+    "note": "information only: TRAIN t scaled by sqrt(VALID / TRAIN exit days); optimistic, the TRAIN t is the best of N_family configurations"
+   },
+   "config": {
+    "overrides": [
+     "vol_breakout_dbox.comp_q=1.0"
+    ],
+    "config_hash": "a8356702eb374c77"
+   },
+   "train": {
+    "file": "docs/results/p2_vol_breakout_nocomp.json",
+    "config_hash": "a8356702eb374c77",
+    "ledger_utc": "2026-10-11T15:59:14Z",
+    "window": "2022-01-13 00:00 .. 2024-12-31 23:59",
+    "n": 1148,
+    "avg_r": 0.1282,
+    "t_day": 3.21,
+    "profit_factor": 1.62,
+    "win_rate": 51.6,
+    "boundary": 0,
+    "months_positive": 22,
+    "months": 33,
+    "symbols_positive": 18,
+    "symbols": 20,
+    "by_side": {
+     "LONG": {
+      "n": 629,
+      "avg_r": 0.1367,
+      "t_day": 2.5,
+      "profit_factor": 1.541
+     },
+     "SHORT": {
+      "n": 519,
+      "avg_r": 0.1178,
+      "t_day": 2.01,
+      "profit_factor": 1.763
+     }
+    },
+    "git_commit": "bab485d979a7389ada6bf2f6fe563a39f65e4cdd",
+    "git_dirty": true,
+    "overrides": [
+     "vol_breakout_dbox.comp_q=1.0"
+    ],
+    "years": {
+     "2022": {
+      "n": 312,
+      "avg_r": 0.0644,
+      "t_day": 0.77
+     },
+     "2023": {
+      "n": 433,
+      "avg_r": 0.1734,
+      "t_day": 2.53
+     },
+     "2024": {
+      "n": 403,
+      "avg_r": 0.129,
+      "t_day": 2.24
+     }
+    },
+    "years_positive": 3,
+    "stress_file": "docs/results/p2_vol_breakout_nocomp_stress.json",
+    "stress_avg_r": 0.1196,
+    "stress_t_day": 3.02,
+    "by_year_side": {
+     "2022 LONG": {
+      "n": 107,
+      "avg_r": -0.0716
+     },
+     "2022 SHORT": {
+      "n": 205,
+      "avg_r": 0.1354
+     },
+     "2023 LONG": {
+      "n": 275,
+      "avg_r": 0.1936
+     },
+     "2023 SHORT": {
+      "n": 158,
+      "avg_r": 0.1382
+     },
+     "2024 LONG": {
+      "n": 247,
+      "avg_r": 0.1637
+     },
+     "2024 SHORT": {
+      "n": 156,
+      "avg_r": 0.0741
+     }
+    }
+   },
+   "valid": {
+    "file": "docs/results/p2_valid_vol_breakout_dbox.json",
+    "config_hash": "a8356702eb374c77",
+    "ledger_utc": "2026-10-11T20:08:00Z",
+    "window": "2026-01-13 00:00 .. 2026-09-30 23:59",
+    "n": 311,
+    "avg_r": 0.1013,
+    "t_day": 0.82,
+    "profit_factor": 1.355,
+    "win_rate": 40.5,
+    "boundary": 0,
+    "months_positive": 3,
+    "months": 9,
+    "symbols_positive": 14,
+    "symbols": 20,
+    "by_side": {
+     "LONG": {
+      "n": 153,
+      "avg_r": 0.0689,
+      "t_day": 0.36,
+      "profit_factor": 1.167
+     },
+     "SHORT": {
+      "n": 158,
+      "avg_r": 0.1327,
+      "t_day": 0.85,
+      "profit_factor": 1.648
+     }
+    },
+    "git_commit": "81de74a0e872bde94b5cd0edf77abe2b476b68d1",
+    "git_dirty": false,
+    "overrides": [
+     "vol_breakout_dbox.comp_q=1.0"
+    ],
+    "by_month": {
+     "2026-01": {
+      "n": 28,
+      "avg_r": -0.404
+     },
+     "2026-02": {
+      "n": 32,
+      "avg_r": 0.6473
+     },
+     "2026-03": {
+      "n": 32,
+      "avg_r": -0.2577
+     },
+     "2026-04": {
+      "n": 31,
+      "avg_r": -0.2399
+     },
+     "2026-05": {
+      "n": 54,
+      "avg_r": -0.0747
+     },
+     "2026-06": {
+      "n": 31,
+      "avg_r": 0.6804
+     },
+     "2026-07": {
+      "n": 22,
+      "avg_r": -0.1488
+     },
+     "2026-08": {
+      "n": 40,
+      "avg_r": 0.719
+     },
+     "2026-09": {
+      "n": 41,
+      "avg_r": -0.1159
+     }
+    }
+   },
+   "train_checks": {
+    "t_day >= 3.0": true,
+    "avg_r >= 0.05": true,
+    ">= 2 of 3 years avg_r > 0": true,
+    "stress avg_r > 0": true
+   },
+   "valid_checks": {
+    "avg_r > 0": true,
+    "t_day >= 1.0": false
+   },
+   "checks": {
+    "train": true,
+    "valid": false
+   },
+   "verdict": "failed",
+   "expected_r": 0.1013,
+   "decision": "keep disabled"
+  },
+  "discovery_daily_capdisp": {
+   "family": "discovery_daily",
+   "valid_info": {
+    "train_exit_days": 116,
+    "valid_exit_days": 13,
+    "valid_t_day_expected_if_train_t_held": 1.64,
+    "p_valid_t_day_ge_1_if_train_t_held": 0.74,
+    "note": "information only: TRAIN t scaled by sqrt(VALID / TRAIN exit days); optimistic, the TRAIN t is the best of N_family configurations"
+   },
+   "config": {
+    "overrides": [],
+    "config_hash": "2a59beb9ef0af63a"
+   },
+   "train": {
+    "file": "docs/results/p2_discovery_daily_capdisp_alpha.json",
+    "config_hash": "2a59beb9ef0af63a",
+    "ledger_utc": "2026-10-11T18:34:43Z",
+    "window": "2022-01-13 00:00 .. 2024-12-31 23:59",
+    "n": 327,
+    "avg_r": 0.2245,
+    "t_day": 4.89,
+    "profit_factor": 2.674,
+    "win_rate": 72.2,
+    "boundary": 0,
+    "months_positive": 15,
+    "months": 19,
+    "symbols_positive": 18,
+    "symbols": 19,
+    "by_side": {
+     "LONG": {
+      "n": 327,
+      "avg_r": 0.2245,
+      "t_day": 4.89,
+      "profit_factor": 2.674
+     }
+    },
+    "git_commit": "31919285529ce4e40fa044ffaa25238e4bf8f3fe",
+    "git_dirty": true,
+    "overrides": [],
+    "years": {
+     "2022": {
+      "n": 84,
+      "avg_r": 0.2939,
+      "t_day": 3.86
+     },
+     "2023": {
+      "n": 76,
+      "avg_r": 0.2143,
+      "t_day": 4.42
+     },
+     "2024": {
+      "n": 167,
+      "avg_r": 0.1943,
+      "t_day": 2.5
+     }
+    },
+    "years_positive": 3,
+    "stress_file": "docs/results/p2_discovery_daily_capdisp_alpha_stress.json",
+    "stress_avg_r": 0.2147,
+    "stress_t_day": 4.7,
+    "by_year_side": {
+     "2022 LONG": {
+      "n": 84,
+      "avg_r": 0.2939
+     },
+     "2023 LONG": {
+      "n": 76,
+      "avg_r": 0.2143
+     },
+     "2024 LONG": {
+      "n": 167,
+      "avg_r": 0.1943
+     }
+    }
+   },
+   "valid": {
+    "file": "docs/results/p2_valid_discovery_daily_capdisp.json",
+    "config_hash": "2a59beb9ef0af63a",
+    "ledger_utc": "2026-10-11T20:10:40Z",
+    "window": "2026-01-13 00:00 .. 2026-09-30 23:59",
+    "n": 69,
+    "avg_r": -0.0371,
+    "t_day": -0.12,
+    "profit_factor": 0.601,
+    "win_rate": 44.9,
+    "boundary": 0,
+    "months_positive": 3,
+    "months": 4,
+    "symbols_positive": 5,
+    "symbols": 15,
+    "by_side": {
+     "LONG": {
+      "n": 69,
+      "avg_r": -0.0371,
+      "t_day": -0.12,
+      "profit_factor": 0.601
+     }
+    },
+    "git_commit": "81de74a0e872bde94b5cd0edf77abe2b476b68d1",
+    "git_dirty": false,
+    "overrides": [],
+    "by_month": {
+     "2026-02": {
+      "n": 35,
+      "avg_r": 0.0033
+     },
+     "2026-04": {
+      "n": 2,
+      "avg_r": -0.1792
+     },
+     "2026-06": {
+      "n": 14,
+      "avg_r": -0.4635
+     },
+     "2026-08": {
+      "n": 8,
+      "avg_r": 0.1258
+     },
+     "2026-09": {
+      "n": 10,
+      "avg_r": 0.3165
+     }
+    }
+   },
+   "train_checks": {
+    "t_day >= 4.809": true,
+    "avg_r >= 0.05": true,
+    ">= 2 of 3 years avg_r > 0": true,
+    "stress avg_r > 0": true
+   },
+   "valid_checks": {
+    "avg_r > 0": false,
+    "t_day >= 1.0": false
+   },
+   "checks": {
+    "train": true,
+    "valid": false
+   },
+   "verdict": "failed",
+   "expected_r": -0.0371,
+   "decision": "keep disabled"
+  }
+ }
+}

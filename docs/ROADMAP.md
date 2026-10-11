@@ -171,7 +171,7 @@ P1 이후에 진행합니다.
 Wave A  [P0 데이터·랩·봉인]  ‖  [P0b 엔진 정합성]                       — 완료
 Wave B  [P1 OOS 판정 (한 번)]  ‖  [P5 리플레이 soak 하네스]              — 완료
 Wave C  [P4 자기 개선 견고화 + 정지 해소]  ‖  [P2a 연구 인프라]           — 완료
-Wave D  [P2 연구 2차: 가설 계열별 탐색(TRAIN) → VALID 관문 → 알파 구현]
+Wave D  [P2 연구 2차: 가설 계열별 탐색(TRAIN) → VALID 관문 → 알파 구현]   — 완료 (VALID 통과 0)
 Wave D2 [P3 포트폴리오 구성 (P2 알파 기준)] → [SEALED-2025 최종 시험 (한 번)]
 Wave E  [P6 UX·문서] → 전체 검토
 ```
@@ -197,7 +197,7 @@ Wave E  [P6 UX·문서] → 전체 검토
 | P0b | 완료 (b3452ba, a294e53) | 레짐 전환 청산 신호 옵트인, 재호가 시 수량 재계산(2026 TRAIN 예산 초과 55건 → 0건, 거래 목록 동일), `entry_ttl_bars`. 켜진 3개 알파의 2026 TRAIN·VALID 거래 목록 동일 |
 | P1 | 완료 (0d238e7) | [`docs/OOS_2022_2024.md`](OOS_2022_2024.md). 9개 알파 모두 사전 등록 기준 미달(켜져 있던 3개: -0.042R / -0.129R / -0.161R, t_day -1.07 / -3.92 / -3.81). 세 알파를 끄고 출하 기본 활성 0개. 이전 구성 공동 포트폴리오 2022 -4.7%, 2023 -13.6%, 2024 -2.5%(매년 -15% 정지). 판정 표 `docs/results/p1_decisions.json` |
 | P2a | 완료 (27c126c, 0e6c9c6, 796357c, 4b6c93b; 병합 26ecb3c) | [`docs/RESEARCH_TOOLS.md`](RESEARCH_TOOLS.md). 지표·백테스터 가속(2026 TRAIN 674건 바이트 단위 동일, lab 1.58배, 메모리 667 → 456MB), 시장 컨텍스트(오프라인 `market_context` = 온라인 추적기, 2022 ~ 2026 20종목 빌드 175초), (종목 × 연도) 다년·단면 발굴(`--grid 1h,1d`, `--templates`, `--context`), P2 시도 원장(`--tag`, `heartless trials`). Wave C 통합에서 운영 앱에 연결: `CONTEXT_UNIVERSE` 20종목을 추적(거래하지 않는 종목은 1분봉만)하고 정시마다 스냅샷을 만든 뒤 모든 엔진이 결정. 7일 리플레이(2026-06-01 ~ 07, 12종목) 위반 0건, 정시 스냅샷 169/169개, 오프라인 빌드와 169개 모두 비트 단위 동일, 컨텍스트 비용 실행 시간 +3%·RSS +15MB([`docs/REPLAY.md`](REPLAY.md)) |
-| P2 | 예정 | `docs/RESEARCH.md` 2차 절 |
+| P2 | 완료 (계열 연구 2abcfd1 ~ 81de74a; VALID 관문 2026-10-11) | [`docs/RESEARCH_P2.md`](RESEARCH_P2.md). 6개 계열을 TRAIN(2022-01-13 ~ 2024-12-31, 20종목)에서 연구(N: ts_trend 27, xs_rank 20, funding_carry 7, positioning_flow 21, vol_breakout 23, discovery_daily 105,068). TRAIN 관문 통과 후보 4개 (`ts_trend_tsmom` t_day 3.03, `positioning_flow_oimom` 3.29, `vol_breakout_dbox`(`comp_q=1.0`) 3.21, `discovery_daily_capdisp` 3.03 기준 4.81 대비 4.89), xs_rank·funding_carry는 후보 없음. 감사에서 미래 참조·프로토콜 결함 없음. VALID(2026-01-13 ~ 09-30) 한 번씩: -0.014R / t_day -0.26, -0.005R / -0.07, +0.101R / 0.82, -0.037R / -0.12로 **4개 모두 VALID 관문 미달**. 증거 기록에 `failed`로 추가, 출하 기본 활성 알파는 계속 0개. 통과 알파가 없어 앙상블·공동 포트폴리오는 돌리지 않음. 판정 표 `docs/results/p2_decisions.json`. 2025 봉인은 통과 알파가 생길 때까지 유지 권고 |
 | P3 | 예정 | — |
 | P4 | 완료 (b3f3682, a46bc37, f43aced; 리뷰 0a48f3a) | [`docs/SELF_IMPROVEMENT.md`](SELF_IMPROVEMENT.md). 승격·퇴출을 청산일 군집 t로 판정. 챔피언 거래가 부족하면 절대 기준 경로(30건·14일·평균R > 0·t_day ≥ 1.5·PF ≥ 1.15·낙폭 ≤ 10R). OOS 탈락 알파를 켜는 챌린저는 두 경로 모두 30일·t ≥ 2.0. 알파별 킬 스위치(그 알파 R 표준편차 단위 CUSUM -8σ, 최근 30건 합 < -20R), 알파별 증거 기록, 리서치 창 120일·보존 180일, 실행 품질 감시. 45일 리플레이(2026-06-01 ~ 07-15) 위반 0건, 챔피언 거래 0건, 챌린저 판정 196회 모두 절대 경로·승격 0(리뷰 전 킬 스위치 설정). 리서치 1회 약 2.4시간·1.85GB(4시간 주기 유지, P2a 가속 뒤 재측정 필요) |
 | P5 | 완료 (2532079 ~ f55d56a) | [`docs/REPLAY.md`](REPLAY.md). 가상 시계로 실제 앱 전체를 재생. 60일 soak(2026-07 ~ 08, 12종목) 불변식 위반 0건, 126배속. 재생 중 운영 버그 6건, 리뷰 9건 수정 |
