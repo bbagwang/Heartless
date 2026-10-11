@@ -11,18 +11,36 @@ HEARTLESS_DATA_DIR=<저장소 사본 폴더> ARCHIVE_BACKFILL=false \
 - `--end`가 날짜만이면 그 날짜는 포함하지 않습니다(랩과 같은 규칙). 봉인 구간(2025)에 닿는 기간은 시드 이력까지 포함해 거부합니다. 원본 저장소는 이 검사를 통과한 구간(시드 시작 ~ `--end`) 밖의 데이터를 내주지 않습니다. 봇이 `HISTORY_DAYS`만큼 스스로 받아 오는 이력과 다음 정산을 보는 펀딩 추정치도 이 구간 안에서만 나옵니다.
 - 리플레이용 봇은 새 데이터 폴더(`--work-dir`, 기본은 임시 폴더)에서 시작합니다. 시작 전 `--seed-days`(기본 60일)만큼의 1분봉·펀딩을 원본에서 복사해, 데이터를 모아 온 봇과 같은 상태로 만듭니다. 원본 DB는 읽기 전용으로만 엽니다. 원본이 들어 있는 폴더는 `--work-dir`로 쓸 수 없습니다(`--overwrite`가 폴더를 지웁니다).
 - 결과: 요약 JSON(`--out`), 사람이 읽는 보고서(같은 이름의 `.txt`), 텔레그램 메시지 전체(`--messages-out`), 거래 목록(`--trades-out`). 위반이 하나라도 있으면 종료 코드 1입니다.
-  - 요약의 `context`: 만든 스냅샷 수와 기대 정시 수, 빠진 정시, 유예(10초)를 넘겨 발행한 수, 스냅샷별 종목 수, 컨텍스트 전용 kline 수, 정시별 다이제스트(`runner.context_digest`, 같은 데이터의 오프라인 빌드와 비트 단위로 비교할 때 씁니다).
-  - 요약의 `learning`에는 챌린저 판정 기록(`challenger_decisions`), 킬 스위치 작동(`kill_switch_trips`), 끝날 때 챔피언의 켜진 알파(`champion_enabled`)도 있습니다(P4).
+  - 요약의 주요 필드는 아래 "요약 필드" 절에 있습니다(`context`, `learning.challenger_decisions`, `learning.kill_switch_trips`, `learning.champion_enabled` 등).
 - 매 가상 1일마다 진행 상황 한 줄(`[replay] ...`)을 출력합니다.
 
 ## 동작 방식
 
-- **가상 시간:** 앱의 asyncio 코루틴은 그대로 돌고, 이벤트 루프만 바뀝니다(`heartless/replay/clock.py`). 할 일이 없으면 다음 타이머 시각으로 바로 건너뜁니다. 스레드·프로세스 작업(봉별 피처 재계산, 리서치·발굴 워커)이 도는 동안에는 가상 시간이 멈춥니다. 그래서 결과가 기계 속도와 무관하고, 같은 입력이면 같은 결과가 나옵니다(밴딧 난수도 `seed`로 고정). `timeutil.now_ms()`는 리플레이 중에만 가상 시계를 따릅니다. 운영에서는 아무것도 바뀌지 않습니다.
-- **리플레이 시장:** 공개 REST(klines, exchangeInfo, 24h 티커, 펀딩, 미결제약정·롱숏 지표)와 웹소켓(kline, bookTicker, markPrice)을 저장 이력으로 대신합니다(`market.py`). 1분봉마다 분 안의 네 시점(시가, 첫 극값, 둘째 극값, 종가; 양봉 O-L-H-C, 음봉 O-H-L-C)에 호가·마크가를 보내고, 종가 시각에 마감 kline을 보냅니다. 펀딩은 8시간마다 정산되고, 지표는 5분 버킷이 끝난 시각부터 보입니다. 그 시각에 존재하는 데이터만 응답합니다.
+- **가상 시간:** 앱의 asyncio 코루틴은 그대로 돌고, 이벤트 루프만 바뀝니다(`heartless/replay/clock.py`). 할 일이 없으면 다음 타이머 시각으로 바로 건너뜁니다. 스레드·프로세스 작업(봉별 피처 재계산, 리서치·발굴 워커)이 도는 동안에는 가상 시간이 멈춥니다. 그래서 결과가 기계 속도와 무관하고, 같은 입력이면 같은 결과가 나옵니다(밴딧 난수도 `seed`로 고정). 챌린저의 밴딧 난수는 `seed`, 슬롯 이름, 챌린저의 가상 시작 시각으로 정합니다. 리서치가 리플레이 도중 넣은 챌린저도 실행마다 같은 거래를 냅니다(`tests/test_c2b_replay.py`: 같은 3일 리플레이 두 번, 챔피언·챌린저 거래 동일). `timeutil.now_ms()`는 리플레이 중에만 가상 시계를 따릅니다. 운영에서는 아무것도 바뀌지 않습니다.
+- **리플레이 시장:** 공개 REST(klines, exchangeInfo, 24h 티커, 펀딩, 미결제약정·롱숏 지표)와 웹소켓(kline, bookTicker, markPrice)을 저장 이력으로 대신합니다(`market.py`). 1분봉마다 분 안의 네 시점(시가, 첫 극값, 둘째 극값, 종가; 양봉 O-L-H-C, 음봉 O-H-L-C)에 호가·마크가를 보내고, 종가 시각에 마감 kline을 보냅니다. 펀딩은 저장된 정산 시각대로 정산됩니다. 다음 정산 시각과 정산 주기는 저장된 정산 시각에서 종목별로 만들어(예: 2022년 11월 SOLUSDT의 2~4시간 주기) markPrice 스트림의 `T`, `premiumIndex`의 `nextFundingTime`, `fundingInfo`의 `fundingIntervalHours`(8시간이 아닌 종목만, Binance와 같은 방식)가 서로 일치합니다. 지표는 5분 버킷이 끝난 시각부터 보입니다. 그 시각에 존재하는 데이터만 응답합니다.
 - **텔레그램:** 실제 `TelegramBot`이 돌고 HTTP만 캡처 스텁으로 바뀝니다(`telegram.py`). 모든 메시지를 가상 시각·이벤트 종류와 함께 기록합니다. `--command '+2d=/pause'`처럼 정한 시각에 소유자 명령을 보낼 수 있습니다(`/close *`는 그 시각에 열린 포지션, `@confirm`은 마지막 확인 버튼).
 - **네트워크 차단:** 실제 HTTP·웹소켓·DNS 시도는 모두 예외를 내고 위반으로 기록됩니다(`netguard.py`).
 - **시장 컨텍스트 종목:** 원본에 있는 `CONTEXT_UNIVERSE` 종목도 함께 내줍니다(시드 이력 포함). exchangeInfo·1분봉·펀딩·지표 경로로는 보이지만 전체 24시간 티커에서는 빠지므로, 거래 유니버스는 `--symbols` 안에서만 고릅니다. 거래하지 않는 컨텍스트 종목에는 마감 kline만 보냅니다(호가·마크가 없음). 봇은 실제 운영과 같은 경로로 이 종목들을 백필·구독하고 정시마다 컨텍스트 스냅샷을 만듭니다.
 - **학습 주기:** 리서치가 도는 동안 가상 시간이 멈추므로 기본 주기를 줄였습니다(리서치 7일마다, 후보 3개·폴드 2개·21일 창, 발굴 14일마다). `--set KEY=VALUE`로 바꿀 수 있습니다.
+
+## 요약 필드
+
+`--out` JSON(과 `run_replay()`의 반환값)의 주요 필드입니다.
+
+| 필드 | 내용 |
+|---|---|
+| `passed`, `invariants` | 통과 여부, 검사별 실행·위반 횟수와 위반 목록(아래 불변식 표) |
+| `market` | 내보낸 1분봉 수, 분 수, 구멍, 스트림 메시지 수, 경로별 REST 호출 수(`rest_calls`, 예: `/fapi/v1/fundingRate`, `/fapi/v1/premiumIndex`, `/fapi/v1/fundingInfo`) |
+| `context` | 시장 컨텍스트: 유니버스, 컨텍스트 전용 종목, 원본이 내준 추가 종목(`served_extra`), 만든 스냅샷 수(`snapshots`)와 기대 정시 수(`hours_expected`), 빠진 정시(`missing`, `missing_first`), 유예(10초)를 넘겨 발행한 수(`late`), 오류 수, 스냅샷별 종목 수(`symbols_present` 최소·최대·평균), 컨텍스트 전용 kline 수와 구멍, 정시별 다이제스트(`digests`, `runner.context_digest`: 같은 데이터의 오프라인 빌드와 비트 단위 비교용) |
+| `learning.challenger_decisions` | 챌린저 판정 기록. 버전마다 첫 판정, 모든 승격·퇴출, 하루 한 번의 보류를 남깁니다. 항목: 시각, 슬롯, 버전, 출처, 경로(`absolute`/`relative`), **판정점**(`checkpoint`, 첫 판정점 전이면 null)과 다음 판정점, 결론(`verdict`)과 규칙(`rule`), 판정한 챌린저 기록(`challenger`: n·청산일·평균R·t_day·PF·낙폭), 현재 거래 수(`current_n`), 챔피언 거래 수, 일별 차이(`paired`), OOS 탈락 알파, 기준값(`bar`), 조건별 참/거짓(`checks`), 기준 챔피언 버전(`base`), 승격을 막은 충돌(`blockers`) |
+| `learning.challenger_evaluations` | 판정 호출 수(`calls`), 판정 수, 경로별·결론별 개수 |
+| `learning.kill_switch_trips` | 킬 스위치 작동 기록(엔진, 알파, 규칙, n, 누적R, CUSUM, 최근 창 합 등 판정 입력값) |
+| `learning.champion_enabled` | 끝날 때 챔피언의 켜진 알파 |
+| `learning.research_cycles`, `discovery_cycles` | 리서치·발굴 사이클(시각, 실행 시간, 창, 알파별 점수 / 탐색 규칙 수, 통과 수) |
+| `learning.challengers_installed`, `challengers_retired`, `promotions`, `challengers_final`, `champion_final` | 챌린저 설치·퇴출·승격 이력과 끝날 때의 상태 |
+| `engines`, `before_final_flatten` | 엔진별 거래·순익·평균R·PF·청산 사유·거부 사유, 최종 청산 전 상태 |
+| `telegram` | 메시지 수, 종류별 개수, 보낸 명령 |
+| `memory` | RSS 시작·끝·최고, 워밍업 이후 증가량과 기울기, 곡선 |
 
 ## 불변식 (`invariants.py`)
 
@@ -99,4 +117,4 @@ HEARTLESS_DATA_DIR=<저장소 사본 폴더> ARCHIVE_BACKFILL=false \
 
 - 추적기 워밍업(`MarketContextTracker.warm`)이 35일치 1분봉을 모두 넣은 뒤에야 시간별로 확정해서, 종목·시간마다 분 단위 집계(20종목 16,000개)가 한꺼번에 메모리에 있었습니다. 그 사이에 할당된 시간별 행 때문에 이 메모리가 프로세스에 계속 남아 RSS가 약 90MB 높았습니다(첫 실행 244 → 292MB). 하루 단위로 읽고 확정하도록 바꿨습니다. 스냅샷은 비트 단위로 같습니다.
 
-참고: 리서치가 넣은 챌린저의 밴딧 난수 시드에 버전 ID(벽시계 + 난수)가 들어가, 같은 입력이라도 실행마다 챌린저 거래가 달라집니다(세 실행에서 챌린저 파라미터는 같고 네 번째 거래부터 갈라짐). 시드 고정 문서 내용과 다르므로 다음 작업에서 슬롯 이름과 시작 시각으로 시드를 만들도록 고쳐야 합니다.
+참고: 리서치가 넣은 챌린저의 밴딧 난수 시드에 버전 ID(벽시계 + 난수)가 들어가, 같은 입력이라도 실행마다 챌린저 거래가 달라졌습니다(세 실행에서 챌린저 파라미터는 같고 네 번째 거래부터 갈라짐). Wave D(C2-B)에서 슬롯 이름과 가상 시작 시각으로 시드를 만들도록 고쳤습니다(운영 앱도 같은 방식). 같은 3일 리플레이를 두 번 돌리면 챌린저 거래까지 같습니다.
