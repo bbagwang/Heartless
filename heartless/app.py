@@ -68,6 +68,12 @@ class Heartless:
     # next local midnight (set in __init__); the class default keeps the day roll inert on instances built without
     # __init__ (tests drive _tick on such partial apps)
     _next_day_ms: int = 2**62
+    # long-lookback alphas (C2-A): last hourly history-depth check, its running task, the depth it last asked for, and
+    # the depth already attempted per symbol (a symbol listed more recently cannot get deeper; it is not retried)
+    _last_depth_check: int = 0
+    _depth_task: asyncio.Task | None = None
+    _depth_need: int = 0
+    _depth_tried: dict | None = None
 
     def __init__(self, settings: Settings):
         self.s = settings
@@ -382,8 +388,10 @@ class Heartless:
         would otherwise trade on minutes of data for the whole process lifetime (the stream gap fill only repairs
         holes after the first live bar)."""
         now = now_ms()
-        # keep the longer research history in the store (cheap via the archive); live views use history_days
-        keep_days = max(self.s.history_days, self.s.data_retention_days if self.s.archive_backfill else self.s.history_days)
+        # keep the longer research history in the store (cheap via the archive); live views use history_days, or the
+        # longest lookback of the enabled alphas when that is longer
+        keep_days = max(self.s.history_days, self.s.data_retention_days if self.s.archive_backfill else self.s.history_days,
+                        self._alpha_history_days())
         sem = asyncio.Semaphore(3)
         failed: set[str] = set()
 
@@ -488,7 +496,7 @@ class Heartless:
             log.info("backfill retry repaired %s", ", ".join(fixed))
 
     def _build_views(self, symbols: list[str]) -> None:
-        since = now_ms() - self.s.history_days * MS_DAY
+        since = now_ms() - max(self.s.history_days, self._alpha_history_days()) * MS_DAY
         for sym in symbols:
             rows = self.store.load_candles(sym, start=since)
             ca = CandleArrays("1m", capacity=len(rows) + 4096)
@@ -1008,19 +1016,58 @@ class Heartless:
             await self._btc_shock_check(view)
 
     def _trim_history(self, ca: CandleArrays, now: int) -> None:
-        """Drop 1m bars older than max(HISTORY_DAYS, LIVE_HISTORY_DAYS) days, cut at a UTC midnight so every 5m/15m/1h
-        group that remains is whole."""
-        keep = max(self.s.history_days, LIVE_HISTORY_DAYS) * MS_DAY
+        """Drop 1m bars older than max(HISTORY_DAYS, LIVE_HISTORY_DAYS, the enabled alphas' lookback) days, cut at a
+        UTC midnight so every 5m/15m/1h/4h/1d group that remains is whole."""
+        keep = max(self.s.history_days, LIVE_HISTORY_DAYS, self._alpha_history_days()) * MS_DAY
         ca.trim_before(now - now % MS_DAY - keep)
+
+    # --- history depth for long-lookback alphas (C2-A) ------------------------------------------------------------
+    def _alpha_history_days(self) -> int:
+        """Days of 1m history the champion's and the challengers' enabled alphas need: the longest Alpha.lookback_days
+        plus the lab's warm-up margin (0 when no enabled alpha declares one: HISTORY_DAYS rules as before)."""
+        from heartless.learning.lab import LOOKBACK_MARGIN_MS
+        from heartless.strategy.base import required_lookback_days
+
+        days = required_lookback_days([getattr(self, "params", None)]
+                                      + [c.params for c in getattr(self, "challengers", None) or []])
+        return math.ceil(days + LOOKBACK_MARGIN_MS / MS_DAY) if days > 0 else 0
+
+    def _history_depth_tick(self, now: int) -> None:
+        """Hourly from the scheduler: a newly enabled long-lookback alpha (promotion, a new challenger, a restored one at
+        start-up) gets its history in the background (backfill into the store, then the views are reloaded)."""
+        if now - self._last_depth_check < MS_HOUR or (self._depth_task is not None and not self._depth_task.done()):
+            return
+        self._last_depth_check = now
+        self._depth_task = asyncio.create_task(self._ensure_history_depth(), name="history-depth")
+
+    async def _ensure_history_depth(self) -> None:
+        need = self._alpha_history_days()
+        if self._depth_tried is None or need < self._depth_need:
+            self._depth_tried = {}  # a shorter need lets the daily trim shrink the arrays: a later rise re-checks
+        self._depth_need = need
+        if need <= self.s.history_days:
+            return
+        now = now_ms()
+        short = [s for s in self.universe if s in self.candles and need > self._depth_tried.get(s, 0)
+                 and (not self.candles[s].n or int(self.candles[s].open_time[0]) > now - (need - 1) * MS_DAY)]
+        if not short:
+            return
+        for s in short:
+            self._depth_tried[s] = need
+        log.info("history depth %d days for long-lookback alphas: loading %s", need, ", ".join(short))
+        await self._backfill(short)
+        self._build_views([s for s in short if s in self.universe and s not in self._backfill_failed])
 
     @staticmethod
     def _rebuild_view(view: MarketView, ca: CandleArrays, tfs: list[str]) -> None:
-        from heartless.data.candles import resample
+        from heartless.data.candles import resample_tail
         from heartless.data.features import LIVE_WINDOW, FeatureFrame
 
         for tf in tfs:
-            bars = ca if tf == "1m" else resample(ca, tf)
-            view.frames[tf] = FeatureFrame(tf, bars.tail(LIVE_WINDOW[tf]))
+            # only the 1m tail the frame's bars come from: the same bars at a cost that does not grow with the history
+            # a long-lookback alpha keeps in memory
+            bars = ca.tail(LIVE_WINDOW[tf]) if tf == "1m" else resample_tail(ca, tf, LIVE_WINDOW[tf])
+            view.frames[tf] = FeatureFrame(tf, bars)
         view.base = ca
 
     def _context(self, sym: str, now: int) -> Context:
@@ -1204,6 +1251,7 @@ class Heartless:
                 if now - self._last_universe >= self.s.universe_refresh_minutes * MS_MINUTE:
                     await self.refresh_universe()
                 self._context_tick(now)
+                self._history_depth_tick(now)  # long-lookback alphas of a new champion / challenger (C2-A)
                 if self.research.due(now) and not self.research.running:
                     asyncio.create_task(self.research.cycle())
                 elif self.research.discovery_due(now) and not self.research.running:
@@ -1225,7 +1273,7 @@ class Heartless:
         """Retention: candles, funding, metrics, equity rows and fill-quality rows older than
         max(HISTORY_DAYS, DATA_RETENTION_DAYS) + 5 days. Only candles were pruned before; the 5-minute metrics and the
         per-minute equity rows of every engine grew without bound."""
-        cutoff = now - (max(self.s.history_days, self.s.data_retention_days) + 5) * MS_DAY
+        cutoff = now - (max(self.s.history_days, self.s.data_retention_days, self._alpha_history_days()) + 5) * MS_DAY
         self.store.prune_candles(cutoff)
         self.store.prune_funding(cutoff)
         self.store.prune_metrics(cutoff)

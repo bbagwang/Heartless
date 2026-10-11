@@ -37,11 +37,15 @@ import numpy as np
 
 from heartless.core.models import SymbolInfo
 from heartless.data.context import CORE_SYMBOLS, EXTRA_SYMBOLS
-from heartless.execution.stats import summarize
+# day_clustered_t: the one day-clustered t of the code base (promotion, kill switch, fold confirmation, lab reports);
+# importable from here as before
+from heartless.execution.stats import day_clustered_t, summarize
 from heartless.learning import seal
 from heartless.util.timeutil import MS_DAY, MS_MINUTE
 
 WARMUP_MS = 12 * MS_DAY  # indicator warm-up loaded before the evaluation window (1h EMA200 needs ~8.3 days)
+# added to an alpha's lookback_days: the first daily bar of the window is complete and EMA-type filters have settled
+LOOKBACK_MARGIN_MS = 2 * MS_DAY
 # Alpha research measures the raw edge of the signals, so the account-level circuit breakers (daily/weekly loss
 # halts, drawdown pause) are switched off: otherwise a losing stretch silences an alpha for the rest of the
 # window and its statistics stop describing the signal. Per-trade sizing and per-symbol limits stay as in live.
@@ -61,6 +65,29 @@ def universe_symbols(name: str, store=None) -> list[str]:
     if name not in UNIVERSES:
         raise ValueError(f"unknown universe {name!r} (core, extended, all)")
     return list(UNIVERSES[name])
+
+
+def warmup_for(params, only_alpha: str | None = None, base: int | None = None) -> int:
+    """Warm-up for a run of `params` (StrategyParams or its dict): max(base (default WARMUP_MS), the longest
+    lookback_days of the evaluated alphas + LOOKBACK_MARGIN_MS). Alphas without a lookback leave `base` unchanged, so
+    existing runs load exactly the history they always did."""
+    from heartless.strategy.base import required_lookback_days
+
+    base = WARMUP_MS if base is None else base
+    days = required_lookback_days([params], only_alpha)
+    return max(int(base), int(math.ceil(days * MS_DAY)) + LOOKBACK_MARGIN_MS) if days > 0 else int(base)
+
+
+def handoff_for(params, only_alpha: str | None = None, burn_in_ms: int = 0, runoff_ms: int = 0) -> tuple[int, int]:
+    """Chunk burn-in / run-off for a run of `params`: at least the longest max_hold_days of the evaluated alphas plus a
+    day (unchanged when none declares one)."""
+    from heartless.strategy.base import required_hold_days
+
+    days = required_hold_days([params], only_alpha)
+    if days <= 0:
+        return int(burn_in_ms), int(runoff_ms)
+    span = int(math.ceil(days * MS_DAY)) + MS_DAY
+    return max(int(burn_in_ms), span), max(int(runoff_ms), span)
 
 
 # --- symbol metadata -----------------------------------------------------------------------------------
@@ -166,8 +193,8 @@ BOUNDARY_REASON = "backtest end"  # exit reason of the forced flatten at the end
 # cut is (almost) invisible: it runs on after its end with exits only mattering (positions opened in the window close
 # naturally instead of being force-closed; later entries belong to the next chunk and are dropped), and every chunk
 # but the first starts BURN_IN_MS early so a position the continuous run would hold across the cut is re-created and
-# blocks the same entries (its trade belongs to the previous chunk and is dropped here). Both exceed every alpha's
-# time stop (htf_trend's maximum is 96h).
+# blocks the same entries (its trade belongs to the previous chunk and is dropped here). Both exceed every shipped
+# alpha's time stop (htf_trend's maximum is 96h); an alpha that holds longer declares max_hold_days (handoff_for).
 BURN_IN_MS = 7 * MS_DAY
 RUNOFF_MS = 7 * MS_DAY
 
@@ -225,7 +252,7 @@ def _run_symbol(job: dict) -> dict:
         from heartless.data.context import MS_H, ContextTable
 
         ctx_store = Store(job["context_db"])
-        market = ContextTable.load(ctx_store, [sym], sim_start - MS_H, sim_end)
+        market = ContextTable.load(ctx_store, [sym], sim_start - MS_H, sim_end, source=job["db_path"])
         ctx_store.close()
     settings = Settings(_env_file=None, **{**RESEARCH_SETTINGS, **job.get("settings", {})})
     bt = Backtester(settings, {sym: info}, {sym: ca}, funding, metrics, market)
@@ -250,23 +277,6 @@ def _run_symbol(job: dict) -> dict:
 
 
 # --- aggregation -------------------------------------------------------------------------------------
-def day_clustered_t(trades: list[dict]) -> float:
-    """t-statistic with trades clustered by exit day: simultaneous trades on correlated coins are not independent,
-    so this is the honest significance (the per-trade t_stat overstates it)."""
-    if len(trades) < 3:
-        return 0.0
-    r = np.array([float(t.get("r_multiple") or 0.0) for t in trades])
-    days = np.array([int((t.get("exit_time") or 0) // MS_DAY) for t in trades])
-    uniq, inv = np.unique(days, return_inverse=True)
-    k = len(uniq)
-    if k < 5:
-        return 0.0
-    mean = r.mean()
-    resid = np.bincount(inv, weights=r) - np.bincount(inv) * mean
-    var = (resid ** 2).sum() * k / (k - 1) / (len(r) ** 2)
-    return float(mean / math.sqrt(var)) if var > 0 else 0.0
-
-
 def _month(t: dict) -> str:
     return datetime.fromtimestamp((t.get("exit_time") or 0) / 1000, tz=timezone.utc).strftime("%Y-%m")
 
@@ -424,6 +434,8 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
     The window is cut into chunks (calendar years by default, `chunk_days` blocks, or none for 0); each
     (symbol, chunk) is an independent job with its own warm-up and the burn-in / run-off hand-off described at
     BURN_IN_MS. Raises SealedError when [start, end] overlaps a sealed period that is not in `unseal`.
+    Every job's warm-up is at least the longest lookback_days of the evaluated alphas plus a margin (warmup_for), and
+    the burn-in / run-off at least their longest max_hold_days plus a day (handoff_for).
 
     `context` = {"db": market_context store path, "universe": [...], "build": bool} attaches the market context:
     the rows of the window are built first when missing (and `build`), then every worker reads its symbol's rows.
@@ -432,6 +444,8 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
     unseal = seal.opened(int(start), int(end), unseal)  # an unseal the window does not need opens nothing
     t0 = time.time()
     pdict = params.to_dict() if hasattr(params, "to_dict") else dict(params)
+    warmup_ms = warmup_for(pdict, only_alpha, warmup_ms)
+    burn_in_ms, runoff_ms = handoff_for(pdict, only_alpha, burn_in_ms, runoff_ms)
     windows = chunk_windows(int(start), int(end), chunk_days)
     multi = len(windows) > 1
 
@@ -628,9 +642,15 @@ def main_cli(settings, args) -> None:
     context = {"db": str(settings.context_db_path), "universe": settings.context_universe_list,
                "build": bool(settings.context_auto_build),
                "progress": lambda m: print(m, file=sys.stderr, flush=True)}
-    res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers,
-                   settings=extra_settings, chunk_days=chunk_days, unseal=[p for p in unseal if p in touched],
-                   context=context)
+    from heartless.data.context import ContextMismatch
+
+    try:
+        res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers,
+                       settings=extra_settings, chunk_days=chunk_days, unseal=[p for p in unseal if p in touched],
+                       context=context)
+    except ContextMismatch as e:  # a context store of another source / universe: refused before any job ran
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
     from heartless.learning import trials
 
     trial = None

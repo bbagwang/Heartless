@@ -182,3 +182,26 @@ def resample(base: CandleArrays, tf: str, only_complete: bool = True) -> CandleA
     out.taker_buy[:cnt] = tb[complete]
     out.n = cnt
     return out
+
+
+def resample_tail(base: CandleArrays, tf: str, n: int) -> CandleArrays:
+    """`resample(base, tf).tail(n)`, aggregating only the base bars those n bars can come from.
+
+    The live feature frames are tails of a fixed number of bars, but the 1m history behind them grows with the longest
+    alpha lookback (months for a daily alpha), and resampling all of it at every 5m close would cost in proportion.
+    The slice starts at the first base bar of a group and holds at least n + 1 whole groups, so every group it emits
+    is aggregated from the same base bars in the same order as in the full resample (identical values), and the one
+    group that may still be open at the end is judged by the same rule."""
+    tf_ms = TF_MS[tf]
+    total = base.n
+    per = max(1, tf_ms // base.tf_ms)
+    want = (max(int(n), 0) + 2) * per
+    ot = base.open_time[:total]
+    while 0 < total - want:
+        s = total - want
+        g = ot[s:] // tf_ms
+        if 1 + int(np.count_nonzero(g[1:] != g[:-1])) >= n + 2:
+            j = s + int(np.searchsorted(g, g[0], side="right"))  # first bar of the next group: the slice starts whole
+            return resample(base.slice(j, total), tf).tail(n)
+        want *= 2  # gaps in the base: fewer groups than bars suggest
+    return resample(base, tf).tail(n)

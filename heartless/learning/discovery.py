@@ -17,12 +17,14 @@ Pipeline
    t >= max(3, sqrt(2 ln N)) on TRAIN, N being the number of rules actually evaluated by the run (all grids,
    templates, sides and depths together, plus any prior trials of the family), *and* hold up on VALID.
 
-The very same feature code evaluates a rule online (`rule_features_at()`), so a discovered rule behaves identically in
-the live bot, in the lab and in this miner. Survivors are shipped as data inside StrategyParams
-(alphas["discovered"]["rules"]) and traded by the `discovered` alpha; the champion/challenger loop decides whether a
-rule set ever reaches real money. The defaults (15m/1h grid, stop/target templates, no market context) are what the
-live discovery cycle and the `discovered` alpha understand; the other grids, the time-exit templates and the context
-features are research options (`heartless discover --grid 1h,1d --templates all --context`).
+The very same feature code evaluates a rule online (`decision_features()`), so a discovered rule behaves identically
+in the live bot, in the lab and in this miner, for every rule type the miner produces (15m / 1h / 1d grids, stop-target
+and time-exit templates, frame, positioning, time and market-context features). Survivors are shipped as data inside
+StrategyParams (alphas["discovered"]["rules"]) and traded by the `discovered` alpha; the champion/challenger loop
+decides whether a rule set ever reaches real money. The defaults (15m/1h grid, stop/target templates, no market
+context) are what the live discovery cycle mines; the other grids, the time-exit templates and the context features
+are research options (`heartless discover --grid 1h,1d --templates all --context`) that the `discovered` alpha runs as
+well.
 """
 from __future__ import annotations
 
@@ -118,7 +120,11 @@ def frame_features(frame, times: np.ndarray, tf: str) -> dict[str, np.ndarray]:
 
 
 def extras_features(ms: MetricsSeries | None, times: np.ndarray) -> dict[str, np.ndarray]:
-    """Vectorised twin of MetricsSeries.snapshot() for the fields used by rules (identical semantics)."""
+    """Twin of MetricsSeries.snapshot() for the fields used by rules, bit for bit: what the `discovered` alpha reads
+    from ctx.extras (the snapshot) in the bot and the lab is exactly the value a rule was mined on. The ratio, change
+    and difference fields are the same IEEE operations vectorised; the 1h taker geometric mean and the OI-change
+    z-score run the snapshot's own numpy reductions once per metrics row in use (a cumulative-sum shortcut differed in
+    the last bits)."""
     n = len(times)
     out = {f"x.{k}": np.full(n, np.nan) for k in _EXTRAS}
     if ms is None or len(ms) == 0:
@@ -156,44 +162,29 @@ def extras_features(ms: MetricsSeries | None, times: np.ndarray) -> dict[str, np
     out["x.ls_acc"][valid] = lsa
     out["x.top_ls_pos_chg_4h"][valid] = tlp - back(ms.top_ls_positions, 14_400_000)
     out["x.ls_acc_chg_4h"][valid] = lsa - back(ms.ls_accounts, 14_400_000)
-    # geometric mean of the last 12 taker ratios
-    tk = ms.taker_ls_vol
-    logt = np.where(np.isfinite(tk) & (tk > 0), np.log(np.where(tk > 0, tk, 1.0)), 0.0)
-    cnt = (np.isfinite(tk) & (tk > 0)).astype(float)
-    cs_l = np.concatenate([[0.0], np.cumsum(logt)])
-    cs_c = np.concatenate([[0.0], np.cumsum(cnt)])
-    lo = np.maximum(0, iv - 11)
-    num = cs_l[iv + 1] - cs_l[lo]
-    den = cs_c[iv + 1] - cs_c[lo]
-    g = np.full(len(iv), np.nan)
-    okd = den > 0
-    g[okd] = np.exp(num[okd] / den[okd])
-    out["x.taker_ratio_1h"][valid] = g
-    # z-score of the 1h OI change vs the 12-row changes over the last <=864 rows (as in snapshot)
-    oi_all = ms.oi
-    chg_rows = np.full(len(oi_all), np.nan)
-    if len(oi_all) > 12:
-        chg_rows[12:] = oi_all[12:] / oi_all[:-12] - 1.0
-    fin = np.isfinite(chg_rows)
-    x = np.where(fin, chg_rows, 0.0)
-    cs1 = np.concatenate([[0.0], np.cumsum(x)])
-    cs2 = np.concatenate([[0.0], np.cumsum(x * x)])
-    csn = np.concatenate([[0.0], np.cumsum(fin.astype(float))])
-    lo_seg = np.maximum(0, iv - 864)
-    start = lo_seg + 12
-    seg_len = iv - lo_seg + 1
-    a = np.minimum(start, iv + 1)
-    cnt_c = csn[iv + 1] - csn[a]
-    s1 = cs1[iv + 1] - cs1[a]
-    s2 = cs2[iv + 1] - cs2[a]
-    z = np.full(len(iv), np.nan)
-    ok = (seg_len > 60) & (cnt_c > 30) & np.isfinite(chg["1h"])
-    mean = np.where(cnt_c > 0, s1 / np.maximum(cnt_c, 1), 0.0)
-    var = np.where(cnt_c > 0, s2 / np.maximum(cnt_c, 1) - mean * mean, 0.0)
-    sd = np.sqrt(np.maximum(var, 0.0))
-    ok &= sd > 0
-    z[ok] = (chg["1h"][ok] - mean[ok]) / sd[ok]
-    out["x.oi_chg_1h_z"][valid] = z
+    # geometric mean of the last 12 taker ratios and the z-score of the 1h OI change against the 12-row changes of the
+    # last <= 864 rows: both depend only on the usable row, so each distinct row is reduced once, exactly as snapshot()
+    tk, oi_all = ms.taker_ls_vol, ms.oi
+    rows, inv = np.unique(iv, return_inverse=True)
+    first = np.zeros(len(rows), dtype=np.int64)
+    first[inv] = np.arange(len(iv))  # one decision of each distinct metrics row (its 1h change is the row's)
+    g = np.full(len(rows), np.nan)
+    z = np.full(len(rows), np.nan)
+    c1h = chg["1h"]
+    for k, i in enumerate(rows.tolist()):
+        window = tk[max(0, i - 11):i + 1]
+        good = window[np.isfinite(window) & (window > 0)]
+        if len(good):
+            g[k] = float(np.exp(np.mean(np.log(good))))
+        seg = oi_all[max(0, i - 864):i + 1]
+        cur = float(c1h[first[k]])
+        if len(seg) > 60:
+            ch = seg[12:] / seg[:-12] - 1.0
+            ch = ch[np.isfinite(ch)]
+            if len(ch) > 30 and np.std(ch) > 0 and not math.isnan(cur):
+                z[k] = float((cur - np.mean(ch)) / np.std(ch))
+    out["x.taker_ratio_1h"][valid] = g[inv]
+    out["x.oi_chg_1h_z"][valid] = z[inv]
     return out
 
 
@@ -685,6 +676,29 @@ def rule_features_at(view, ms: MetricsSeries | None, t: int) -> np.ndarray:
     return np.array([feats[n][0] for n in FEATURES])
 
 
+def decision_features(view, extras: dict | None, market, t: int, names: list[str] | None = None) -> np.ndarray:
+    """One decision's feature vector over `names` (default FEATURES_X), computed exactly as build_symbol() computes the
+    row at time t, from what an alpha is given: the view's 15m / 1h frames (frame_features), ctx.extras (the
+    MetricsSeries.snapshot() dict, whose fields extras_features() reproduces bit for bit; empty or stale: NaN),
+    t itself (time_features) and ctx.market (the snapshot of the last hour close at or before t, the row
+    ContextTable.columns() looks up; c.* the symbol's own features, m.* the market-wide ones, NaN when missing)."""
+    names = FEATURES_X if names is None else names
+    feats = features_at(view.frames, None, np.array([t], dtype=np.int64))
+    out = np.full(len(names), np.nan)
+    ex = extras if extras and not extras.get("stale") else None
+    mk = market or {}
+    for i, n in enumerate(names):
+        if n.startswith("x."):
+            v = ex.get(n[2:]) if ex is not None else None
+        elif n.startswith(("c.", "m.")):
+            v = mk.get(n[2:])
+        else:
+            col = feats.get(n)
+            v = col[0] if col is not None else None
+        out[i] = float(v) if isinstance(v, (int, float, np.floating)) and not isinstance(v, bool) else np.nan
+    return out
+
+
 # --- orchestration -----------------------------------------------------------------------------------------------------
 class _LightView:
     """Only the decision-timeframe frames (enough for mining; online evaluation uses the bot's full MarketView)."""
@@ -726,7 +740,7 @@ def _build_job(job: dict) -> SymbolData | None:
         from heartless.data.context import MS_H, ContextTable
 
         cst = Store(job["context_db"])
-        market = ContextTable.load(cst, [sym], job["start"] - MS_H, job["end"])
+        market = ContextTable.load(cst, [sym], job["start"] - MS_H, job["end"], source=job["db_path"])
         cst.close()
         if market is None:  # asked for context features but the table is gone: keep the column layout (all NaN)
             market = ContextTable({}, {})

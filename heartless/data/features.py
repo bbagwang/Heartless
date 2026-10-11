@@ -7,11 +7,19 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from heartless.data import indicators as I
-from heartless.data.candles import CandleArrays, resample
+from heartless.data.candles import CandleArrays, resample, resample_tail
+from heartless.util.timeutil import TF_MS
 
 TIMEFRAMES = ("1m", "5m", "15m", "1h")
 # how many bars of each timeframe to keep for live recomputation (enough for EMA200 + percentiles)
 LIVE_WINDOW = {"1m": 1500, "5m": 1000, "15m": 700, "1h": 520}
+# Long-horizon frames for daily strategies: UTC-aligned 4h and 1d bars (resampled by open_time // period, so they open
+# at 00/04/08/... and 00:00 UTC) with the same FeatureFrame columns. They are not tails of a fixed bar count: the 1m
+# history behind them is sized by the longest Alpha.lookback_days (app history depth, lab / backtester warm-up). They
+# are rebuilt only when one of their bars closes (or on first access), never per minute, and seek() does not position
+# them on every bar: their cursor is found when an alpha asks for it (MarketView.tf / closed).
+LONG_TIMEFRAMES = ("4h", "1d")
+ALL_TIMEFRAMES = TIMEFRAMES + LONG_TIMEFRAMES
 
 
 class FeatureFrame:
@@ -142,31 +150,86 @@ class MarketView:
         self.cursor_time: int = 0
         self.just_closed: set[str] = set()
         self.base: CandleArrays | None = None
+        # long frames: the base close time from which the frame is stale (its next bar has closed), and the cursor of
+        # the last cursor_time it was asked for
+        self._long_due: dict[str, int] = {}
+        self._long_cur: dict[str, tuple[int, FrameCursor]] = {}
 
     def rebuild(self, base_1m: CandleArrays, live: bool = True) -> None:
         self.base = base_1m
         for tf in TIMEFRAMES:
-            bars = base_1m if tf == "1m" else resample(base_1m, tf)
-            if live:
-                bars = bars.tail(LIVE_WINDOW[tf])
+            if tf == "1m":
+                bars = base_1m.tail(LIVE_WINDOW[tf]) if live else base_1m
+            else:
+                # live: only the 1m tail the frame's last LIVE_WINDOW bars come from (identical bars, bounded cost)
+                bars = resample_tail(base_1m, tf, LIVE_WINDOW[tf]) if live else resample(base_1m, tf)
             self.frames[tf] = FeatureFrame(tf, bars)
+        self._long_due.clear()
+        self._long_cur.clear()
+        for tf in LONG_TIMEFRAMES:  # built here so `tf in view.frames` holds (the engine's trail timeframe lookup)
+            self.frames.pop(tf, None)
+            self._long_frame(tf)
+
+    def _long_frame(self, tf: str) -> FeatureFrame | None:
+        """The 4h / 1d frame over the whole base, rebuilt once the base holds a bar at or past its next close.
+
+        In a backtest the base is the full loaded history, so the frame is built once; live the base grows by one bar
+        a minute and the frame is rebuilt once per period (bars that close later are never visible early: the cursor
+        only reaches bars closed at or before cursor_time)."""
+        fr = self.frames.get(tf)
+        base = self.base
+        if base is None or base.n == 0:
+            return fr
+        last = int(base.close_time[base.n - 1])
+        due = self._long_due.get(tf)
+        if fr is None or due is None or last >= due:
+            period = TF_MS[tf]
+            fr = FeatureFrame(tf, resample(base, tf))
+            self.frames[tf] = fr
+            self._long_due[tf] = ((last + 1) // period + 1) * period - 1  # close of the first group not yet complete
+            self._long_cur.pop(tf, None)
+        return fr
+
+    def _long_cursor(self, tf: str) -> FrameCursor:
+        fr = self._long_frame(tf)
+        if fr is None:
+            return FrameCursor(FeatureFrame(tf, CandleArrays(tf)), -1)
+        hit = self._long_cur.get(tf)
+        if hit is not None and hit[0] == self.cursor_time and hit[1].frame is fr:
+            return hit[1]
+        cur = FrameCursor(fr, bisect_right(fr.close_times(), self.cursor_time) - 1)
+        self._long_cur[tf] = (self.cursor_time, cur)
+        return cur
 
     def seek(self, close_time: int) -> None:
         """Position every timeframe at the last bar completed at or before close_time.
 
         A timeframe counts as "just closed" when its latest completed bar closed inside the last
         minute ending at close_time (robust to data whose epoch is not aligned to the timeframe).
+        The long frames (4h, 1d) are only looked at in the minute after one of their UTC period ends: their bars close
+        at k * period - 1, so no other minute can hold one of their closes; their cursor is otherwise found on demand.
         """
         self.cursor_time = close_time
         self.just_closed = set()
-        for tf, fr in self.frames.items():
+        frames = self.frames
+        for tf in TIMEFRAMES:
+            fr = frames.get(tf)
+            if fr is None:
+                continue
             ct = fr.close_times()
             idx = bisect_right(ct, close_time) - 1  # == searchsorted(close_time, side="right") - 1
             self.cursors[tf] = FrameCursor(fr, idx)
             if idx >= 0 and ct[idx] > close_time - 60_000:
                 self.just_closed.add(tf)
+        for tf in LONG_TIMEFRAMES:
+            if tf in frames and (close_time + 1) % TF_MS[tf] < 60_000:
+                cur = self._long_cursor(tf)
+                if cur.idx >= 0 and cur.frame.close_times()[cur.idx] > close_time - 60_000:
+                    self.just_closed.add(tf)
 
     def tf(self, tf: str) -> FrameCursor:
+        if tf in LONG_TIMEFRAMES:
+            return self._long_cursor(tf)
         c = self.cursors.get(tf)
         if c is None:
             fr = self.frames.get(tf)

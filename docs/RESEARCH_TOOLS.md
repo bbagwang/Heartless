@@ -1,4 +1,4 @@
-# 연구 도구 (P2a)
+# 연구 도구 (P2a, C2-A 보강)
 
 P2 연구 2차(ROADMAP P2)에서 쓰는 도구 사용법입니다. 판정 기준은 `docs/ROADMAP.md` P2를 따릅니다. 이 문서는 사용법만 다룹니다.
 
@@ -38,16 +38,28 @@ P2 연구 2차(ROADMAP P2)에서 쓰는 도구 사용법입니다. 판정 기준
 **빌드와 확인.**
 
 ```bash
-HEARTLESS_DATA_DIR=data/longhist CONTEXT_DB=data/longhist/context.db heartless context build   # 이어받기, 연 단위
-HEARTLESS_DATA_DIR=data/longhist CONTEXT_DB=data/longhist/context.db heartless context status
+HEARTLESS_DATA_DIR=data/longhist ARCHIVE_BACKFILL=false heartless context build   # 이어받기, 연 단위
+HEARTLESS_DATA_DIR=data/longhist ARCHIVE_BACKFILL=false heartless context status
 ```
 
-- `CONTEXT_DB`를 비우면 캔들 DB 안에 테이블을 만듭니다.
-  - 파생 데이터이므로 별도 파일로 두는 편이 안전합니다.
-  - 지워도 언제든 다시 만들 수 있습니다.
-- 이미 만든 연도는 건너뜁니다. 정의(`context.VERSION`)나 유니버스가 바뀌면 전부 다시 만듭니다. `--rebuild`로 강제할 수도 있습니다.
-- 2022-01 ~ 2026-10, 20종목 빌드는 175초(프로세스 1개, 최대 메모리 340MB)가 걸렸습니다.
-- lab과 discover는 실행 기간에 빠진 연도를 자동으로 먼저 만듭니다(`CONTEXT_AUTO_BUILD=false`로 끔).
+- **저장 위치.** 컨텍스트는 항상 별도 파일에 둡니다. `CONTEXT_DB`의 기본값은 `<HEARTLESS_DATA_DIR>/context.db`입니다(장기 DB라면 `data/longhist/context.db`).
+  - 캔들 DB 자체는 쓰지 않습니다. `CONTEXT_DB`가 캔들 DB를 가리키면 거부합니다.
+  - 파생 데이터이므로 지워도 언제든 다시 만들 수 있습니다.
+- **메타데이터.** `context.meta`에 다음을 기록합니다.
+  - 원본 캔들 DB의 실제 경로
+  - 원본 지문: 유니버스 종목별 1분봉·펀딩·지표의 첫·끝 시각과 그 해시
+  - 유니버스, 정의 버전(`context.VERSION`), 만든 시간 구간
+- **다른 원본·유니버스는 거부합니다.** 다른 캔들 DB나 다른 유니버스로 같은 컨텍스트 DB를 쓰면 빌드가 이유를 밝히고 멈춥니다(종료 코드 2). lab·discover도 작업을 시작하기 전에 같은 이유로 멈춥니다.
+  - 해결: `CONTEXT_DB`를 다른 파일로 지정하거나, `--rebuild`로 명시적으로 다시 만듭니다.
+  - 원본 기록이 없는 예전 컨텍스트 DB(이 기능 이전 빌드)도 같은 이유로 거부합니다.
+  - 정의 버전이 바뀐 경우만 자동으로 전부 다시 만듭니다(저장된 행을 쓸 수 없기 때문).
+- **원본에 이력이 덧붙은 경우.** 같은 원본 끝에 새 데이터가 붙기만 했다면 거부하지 않습니다. 새 행보다 앞선 시각의 스냅샷은 바뀌지 않으므로 유지하고, 그 뒤 시간만 다시 만듭니다. 앞부분이 바뀌거나 잘린 경우는 교체로 보고 거부합니다.
+- **잠금.** 빌드는 `<CONTEXT_DB>.lock` 파일에 프로세스 간 배타 잠금을 잡고, 읽기는 공유 잠금을 잡습니다.
+  - 동시에 도는 lab 작업자, discover, 다른 에이전트가 같은 연도를 두 번 만들지 않습니다. 기다린 쪽은 잠금을 얻은 뒤 메타데이터를 다시 읽고, 이미 만들어진 연도는 건너뜁니다.
+  - 다시 만드는 중인 표를 읽는 일도 없습니다.
+- `status`는 원본 경로·지문, 유니버스, 만든 구간과 함께 현재 캔들 DB에 쓸 수 있는지(같음 / 덧붙음 / 거부 사유)를 보여 줍니다.
+- lab과 discover는 실행 기간에 빠진 연도를 자동으로 먼저 만듭니다(`CONTEXT_AUTO_BUILD=false`로 끔). 끈 상태에서 맞지 않는 컨텍스트 DB는 쓰지 않고 알립니다.
+- **공용 빌드.** `data/longhist/context.db`는 2022-01-01 ~ 2026-10-08(20종목, 41,808시간, 866,264행) 전체로 이미 만들어 두었습니다. 132.6초, 프로세스 1개, 최대 메모리 340MB였습니다(2026-10-11, 다른 작업과 4코어 공유). 이전 빌드와 행 단위로 같습니다.
 
 **알파에서 쓰기.** 알파는 `ctx.market`(읽기 전용 매핑)을 읽습니다.
 
@@ -55,6 +67,9 @@ HEARTLESS_DATA_DIR=data/longhist CONTEXT_DB=data/longhist/context.db heartless c
 - 컨텍스트가 없으면 빈 매핑입니다. 값이 정의되지 않으면 NaN입니다.
 - 따라서 `ok()`로 확인한 뒤 써야 합니다.
 - 키 이름은 `heartless/data/context.py`의 `SYMBOL_FEATURES`, `MARKET_FEATURES`에 있습니다.
+  - 종목: `ret_{1,4,24,72,168}h`, `ret_{1,4,24,72,168}h_rank`, `ret_{1,4,24,72,168}h_z`, `vol_share_24h`, `vol_share_rank`, `funding`, `funding_rank`, `funding_z`, `oi_chg_24h`, `oi_chg_rank`, `dist_hi_24h`, `dist_lo_24h`, `dist_hi_168h`, `dist_lo_168h`, `above_ema50`, `above_ema200`
+  - 시장 전체: `btc_ret_{1,4,24,168}h`, `btc_trend`, `breadth_ema50`, `breadth_ema200`, `disp_24h`, `funding_median`, `oi_chg_24h_agg`, `n`
+  - 순위는 0(최저) ~ 1(최고)입니다. 발굴 엔진에서는 같은 값이 `c.<키>`(종목), `m.<키>`(시장 전체)로 쓰입니다.
 
 ```python
 r = ctx.market.get("ret_24h_rank", float("nan"))
@@ -68,12 +83,57 @@ if ok(r) and r < 0.1 and ctx.market.get("btc_trend") == 1.0: ...
 - 정시 마감 T마다 스냅샷을 만든 뒤에 엔진이 결정합니다. 직전 시간에 거래된 모든 컨텍스트 종목의 T 마감 봉을 최대 10초 기다립니다. 그보다 늦은 봉은 그 시간 스냅샷에서 빠지고 `/health`의 지연 횟수로 셉니다.
 - 챔피언, 챌린저, 라이브 엔진이 같은 시간에는 같은 스냅샷을 봅니다. 새 펀딩 정산은 10분 주기 갱신으로 다음 정시 전에 들어갑니다.
 - 합성 데이터 테스트(`tests/test_p2a_app.py`)에서 모든 엔진·모든 결정의 `ctx.market`가 오프라인 빌드와 비트 단위로 같았습니다. 실데이터 7일 리플레이(`docs/REPLAY.md`)에서도 정시 스냅샷 169개가 모두 같았습니다.
-- 아직 남은 것: 운영 봇의 리서치 워커 백테스트는 운영 DB에 `market_context` 테이블이 없어 빈 매핑을 봅니다. 컨텍스트를 읽는 알파를 켜기 전에 이 부분을 채워야 합니다.
+- 아직 남은 것: 운영 봇의 리서치 워커 백테스트는 운영 데이터 폴더에 `context.db`가 없어 빈 매핑을 봅니다. 컨텍스트를 읽는 알파를 켜기 전에 이 부분을 채워야 합니다.
+
+## 1-1. 장기 타임프레임(4h·1d)과 `lookback_days`
+
+일 단위 전략(`ts_trend` 등)을 위한 기능입니다.
+
+**프레임.** `MarketView`에 `"4h"`와 `"1d"` 프레임이 있습니다.
+
+- UTC 기준으로 정렬됩니다. 4시간봉은 00·04·08·12·16·20시, 일봉은 00:00 UTC에 열립니다.
+- 피처 열은 기존 1m~1h `FeatureFrame`과 같습니다(EMA, ATR, 볼린저, 돈치안 `dc_hi20` 등).
+- 사용법은 기존 프레임과 같습니다.
+
+```python
+class DailyTrend(Alpha):
+    name = "daily_trend"
+    timeframe = "1d"          # 앙상블이 일봉 마감(00:00 UTC) 때만 부릅니다
+    lookback_days = 120       # 결정 전에 필요한 이력(일)
+
+    def evaluate(self, view, ctx, p):
+        d = view.tf("1d")                   # 마지막으로 마감된 일봉
+        if not ok(d.v("ema50"), d.v("atr")):
+            return None
+        ...
+```
+
+- `view.closed("1d")`는 일봉이 마감된 직후 1분(23:59 봉 마감)에만 참입니다. `view.closed("4h")`도 같은 방식입니다. 커서는 그 시각까지 마감된 봉만 가리킵니다(미래 봉 없음).
+- 알파의 `timeframe`을 `"1d"`(또는 `"4h"`)로 두면 앙상블이 그 봉 마감 때만 부릅니다. 신호의 `timeframe`도 같게 두면 엔진의 추적 손절과 `entry_ttl_bars`가 그 봉 단위(일봉 ATR, 일 수)로 동작합니다.
+- 비용: 4h·1d 프레임은 그 봉이 마감될 때나 알파가 처음 물을 때만 다시 만듭니다. 매분 다시 만들지 않고, `seek()`도 그 기간이 끝나는 1분에만 들여다봅니다.
+  - 기존 알파의 거래 목록은 그대로입니다. 참조 실행(연구 DB, 2026-01-13 ~ 07-01, 이전 기본 3개 알파 켠 `StrategyParams.default()`)의 672건이 수정 전 코드(e2fb1fe)와 같고, 요약 JSON도 실행 시간 외에는 같습니다.
+  - `seek()`는 봉당 1.56 → 1.62µs, 백테스터 뷰 생성은 4h·1d 프레임 몫으로 약 0.6% 늘었습니다(1년 1분봉 기준).
+
+**`lookback_days`.** `Alpha`의 속성입니다. 기본값 `None`은 지금 동작(워밍업 12일)을 그대로 씁니다.
+
+- **lab·백테스터:** 워밍업 = max(12일, 평가하는 알파 중 가장 긴 `lookback_days` + 2일). 연도·`--chunk-days` 분할 실행에서도 조각마다 같은 워밍업이 붙습니다. `heartless backtest --start`(공동 포트폴리오)도 같습니다.
+  - "평가하는 알파"는 `--alpha`가 있으면 그 알파, 없으면 켜진 알파 전부입니다.
+  - 워밍업은 평가 구간이 아니므로 봉인 구간을 읽어도 됩니다(`seal.py`). 예: VALID(2026-01-13~)의 120일 워밍업은 2025년 가격을 지표 계산에만 씁니다.
+  - 상장이 늦은 종목은 첫 봉부터 워밍업을 채운 뒤에 평가합니다. 예: 120일이면 SUI(2023-05-03 상장)는 2023-09-02부터 평가합니다.
+  - 1분봉 프레임도 워밍업 길이만큼 계산하므로, 작업 하나의 메모리와 프레임 계산 시간이 이력 길이에 비례해 늘어납니다. 1년 조각에 120일이면 약 1.3배로 추정합니다(봉 수 비율).
+- **운영 봇:** 챔피언과 챌린저에서 켜진 알파 중 가장 긴 `lookback_days` + 2일이 `HISTORY_DAYS`보다 길면, 그 길이만큼 다음을 맞춥니다.
+  - 메모리의 1분봉 이력, 시작 시 백필, 매일 자정 정리, 보존 기간
+  - 새 챌린저나 승격으로 필요한 길이가 늘면, 1시간마다 하는 확인에서 백그라운드로 백필하고 뷰를 다시 만듭니다.
+  - 1분봉 이력이 길어져도 5m·15m·1h 프레임 재계산 비용은 늘지 않습니다(필요한 꼬리만 리샘플, 결과는 같음).
+  - 비용: 200일이면 종목당 1분봉 약 29만 개(16종목 약 370MB)입니다.
+- **`max_hold_days`.** 포지션을 최대 며칠 들고 있는지(보유 파라미터의 상한)입니다. 기본값 `None`은 지금처럼 7일 안입니다.
+  - 값이 있으면 연도·`--chunk-days` 분할 실행의 번인과 런오프를 그 일수 + 1일로 늘립니다. 수주짜리 거래가 조각 끝에서 강제 청산(`boundary`)되거나, 다음 조각에서 이어받지 못하는 일을 막습니다.
+- `discovered` 알파의 `lookback_days`는 22일입니다. 발굴 엔진의 워밍업과 같아서, 규칙을 캔 지표와 같은 깊이로 계산합니다.
 
 ## 2. 다년 lab
 
 ```bash
-HEARTLESS_DATA_DIR=data/longhist CONTEXT_DB=data/longhist/context.db ARCHIVE_BACKFILL=false \
+HEARTLESS_DATA_DIR=data/longhist ARCHIVE_BACKFILL=false \
   heartless lab --alpha 새알파 --years 2022,2023,2024 --universe extended --by-side --workers 2 \
   --tag 새알파 --out docs/results/p2_새알파_train.json
 ```
@@ -108,8 +168,14 @@ heartless discover --universe extended --grid 1h,1d --templates all --context --
 - **순위 기준**: 같은 달·같은 방향 평균 대비 초과 R의 일 단위 t입니다.
 - **다중검정 기준**: 이번 실행에서 실제로 평가한 규칙 수(모든 격자·템플릿·방향·깊이)와, `--tag`가 있으면 그 계열의 이전 시도 수를 합한 N으로 계산합니다.
   - 같은 구성(같은 구성 해시)의 이전 실행은 더하지 않습니다. 원장도 구성마다 가장 큰 수만 세므로, 같은 탐색을 다시 돌려도 기준이 그대로입니다.
-- 기본값(15m/1h, classic, 컨텍스트 없음)은 운영 봇의 매일 발굴과 `discovered` 알파가 쓰는 형식입니다.
-  - 시간 청산·`1d`·컨텍스트 규칙은 연구용입니다. 운영에서 실행하려면 `discovered` 알파를 먼저 확장해야 합니다.
+- 기본값(15m/1h, classic, 컨텍스트 없음)은 운영 봇의 매일 발굴이 쓰는 형식입니다.
+- **`discovered` 알파는 발굴 엔진이 만드는 모든 규칙을 실행합니다.**
+  - 결정 격자: `15m`·`1h`는 그 봉 마감마다, `1d`는 00:00 UTC 1시간 마감에만 결정합니다. 손절 ATR은 격자별 ATR(`1d`는 1시간 ATR)입니다.
+  - 청산 템플릿: 손절·목표·시간 제한(classic). 시간 청산 템플릿(`tp_r`이 null)은 목표 없이 4 ATR 비상 손절과 보유 시간 제한으로 실행합니다.
+  - 피처: 15m·1h 프레임, 포지셔닝(`x.*`, `ctx.extras`), 시간(`t.*`), 시장 컨텍스트(`c.*` 종목, `m.*` 시장 전체, `ctx.market`).
+  - 피처 값은 발굴 엔진과 비트 단위로 같습니다. 같은 합성 데이터에서 격자 3개 × 피처 계열 4개를 모두 비교하는 동등성 테스트가 있습니다(`tests/test_c2a_discovered.py`).
+    - 이를 위해 발굴 엔진의 포지셔닝 피처 중 1시간 테이커 기하평균과 OI 변화 z-점수를 `MetricsSeries.snapshot()`과 같은 계산으로 바꿨습니다. 이전의 누적합 계산은 마지막 자릿수가 달랐습니다.
+  - 남은 차이 하나: 엔진의 시간 손절은 보유 한도에서 0.5R 이상 이익 중인 거래를 본전 손절·1.5 ATR 추적 손절로 계속 둡니다(`engine.py`). 발굴 엔진의 시간 청산 템플릿은 한도에서 무조건 청산합니다. 이 차이를 없애려면 엔진에 신호 단위 옵트인(예: `Signal.time_exit`)이 필요합니다. `discovered`는 신호 태그 `time_exit`에 이미 표시해 둡니다.
 
 ## 4. 시도 원장
 
@@ -128,4 +194,25 @@ heartless trials --family 새알파    # 그 계열의 줄 목록
     - 코드를 고치면 새 시도로 셉니다.
   - discover: 탐색 설정 전체(TRAIN 기간 포함)
 - **N과 기준**: 계열의 N은 서로 다른 구성 해시마다 가장 큰 `count`를 더한 값입니다. TRAIN 기준은 `t_day ≥ max(3, √(2 ln N))`입니다.
+  - N은 계열 전체의 합입니다. lab, discover, 스크리닝 스크립트(`screen`)가 기록한 줄을 모두 셉니다.
+  - 같은 구성의 재실행은 N을 늘리지 않습니다. `--stress` 재실행과 VALID 기간 재실행이 여기에 해당합니다(구성 해시에 기간·비용이 없음, `tests/test_c2a_trials.py`에서 확인).
 - **주의**: `--tag` 없이 TRAIN을 돌리면 원장에 남지 않습니다(경고가 나옵니다). P2 탐색은 반드시 `--tag`를 붙입니다.
+
+**스크리닝 스크립트.** lab·discover 밖에서 직접 쓴 스크립트로 구성을 평가할 때도, 평가한 구성마다 `tool="screen"`으로 한 줄씩 기록해야 합니다. 기록하지 않은 평가는 연구 위반입니다.
+
+```python
+from heartless.learning import lab, trials
+
+TRAIN = (lab.parse_when("2022-01-13"), lab.parse_when("2025-01-01", end=True))
+for lookback_h in (24, 72, 168):                       # 평가한 구성마다 한 줄
+    cfg = {"screen": "xs_rank_persist", "lookback_h": lookback_h, "hold_h": 24, "universe": "extended"}
+    trades = my_screen(cfg, *TRAIN)                    # 직접 만든 함수: pnl·r_multiple·exit_time이 있는 거래 목록
+    s = lab.group_stats(trades)                        # n, avg_r, t_day(일 단위 군집 t) ...
+    trials.record("screen", "xs_rank", cfg, TRAIN, n=s["n"], avg_r=s["avg_r"], t_day=s["t_day"])
+n_family = trials.family_tests("xs_rank")              # lab + discover + screen 전체
+print(n_family, trials.threshold(n_family))            # 이 계열의 TRAIN 기준 t_day
+```
+
+- `cfg`에는 그 구성을 다시 만들 수 있는 값을 모두 넣습니다. 같은 `cfg`(같은 해시)는 기간을 바꿔 다시 기록해도 N에 한 번만 셉니다.
+- 규칙을 대량으로 훑는 스크립트는 훑은 규칙 수를 `count=`로 기록합니다.
+- 계열 이름은 ROADMAP 6절의 태그(`ts_trend`, `xs_rank`, `funding_carry`, `positioning_flow`, `vol_breakout`, `discovery_daily`)를 씁니다.

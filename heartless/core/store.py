@@ -451,6 +451,17 @@ class Store:
         total = self.query("SELECT COUNT(*) n FROM market_context")[0]["n"]
         return {"first": r["a"], "last": r["b"], "hours": r["n"], "rows": total}
 
+    def context_series_bounds(self, symbol: str) -> dict[str, list[int] | None]:
+        """[first, last] timestamp of a symbol's candles / funding / metrics (None when it has no rows), read from the
+        primary-key indexes: the source fingerprint the market-context metadata records, cheap enough to compare on
+        every lab or discovery run."""
+        out: dict[str, list[int] | None] = {}
+        for table, col in self._SERIES.items():
+            lo = self.query(f"SELECT {col} t FROM {table} WHERE symbol=? ORDER BY {col} ASC LIMIT 1", (symbol,))
+            hi = self.query(f"SELECT {col} t FROM {table} WHERE symbol=? ORDER BY {col} DESC LIMIT 1", (symbol,))
+            out[table] = [int(lo[0]["t"]), int(hi[0]["t"])] if lo and hi else None
+        return out
+
     def context_candle_bounds(self, symbol: str) -> tuple[int | None, int | None]:
         """(first, last) candle open_time of a symbol from the primary-key index (no row count, unlike candle_range)."""
         lo = self.query("SELECT open_time t FROM candles WHERE symbol=? ORDER BY open_time ASC LIMIT 1", (symbol,))

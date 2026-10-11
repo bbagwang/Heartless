@@ -5,13 +5,16 @@ number of variants tried in its family (a mass rule search counts every rule it 
 counted mechanically, so the tools append to docs/results/p2_trials.jsonl themselves:
 
 * `heartless lab ... --tag FAMILY` appends one line per run (one evaluated configuration);
-* `heartless discover ... --tag FAMILY` appends one aggregated line whose `count` is the number of rules evaluated.
+* `heartless discover ... --tag FAMILY` appends one aggregated line whose `count` is the number of rules evaluated;
+* a custom screening script calls `record("screen", FAMILY, config, window, n, ...)` once per configuration it
+  evaluated (docs/RESEARCH_TOOLS.md has the template).
 
 A configuration is identified by `config_hash`: for the lab the evaluated alpha(s), their effective parameters, the
 ensemble settings, the symbols and a hash of the alpha source code (so a code change is a new trial), but not the
 window or the cost model, so re-running a variant on another period or with stressed costs does not inflate N. A
 discovery search hashes its full search setup including the TRAIN window. N per family = the sum over distinct
-configuration hashes of their largest `count`. Lines are never rewritten; `heartless trials` prints the counts.
+configuration hashes of their largest `count`, whatever tool recorded them (lab, discover and screen lines of a
+family all count towards its one bar). Lines are never rewritten; `heartless trials` prints the counts.
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ from pathlib import Path
 from heartless.learning import seal
 
 LEDGER = seal.REPO_ROOT / "docs" / "results" / "p2_trials.jsonl"
+TOOLS = ("lab", "discover", "screen")  # what records trials: the two CLIs and custom screening scripts
 # ROADMAP section 1 periods, used only to label ledger lines
 TRAIN_SPAN = (1_640_995_200_000, 1_735_689_600_000 - 1)  # 2022-01-01 .. 2024-12-31 23:59:59.999
 VALID_START = 1_767_225_600_000  # 2026-01-01
@@ -85,10 +89,13 @@ def _iso(ms: int) -> str:
 def record(tool: str, family: str, config: dict, window: tuple[int, int], n: int | None = None,
            avg_r: float | None = None, t_day: float | None = None, count: int = 1, extra: dict | None = None,
            ledger: Path | str | None = None) -> dict:
-    """Append one ledger line and return it."""
+    """Append one ledger line and return it. `tool` is one of TOOLS ("screen" for a custom screening script, one call
+    per evaluated configuration; `n`, `avg_r`, `t_day` are its TRAIN result, `count` > 1 only for a batch of rules)."""
     family = str(family).strip()
     if not family:
         raise ValueError("a trial family name is required")
+    if tool not in TOOLS:
+        raise ValueError(f"unknown trial tool {tool!r} (one of {', '.join(TOOLS)})")
     a, b = int(window[0]), int(window[1])
     entry = {"utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "tool": tool, "family": family,
              "config_hash": config_hash(config), "count": int(count), "window": [_iso(a), _iso(b)],

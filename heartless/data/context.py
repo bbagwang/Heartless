@@ -26,14 +26,24 @@ Why the definitions look the way they do
   produce the same bits. Symbols are kept in sorted order, so the result depends on the set of symbols present, not on
   how the universe was listed.
 
-Offline: `build()` (CLI `heartless context build`) writes the market_context table, resumable per calendar year.
+Offline: `build()` (CLI `heartless context build`) writes the market_context table, resumable per calendar year,
+into its own SQLite file (CONTEXT_DB, default <data_dir>/context.db; never the candle database). That file records in
+its "context.meta" which candle database it was computed from (path and a fingerprint of every universe symbol's
+candle / funding / metrics range), the universe and the hour ranges built. A build for another source or universe is
+refused until rebuilt explicitly (`--rebuild`); history appended to the same source only invalidates the hours it can
+change. Builds hold an inter-process file lock (<CONTEXT_DB>.lock) and readers a shared one, so concurrent lab
+workers, discovery runs or agents never build the same years twice or read a table being rewritten.
 Readers (lab workers, the backtester, discovery) use `ContextTable`. Online: `MarketContextTracker` (see its
 docstring for what the app must call). Alphas read the result as `ctx.market`, a read-only flat mapping of the
 symbol's own features plus the market-wide ones and "ts" (empty when no context is available).
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import json
 import math
+import os
 import time
 from bisect import bisect_right
 from collections.abc import Mapping
@@ -43,6 +53,11 @@ from pathlib import Path
 from types import MappingProxyType
 
 import numpy as np
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - not POSIX: builds run unlocked
+    fcntl = None
 
 from heartless.data.extras import AVAILABLE_AFTER_MS
 
@@ -75,6 +90,11 @@ MARKET_FEATURES = ("btc_ret_1h", "btc_ret_4h", "btc_ret_24h", "btc_ret_168h", "b
                    "breadth_ema200", "disp_24h", "funding_median", "oi_chg_24h_agg", "n")
 GRID_FIELDS = ("present", "close", "high", "low", "qvol", "funding", "oi_chg", "oiv_now", "oiv_prev")
 EMPTY: Mapping = MappingProxyType({})
+DB_NAME = "context.db"  # default CONTEXT_DB file name, next to the candle database
+
+
+class ContextMismatch(RuntimeError):
+    """The context store belongs to another source or universe (or would be the candle database itself)."""
 
 
 def hour_of(t: int) -> int:
@@ -419,14 +439,23 @@ class ContextTable:
         return len(self.market)
 
     @classmethod
-    def load(cls, store, symbols, start: int, end: int) -> "ContextTable | None":
-        """Rows of [start, end] (hour closes) for `symbols` from a store holding a current-version table, else None."""
-        if store is None or not store.has_market_context() or not meta_ok(store.get("context.meta")):
+    def load(cls, store, symbols, start: int, end: int, source: str | None = None) -> "ContextTable | None":
+        """Rows of [start, end] (hour closes) for `symbols` from a store holding a current-version table, else None.
+        `source` (the candle database path) also refuses a table that records another source. Reads under the shared
+        build lock, so a concurrent rebuild never hands out a half-deleted table."""
+        if store is None or not store.has_market_context():
             return None
-        a, b = int(start), int(end)
-        mk = {t: np.frombuffer(blob, dtype=np.float64) for t, blob in store.load_market_context(MARKET_KEY, a, b)}
-        per = {s: {t: np.frombuffer(blob, dtype=np.float64) for t, blob in store.load_market_context(s, a, b)}
-               for s in symbols}
+        with build_lock(getattr(store, "path", None), shared=True):
+            meta = store.get("context.meta")
+            if not meta_ok(meta):
+                return None
+            recorded = (meta.get("source") or {}).get("path")
+            if source is not None and recorded and recorded != _real(source):
+                return None
+            a, b = int(start), int(end)
+            mk = {t: np.frombuffer(blob, dtype=np.float64) for t, blob in store.load_market_context(MARKET_KEY, a, b)}
+            per = {s: {t: np.frombuffer(blob, dtype=np.float64) for t, blob in store.load_market_context(s, a, b)}
+                   for s in symbols}
         return cls(mk, per)
 
     def view(self, symbol: str, t: int) -> Mapping:
@@ -467,9 +496,142 @@ class ContextTable:
 
 
 # --- metadata / coverage ---------------------------------------------------------------------------------------------
-def meta_for(universe) -> dict:
+def meta_for(universe, source: dict | None = None) -> dict:
     return {"version": VERSION, "universe": sorted(universe), "symbol_features": list(SYMBOL_FEATURES),
-            "market_features": list(MARKET_FEATURES), "built": []}
+            "market_features": list(MARKET_FEATURES), "source": source, "built": []}
+
+
+def _real(path) -> str:
+    return os.path.realpath(str(path)) if path else ""
+
+
+def default_path(db_path) -> str:
+    """<directory of the candle database>/context.db: the CONTEXT_DB default."""
+    return str(Path(db_path).resolve().parent / DB_NAME)
+
+
+def source_info(src, universe) -> dict:
+    """What a build reads from the candle database `src`: its resolved path and, per stored universe symbol, the
+    [first, last] timestamp of its candles, funding and metrics, with a fingerprint over them."""
+    ranges = {}
+    for s in stored_symbols(src, universe):
+        if hasattr(src, "context_series_bounds"):
+            ranges[s] = src.context_series_bounds(s)
+        else:  # a duck-typed source (tests): the slower min / max queries
+            a, b = src.context_candle_bounds(s)
+            ranges[s] = {"candles": [a, b] if a is not None else None}
+    fp = hashlib.sha1(json.dumps(ranges, sort_keys=True).encode()).hexdigest()[:16]
+    return {"path": _real(getattr(src, "path", "")), "ranges": ranges, "fingerprint": fp}
+
+
+def source_status(meta, source: dict) -> tuple[str, int | None, str]:
+    """How the stored context relates to `source` (source_info of the candle database a run reads):
+    ("same", None, ""), ("extended", t, why) when history was only appended (or a series / symbol appeared): every
+    hour close <= t reads only rows that existed at build time and stays valid, or ("mismatch", None, why)."""
+    old = (meta or {}).get("source") if isinstance(meta, dict) else None
+    if not isinstance(old, dict) or not old.get("path"):
+        return "mismatch", None, "it records no source candle database (built before source checks existed)"
+    if old["path"] != source["path"]:
+        return "mismatch", None, f"it was built from {old['path']}, not from {source['path']}"
+    if old.get("fingerprint") == source["fingerprint"]:
+        return "same", None, ""
+    o_r, n_r = old.get("ranges") or {}, source["ranges"]
+    gone = sorted(set(o_r) - set(n_r))
+    if gone:
+        return "mismatch", None, f"symbols {', '.join(gone)} are no longer in the source"
+    stable: int | None = None
+    notes = []
+    for sym in sorted(n_r):
+        for name, rng in sorted((n_r[sym] or {}).items()):
+            prev = (o_r.get(sym) or {}).get(name)
+            if prev == rng:
+                continue
+            if rng is None or (prev is not None and (rng[0] != prev[0] or rng[1] < prev[1])):
+                return "mismatch", None, (f"the source's {sym} {name} range changed from {_span(prev)} to {_span(rng)} "
+                                          f"(history was replaced, not appended)")
+            cut = prev[1] if prev is not None else rng[0] - 1  # appended after prev, or new from rng[0] on
+            stable = cut if stable is None else min(stable, cut)
+            notes.append(f"{sym} {name}")
+    if stable is None:  # same ranges, other key layout: nothing a snapshot reads changed
+        return "same", None, ""
+    return "extended", stable, f"history appended to {', '.join(notes[:4])}{' ...' if len(notes) > 4 else ''}"
+
+
+def _span(r) -> str:
+    return f"{_iso(r[0])} .. {_iso(r[1])}" if r else "none"
+
+
+def _clip_built(built: list, until: int) -> list[list[int]]:
+    cut = hour_close(hour_of(until))
+    return [[a, min(b, cut)] for a, b in built if a <= cut]
+
+
+@contextlib.contextmanager
+def build_lock(db_path, shared: bool = False, progress=None):
+    """Inter-process lock on "<context db>.lock": exclusive for a build, shared for a reader. Another process that
+    builds or reads the same context store waits (and says so through `progress`) instead of computing the same years
+    again or reading a table that is being rewritten. Unlocked where flock is unavailable or the lock file cannot be
+    created (a read-only directory can only be read)."""
+    if fcntl is None or not db_path or str(db_path) == ":memory:":
+        yield
+        return
+    try:
+        fh = open(f"{db_path}.lock", "a+")
+    except OSError:
+        yield
+        return
+    try:
+        mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+        try:
+            fcntl.flock(fh.fileno(), mode | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if progress:
+                progress(f"waiting for the market-context lock {db_path}.lock (another process is "
+                         f"{'building it' if shared else 'building or reading it'})")
+            fcntl.flock(fh.fileno(), mode)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
+def _refuse(dst, why: str) -> ContextMismatch:
+    return ContextMismatch(f"context store {getattr(dst, 'path', dst)}: {why}. Point CONTEXT_DB at a separate file for "
+                           f"this source / universe, or rebuild this one with `heartless context build --rebuild`.")
+
+
+def _check_or_reset(dst, meta, source: dict, universe: list[str], rebuild: bool) -> tuple[dict, str]:
+    """Under the build lock: the metadata the build continues from (reset to empty when rebuilding, new, or of an
+    older definition), or ContextMismatch for another source / universe / replaced history. Returns (meta, note)."""
+    note = ""
+    if rebuild or not isinstance(meta, dict):
+        if dst.has_market_context():
+            dst.delete_market_context()
+        meta = meta_for(universe, source)
+        note = "rebuilding from scratch" if rebuild else ""
+    else:
+        status, stable, why = source_status(meta, source)
+        if status == "mismatch" and (not (meta.get("source") or {}).get("path")
+                                     or meta["source"]["path"] != source["path"]):
+            raise _refuse(dst, why)
+        if meta.get("universe") != universe:
+            raise _refuse(dst, f"it was built for the universe {','.join(meta.get('universe') or [])}, this run asks "
+                               f"for {','.join(universe)}")
+        if not meta_ok(meta):  # the definitions changed in code: the stored rows are of no use to anyone
+            if dst.has_market_context():
+                dst.delete_market_context()
+            note = f"definition changed ({meta.get('version')} -> {VERSION}): rebuilding"
+            meta = meta_for(universe, source)
+        elif status == "mismatch":
+            raise _refuse(dst, why)
+        elif status == "extended":
+            meta["built"] = _clip_built(meta.get("built", []), stable)
+            note = f"{why}: hours after {_iso(hour_close(hour_of(stable)))} are rebuilt"
+    meta["source"] = source
+    dst.set("context.meta", meta)
+    return meta, note
 
 
 def meta_ok(meta, universe=None) -> bool:
@@ -511,6 +673,10 @@ def year_units(start: int, end: int) -> list[tuple[int, int]]:
 
 
 def stored_symbols(store, universe) -> list[str]:
+    """The universe symbols with stored candles. One indexed lookup per symbol where the store has them: a DISTINCT
+    over a multi-year candle table scans its whole index (about 2 s on the 6.5 GB long-history database)."""
+    if hasattr(store, "context_candle_bounds"):
+        return [s for s in sorted(universe) if store.context_candle_bounds(s)[0] is not None]
     have = set(store.candle_symbols())
     return [s for s in sorted(universe) if s in have]
 
@@ -568,13 +734,20 @@ def compute_unit(src, universe, a: int, b: int) -> list[Snapshot]:
     return out
 
 
-def build(src, dst=None, start: int | None = None, end: int | None = None, universe=None, rebuild: bool = False,
+def build(src, dst, start: int | None = None, end: int | None = None, universe=None, rebuild: bool = False,
           progress=None) -> dict:
     """Compute and store the market context for the hour closes in [start, end] (default: all stored history),
-    calendar year by calendar year. A year already built for the same version and universe is skipped, so an
-    interrupted build resumes where it stopped; `rebuild` recomputes everything. `dst` (default `src`) is the store
-    that receives the rows, e.g. a separate CONTEXT_DB file next to a read-only research database."""
-    dst = dst or src
+    calendar year by calendar year, into `dst`, a store of its own (CONTEXT_DB; never the candle database `src`).
+
+    A year already built for the same source, universe and definition is skipped, so an interrupted build resumes
+    where it stopped; `rebuild` recomputes everything. A store built from another candle database or for another
+    universe raises ContextMismatch unless `rebuild` (history appended to the same source only re-opens the hours it
+    can change). The whole build holds the store's exclusive lock and re-reads the metadata once it has it, so a
+    process that waited for another one's build skips what that one built."""
+    dst_path = _real(getattr(dst, "path", ""))
+    if dst is None or dst is src or (dst_path and dst_path == _real(getattr(src, "path", ""))):
+        raise ContextMismatch("the market context is never written into the candle database: give it its own file "
+                              f"(CONTEXT_DB, default <data_dir>/{DB_NAME})")
     universe = sorted(universe or DEFAULT_UNIVERSE)
     syms = stored_symbols(src, universe)
     if not syms:
@@ -583,52 +756,71 @@ def build(src, dst=None, start: int | None = None, end: int | None = None, unive
     first, last = data_span(src, syms)
     a = max(int(start), first) if start is not None else first
     b = min(int(end), last) if end is not None else last
-    meta = dst.get("context.meta")
-    if rebuild or not meta_ok(meta, universe):
-        if dst.has_market_context():
-            dst.delete_market_context()
-        meta = meta_for(universe)
-        dst.set("context.meta", meta)
     stats = {"units": [], "rows": 0, "hours": 0, "seconds": 0.0, "universe": universe, "stored_symbols": syms}
-    if b < a:
-        return stats
-    for ua, ub in year_units(a, b):
-        if covered(meta, ua, ub):
-            stats["units"].append({"start": _iso(ua), "end": _iso(ub), "skipped": True})
-            continue
-        u0 = time.time()
-        snaps = compute_unit(src, universe, ua, ub)
-        rows = [r for sn in snaps for r in sn.rows()]
-        if rows:
-            dst.save_market_context(rows)
-        meta["built"] = _merge(meta.get("built", []) + [[hour_close(hour_of(ua + MS_H - 1)), hour_close(hour_of(ub))]])
-        dst.set("context.meta", meta)
-        info = {"start": _iso(ua), "end": _iso(ub), "hours": len(snaps), "rows": len(rows),
-                "seconds": round(time.time() - u0, 1)}
-        stats["units"].append(info)
-        stats["rows"] += len(rows)
-        stats["hours"] += len(snaps)
-        if progress:
-            progress(f"context {info['start'][:10]} .. {info['end'][:10]}: {info['hours']} hours, {info['rows']} rows "
-                     f"({info['seconds']}s)")
+    with build_lock(getattr(dst, "path", None), progress=progress):
+        meta, note = _check_or_reset(dst, dst.get("context.meta"), source_info(src, universe), universe, rebuild)
+        if note and progress:
+            progress(f"context: {note}")
+        if b < a:
+            return stats
+        for ua, ub in year_units(a, b):
+            if covered(meta, ua, ub):
+                stats["units"].append({"start": _iso(ua), "end": _iso(ub), "skipped": True})
+                continue
+            u0 = time.time()
+            snaps = compute_unit(src, universe, ua, ub)
+            rows = [r for sn in snaps for r in sn.rows()]
+            if rows:
+                dst.save_market_context(rows)
+            meta["built"] = _merge(meta.get("built", []) + [[hour_close(hour_of(ua + MS_H - 1)),
+                                                              hour_close(hour_of(ub))]])
+            dst.set("context.meta", meta)
+            info = {"start": _iso(ua), "end": _iso(ub), "hours": len(snaps), "rows": len(rows),
+                    "seconds": round(time.time() - u0, 1)}
+            stats["units"].append(info)
+            stats["rows"] += len(rows)
+            stats["hours"] += len(snaps)
+            if progress:
+                progress(f"context {info['start'][:10]} .. {info['end'][:10]}: {info['hours']} hours, {info['rows']} "
+                         f"rows ({info['seconds']}s)")
     stats["seconds"] = round(time.time() - t0, 1)
     return stats
 
 
+def usable(src, dst, universe) -> tuple[bool, str, int | None, str]:
+    """Whether the stored context in `dst` may serve runs over `src` for `universe`, without building:
+    (ok, status, stable_until, why) with status "same" / "extended" / "mismatch" / "none" (nothing built)."""
+    meta = dst.get("context.meta")
+    if not isinstance(meta, dict):
+        return False, "none", None, "nothing built yet"
+    status, stable, why = source_status(meta, source_info(src, universe))
+    if meta.get("universe") != sorted(universe):
+        return False, "mismatch", None, (f"built for the universe {','.join(meta.get('universe') or [])}, not "
+                                         f"{','.join(sorted(universe))}")
+    if not meta_ok(meta):
+        return False, "mismatch", None, f"definition {meta.get('version')} is outdated (current {VERSION})"
+    return status != "mismatch", status, stable, why
+
+
 def ensure(src, dst, start: int, end: int, universe, auto_build: bool = True, progress=None) -> bool:
-    """Make sure the rows of [start, end] exist, building the missing years when `auto_build`. True when a current
-    table is there for the window afterwards (an hour that is still missing reads as an empty ctx.market)."""
+    """Make sure the rows of [start, end] exist, building the missing years when `auto_build` (ContextMismatch when
+    `dst` belongs to another source or universe). True when a usable table is there for the window afterwards (an
+    hour that is still missing reads as an empty ctx.market). Without `auto_build` a store that does not match reads
+    as no context (False)."""
     universe = sorted(universe or DEFAULT_UNIVERSE)
     syms = stored_symbols(src, universe)
     span = data_span(src, syms) if syms else None
     if span is None:
         return False
     a, b = max(int(start), span[0]), min(int(end), span[1])
+    ok, status, stable, why = usable(src, dst, universe)
     meta = dst.get("context.meta")
-    if meta_ok(meta, universe) and (b < a or covered(meta, a, b)):
-        return True
+    if ok and status == "same" and (b < a or covered(meta, a, b)):
+        return True  # the common case: no lock, no write
     if not auto_build:
-        return meta_ok(meta, universe)
+        if not ok and status != "none" and progress:
+            progress(f"context store {getattr(dst, 'path', dst)} not used: {why}")
+        return ok and (status == "same" or (stable is not None and b <= stable))
     build(src, dst, a, b, universe, progress=progress)
     return True
 
@@ -636,21 +828,23 @@ def ensure(src, dst, start: int, end: int, universe, auto_build: bool = True, pr
 def prepare(db_path: str, cfg: dict, start: int, end: int) -> str | None:
     """For research runs (lab, discovery): build the missing years of [start, end] when cfg["build"] (default True)
     and return the path of the store holding the rows, or None when no usable table exists. cfg: {"db": context store
-    path (default the candle store), "universe": [...], "build": bool, "progress": callable}. The caller caps `end`
-    at a sealed period."""
+    path (default <candle db directory>/context.db), "universe": [...], "build": bool, "progress": callable}. Raises
+    ContextMismatch for a store of another source / universe and for the candle database itself. The caller caps
+    `end` at a sealed period."""
     from heartless.core.store import Store
 
-    ctx_path = str(cfg.get("db") or db_path)
+    ctx_path = str(cfg.get("db") or default_path(db_path))
+    if _real(ctx_path) == _real(db_path):
+        raise ContextMismatch(f"CONTEXT_DB {ctx_path} is the candle database; the market context needs its own file "
+                              f"(default <data_dir>/{DB_NAME})")
+    Path(ctx_path).parent.mkdir(parents=True, exist_ok=True)
     src = Store(db_path)
-    if ctx_path != str(db_path):
-        Path(ctx_path).parent.mkdir(parents=True, exist_ok=True)
-    dst = src if ctx_path == str(db_path) else Store(ctx_path)
+    dst = Store(ctx_path)
     try:
         ok = ensure(src, dst, int(start), int(end), cfg.get("universe") or DEFAULT_UNIVERSE,
                     auto_build=cfg.get("build", True), progress=cfg.get("progress"))
     finally:
-        if dst is not src:
-            dst.close()
+        dst.close()
         src.close()
     return ctx_path if ok else None
 

@@ -305,8 +305,9 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
     default loads one interval past `until` - so a window that ends at a sealed period never touches it. With the
     defaults (no warm-up, look-ahead on) the behaviour is unchanged.
 
-    `market="auto"` attaches the stored market context of the window when a current table exists (CONTEXT_DB or the
-    main database; nothing is built here), None runs without it, or pass a ContextTable."""
+    `market="auto"` attaches the stored market context of the window when a current table built from this candle
+    database exists (CONTEXT_DB, default <data_dir>/context.db; nothing is built here), None runs without it, or pass a
+    ContextTable."""
     syms = symbol_list or store.candle_symbols()
     lo = since - max(0, int(warmup_ms))
     candles: dict[str, CandleArrays] = {}
@@ -335,18 +336,17 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
 
 
 def stored_context(settings: Settings, store, symbols: list[str], start: int, end: int) -> ContextTable | None:
-    """Stored context rows for a window from CONTEXT_DB (when set and present) or the main store, else None."""
+    """Stored context rows for a window from the context store (CONTEXT_DB, default <data_dir>/context.db) when it
+    exists and was built from this candle database (`store`), else None. Nothing is built here."""
     from pathlib import Path
 
-    path = getattr(settings, "context_db", "") or ""
-    if not path:
-        return ContextTable.load(store, symbols, start, end) if hasattr(store, "has_market_context") else None
-    if not Path(path).exists():
+    path = getattr(settings, "context_db_path", None) or getattr(settings, "context_db", "") or ""
+    if not path or not Path(path).exists():
         return None
     from heartless.core.store import Store
 
     ctx_store = Store(path)
     try:
-        return ContextTable.load(ctx_store, symbols, start, end)
+        return ContextTable.load(ctx_store, symbols, start, end, source=getattr(store, "path", None))
     finally:
         ctx_store.close()

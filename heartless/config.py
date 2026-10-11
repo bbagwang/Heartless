@@ -105,8 +105,7 @@ class Settings(BaseSettings):
     context_universe: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,LTCUSDT,"
                                           "BCHUSDT,BNBUSDT,SUIUSDT,DOTUSDT,ATOMUSDT,NEARUSDT,FILUSDT,ETCUSDT,TRXUSDT,"
                                           "UNIUSDT,AAVEUSDT", alias="CONTEXT_UNIVERSE")
-    # SQLite file holding the market_context table (empty: the main database). Derived data, rebuildable at any time;
-    # a separate file keeps a read-only research database untouched.
+    # SQLite file holding the market_context table (empty: <data_dir>/context.db, see context_db_path)
     context_db: str = Field(default="", alias="CONTEXT_DB")
     # lab / discover build missing context years on demand (otherwise only stored rows are used)
     context_auto_build: bool = Field(default=True, alias="CONTEXT_AUTO_BUILD")
@@ -136,9 +135,13 @@ class Settings(BaseSettings):
     def context_universe_list(self) -> list[str]:
         return sorted({s.strip().upper() for s in self.context_universe.split(",") if s.strip()})
 
+    # --- C2-A: market-context store -------------------------------------------------------------------------------
+    # The context is derived data with its own metadata (source candle database, universe, built hours) and build
+    # lock, so it always lives in a file of its own: CONTEXT_DB, by default <data_dir>/context.db, never the candle
+    # database itself (heartless/data/context.py refuses that), which keeps read-only research databases untouched.
     @property
     def context_db_path(self) -> Path:
-        return Path(self.context_db) if self.context_db else self.db_path
+        return Path(self.context_db) if self.context_db else self.data_dir / "context.db"
 
 
 def load_settings(**overrides) -> Settings:

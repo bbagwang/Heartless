@@ -104,7 +104,9 @@ def main(argv: list[str] | None = None) -> None:
     cx.add_argument("action", choices=["build", "status"])
     cx.add_argument("--start", default=None, help="ISO date (default: first stored candle)")
     cx.add_argument("--end", default=None, help="ISO date, exclusive (default: last complete stored hour)")
-    cx.add_argument("--rebuild", action="store_true", help="recompute everything (default: resume, skip built years)")
+    cx.add_argument("--rebuild", action="store_true",
+                    help="recompute everything, also a store built from another source / universe (default: resume, "
+                         "skip built years, refuse a foreign store)")
     tr = sub.add_parser("trials", help="P2 trial ledger: evaluated configurations per family and the t_day bar")
     tr.add_argument("--family", default=None)
     tr.add_argument("--ledger", default=None, help="ledger path (default docs/results/p2_trials.jsonl)")
@@ -380,7 +382,7 @@ async def _backtest_window(settings, args) -> None:
                     f" (shipped defaults for {', '.join(reset)}: their design changed)" if reset else "")
             else:
                 params, source = StrategyParams.default(), "shipped defaults (no stored champion)"
-        warm = lab.WARMUP_MS
+        warm = lab.warmup_for(params, args.alpha)  # longer when an evaluated alpha declares lookback_days
         infos = _window_symbol_infos(store, symbols, start - warm, end)
         run_settings = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(settings.data_dir))
         bt = load_backtester(run_settings, store, infos, start, end, symbol_list=symbols, warmup_ms=warm,
@@ -577,7 +579,14 @@ def _discover(settings, args) -> None:
           "unseal": [p for p in unseal if p in touched]}
     if templates != "classic" or context or n_prior:  # the defaults keep the call the live discovery cycle makes
         kw.update(templates=templates, context=context, n_prior=n_prior)
-    res = D.mine(str(settings.db_path), symbols, train, valid, ",".join(grids), cfg, **kw)
+    from heartless.data.context import ContextMismatch
+
+    try:
+        res = D.mine(str(settings.db_path), symbols, train, valid, ",".join(grids), cfg, **kw)
+    except ContextMismatch as e:  # a context store of another source / universe: refused before any dataset is built
+        store.close()
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
     store.set("discovery.last", {"tf": res.get("tf", ",".join(grids)), "tested": res["tested"], "t_bar": res["t_bar"],
                                  "passed": res["passed"], "ts": now_ms()})
     store.close()
@@ -615,7 +624,10 @@ def _discover(settings, args) -> None:
 
 
 def _context(settings, args) -> None:
-    """`heartless context build|status`: the market_context table (heartless/data/context.py)."""
+    """`heartless context build|status`: the market_context table in its own store (CONTEXT_DB, default
+    <data_dir>/context.db; heartless/data/context.py). A store of another source or universe is refused unless
+    `--rebuild`."""
+    import os
     import time
 
     from heartless.core.store import Store
@@ -623,21 +635,36 @@ def _context(settings, args) -> None:
     from heartless.learning.lab import parse_when
 
     universe = settings.context_universe_list
-    src = Store(settings.db_path)
     ctx_path = settings.context_db_path
-    if str(ctx_path) != str(settings.db_path):
-        ctx_path.parent.mkdir(parents=True, exist_ok=True)
-    dst = src if str(ctx_path) == str(settings.db_path) else Store(ctx_path)
+    if os.path.realpath(ctx_path) == os.path.realpath(settings.db_path):
+        print(f"error: CONTEXT_DB {ctx_path} is the candle database; the market context needs its own file "
+              f"(default <data_dir>/{C.DB_NAME})", file=sys.stderr)
+        sys.exit(2)
+    if args.action == "status" and not ctx_path.exists():
+        print(f"context store {ctx_path}: not built (run `heartless context build`)")
+        return
+    ctx_path.parent.mkdir(parents=True, exist_ok=True)
+    src = Store(settings.db_path)
+    dst = Store(ctx_path)
     try:
         if args.action == "status":
-            meta = dst.get("context.meta")
+            meta = dst.get("context.meta") or {}
             st = dst.market_context_stats()
-            ok = C.meta_ok(meta, universe)
+            ok, status, stable, why = C.usable(src, dst, universe)
+            verdict = {"same": "usable (same source, universe and definition)",
+                       "extended": f"usable up to {_iso(stable)} UTC, newer source history is built on the next run "
+                                   f"({why})",
+                       "none": "empty (built on the next build)"}.get(status, f"NOT usable: {why}")
             print(f"context store {ctx_path}: {st['hours']} hours, {st['rows']} rows, {_iso(st['first'])} .. "
-                  f"{_iso(st['last'])} UTC; version {'current' if ok else 'missing or outdated (rebuilt on the next build)'}")
-            for a, b in (meta or {}).get("built", []):
+                  f"{_iso(st['last'])} UTC; version {meta.get('version', '-')} "
+                  f"({'current' if C.meta_ok(meta) else 'outdated'}); {verdict}")
+            src_meta = meta.get("source") or {}
+            print(f"  source {src_meta.get('path', '-')} (fingerprint {src_meta.get('fingerprint', '-')}, "
+                  f"{len(src_meta.get('ranges') or {})} symbols); this run reads {os.path.realpath(settings.db_path)}")
+            for a, b in meta.get("built", []):
                 print(f"  built {_iso(a)} .. {_iso(b)}")
-            print(f"  universe ({len(universe)}): {', '.join(universe)}; stored candles: "
+            print(f"  universe ({len(universe)}): {', '.join(universe)}; recorded: "
+                  f"{','.join(meta.get('universe') or []) or '-'}; stored candles: "
                   f"{', '.join(C.stored_symbols(src, universe)) or '-'}")
             return
         start = parse_when(args.start) if args.start else None
@@ -649,12 +676,11 @@ def _context(settings, args) -> None:
         print(f"context: {stats['hours']} hours / {stats['rows']} rows built in {len(built)} year(s), "
               f"{len(stats['units']) - len(built)} already built; {len(stats['stored_symbols'])}/{len(universe)} "
               f"universe symbols stored; {time.time() - t0:.0f}s -> {ctx_path}")
-    except RuntimeError as e:
+    except RuntimeError as e:  # ContextMismatch included: another source / universe, refused until --rebuild
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
     finally:
-        if dst is not src:
-            dst.close()
+        dst.close()
         src.close()
 
 
