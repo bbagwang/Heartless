@@ -1,0 +1,1161 @@
+{
+ "family": "ts_trend",
+ "tool": "screen",
+ "window": [
+  "2022-01-13 00:00",
+  "2024-12-31 23:59"
+ ],
+ "universe": "extended (20 symbols)",
+ "simulator": "hourly event simulator of the engine's exits for a daily alpha (scratch screen.py): decision at the 00:00 UTC daily close on the closed 1d bar, market fill at the next open (+0.25bp half spread +1.5bp slippage, taker 5bp), stop sl_atr x daily ATR14, no target, time stop at max_hold_d (close below 0.5R, else breakeven + 1.5 ATR trail up to 3x), funding-avoidance exit (r < 0.3, adverse rate > 0.0003), breakeven at 1R and daily chandelier trail when trail_atr > 0, funding paid every 8h, one position per symbol, force-close at the window end; reads nothing in 2025",
+ "fidelity": "vs the engine lab on the same configuration: matched trades (75%) agree to a median |dR| of 0.0003; the screen renews a position at the close its time stop fires on, the engine one day later, so the screen's t_day ran 0.15 (sl 3) to 0.42 (sl 4) above the lab",
+ "signals": {
+  "dc20/dc50": "close beyond the prior 20/50-day high (long) / low (short)",
+  "retL": "z = (close/close[L]-1)/(ATR%*sqrt(L)) beyond +-z_min",
+  "zmulti": "mean z of 7/14/28 days beyond +-z_min"
+ },
+ "sides": {
+  "both": "long and short",
+  "long": "longs only",
+  "long_btc": "longs only while BTC's 168h return > 0",
+  "both_btc": "only in the direction of BTC's 168h return"
+ },
+ "fund_filter": "skip an entry while the upcoming funding rate is adverse by more than this",
+ "configs": [
+  {
+   "round": "1-base",
+   "config_hash": "ac4230356b3974c5",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "signal": "dc20",
+    "side": "both",
+    "lookback_days": 30
+   },
+   "n": 821,
+   "avg_r": 0.0533,
+   "pf": 1.207,
+   "t_day": 1.14,
+   "by_year": {
+    "2022": {
+     "n": 234,
+     "avg_r": 0.0238
+    },
+    "2023": {
+     "n": 257,
+     "avg_r": 0.1478
+    },
+    "2024": {
+     "n": 330,
+     "avg_r": 0.0006
+    }
+   },
+   "long": {
+    "n": 443,
+    "avg_r": 0.0829
+   },
+   "short": {
+    "n": 378,
+    "avg_r": 0.0186
+   },
+   "funding_r_avg": -0.0083,
+   "exits": {
+    "SL": 339,
+    "time": 203,
+    "funding": 267,
+    "end": 12
+   }
+  },
+  {
+   "round": "1-base",
+   "config_hash": "3c9c62f948f8b751",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "signal": "dc20",
+    "side": "long_btc",
+    "lookback_days": 30
+   },
+   "n": 429,
+   "avg_r": 0.0724,
+   "pf": 1.245,
+   "t_day": 0.91,
+   "by_year": {
+    "2022": {
+     "n": 75,
+     "avg_r": -0.2841
+    },
+    "2023": {
+     "n": 146,
+     "avg_r": 0.2666
+    },
+    "2024": {
+     "n": 208,
+     "avg_r": 0.0646
+    }
+   },
+   "long": {
+    "n": 429,
+    "avg_r": 0.0724
+   },
+   "short": {
+    "n": 0,
+    "avg_r": 0.0
+   },
+   "funding_r_avg": -0.018,
+   "exits": {
+    "SL": 211,
+    "time": 79,
+    "funding": 138,
+    "end": 1
+   }
+  },
+  {
+   "round": "1-base",
+   "config_hash": "08ac9bc5bfc1792f",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "signal": "dc50",
+    "side": "both",
+    "lookback_days": 60
+   },
+   "n": 501,
+   "avg_r": 0.0418,
+   "pf": 1.161,
+   "t_day": 0.75,
+   "by_year": {
+    "2022": {
+     "n": 122,
+     "avg_r": 0.0154
+    },
+    "2023": {
+     "n": 186,
+     "avg_r": 0.0695
+    },
+    "2024": {
+     "n": 193,
+     "avg_r": 0.0318
+    }
+   },
+   "long": {
+    "n": 301,
+    "avg_r": 0.0534
+   },
+   "short": {
+    "n": 200,
+    "avg_r": 0.0244
+   },
+   "funding_r_avg": -0.01,
+   "exits": {
+    "SL": 197,
+    "time": 97,
+    "funding": 206,
+    "end": 1
+   }
+  },
+  {
+   "round": "1-base",
+   "config_hash": "01b5170a9237e78a",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "signal": "dc50",
+    "side": "long_btc",
+    "lookback_days": 60
+   },
+   "n": 282,
+   "avg_r": 0.0765,
+   "pf": 1.291,
+   "t_day": 0.88,
+   "by_year": {
+    "2022": {
+     "n": 30,
+     "avg_r": -0.53
+    },
+    "2023": {
+     "n": 108,
+     "avg_r": 0.1955
+    },
+    "2024": {
+     "n": 144,
+     "avg_r": 0.1136
+    }
+   },
+   "long": {
+    "n": 282,
+    "avg_r": 0.0765
+   },
+   "short": {
+    "n": 0,
+    "avg_r": 0.0
+   },
+   "funding_r_avg": -0.017,
+   "exits": {
+    "SL": 124,
+    "time": 35,
+    "funding": 122,
+    "end": 1
+   }
+  },
+  {
+   "round": "1-base",
+   "config_hash": "d9de0432d448603f",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "signal": "ret28",
+    "side": "both",
+    "lookback_days": 40,
+    "z_min": 0.5
+   },
+   "n": 1207,
+   "avg_r": 0.0783,
+   "pf": 1.395,
+   "t_day": 2.13,
+   "by_year": {
+    "2022": {
+     "n": 282,
+     "avg_r": 0.0351
+    },
+    "2023": {
+     "n": 343,
+     "avg_r": 0.1486
+    },
+    "2024": {
+     "n": 582,
+     "avg_r": 0.0578
+    }
+   },
+   "long": {
+    "n": 762,
+    "avg_r": 0.1023
+   },
+   "short": {
+    "n": 445,
+    "avg_r": 0.0372
+   },
+   "funding_r_avg": -0.0071,
+   "exits": {
+    "time": 282,
+    "SL": 360,
+    "funding": 552,
+    "end": 13
+   }
+  },
+  {
+   "round": "1-base",
+   "config_hash": "fe75428fb701a2a5",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "signal": "ret28",
+    "side": "long_btc",
+    "lookback_days": 40,
+    "z_min": 0.5
+   },
+   "n": 685,
+   "avg_r": 0.0953,
+   "pf": 1.468,
+   "t_day": 1.59,
+   "by_year": {
+    "2022": {
+     "n": 73,
+     "avg_r": -0.2482
+    },
+    "2023": {
+     "n": 169,
+     "avg_r": 0.2926
+    },
+    "2024": {
+     "n": 443,
+     "avg_r": 0.0766
+    }
+   },
+   "long": {
+    "n": 685,
+    "avg_r": 0.0953
+   },
+   "short": {
+    "n": 0,
+    "avg_r": 0.0
+   },
+   "funding_r_avg": -0.0144,
+   "exits": {
+    "time": 118,
+    "SL": 211,
+    "funding": 354,
+    "end": 2
+   }
+  },
+  {
+   "round": "2",
+   "config_hash": "37d61c6e106ca5ac",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "zmulti",
+    "side": "both"
+   },
+   "n": 1200,
+   "avg_r": 0.0353,
+   "pf": 1.16,
+   "t_day": 0.96,
+   "by_year": {
+    "2022": {
+     "n": 295,
+     "avg_r": -0.0178
+    },
+    "2023": {
+     "n": 345,
+     "avg_r": 0.1203
+    },
+    "2024": {
+     "n": 560,
+     "avg_r": 0.0108
+    }
+   },
+   "long": {
+    "n": 753,
+    "avg_r": 0.084
+   },
+   "short": {
+    "n": 447,
+    "avg_r": -0.0468
+   },
+   "funding_r_avg": -0.0076,
+   "exits": {
+    "SL": 392,
+    "time": 246,
+    "funding": 549,
+    "end": 13
+   }
+  },
+  {
+   "round": "2",
+   "config_hash": "33ff14f28a803f81",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 906,
+   "avg_r": 0.1016,
+   "pf": 1.419,
+   "t_day": 2.16,
+   "by_year": {
+    "2022": {
+     "n": 240,
+     "avg_r": 0.0399
+    },
+    "2023": {
+     "n": 305,
+     "avg_r": 0.1714
+    },
+    "2024": {
+     "n": 361,
+     "avg_r": 0.0837
+    }
+   },
+   "long": {
+    "n": 512,
+    "avg_r": 0.1462
+   },
+   "short": {
+    "n": 394,
+    "avg_r": 0.0436
+   },
+   "funding_r_avg": -0.0088,
+   "exits": {
+    "time": 279,
+    "SL": 355,
+    "funding": 259,
+    "end": 13
+   }
+  },
+  {
+   "round": "2",
+   "config_hash": "3768c8be480f8d73",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both_btc"
+   },
+   "n": 1083,
+   "avg_r": 0.0544,
+   "pf": 1.254,
+   "t_day": 1.28,
+   "by_year": {
+    "2022": {
+     "n": 245,
+     "avg_r": -0.0021
+    },
+    "2023": {
+     "n": 292,
+     "avg_r": 0.1142
+    },
+    "2024": {
+     "n": 546,
+     "avg_r": 0.0478
+    }
+   },
+   "long": {
+    "n": 684,
+    "avg_r": 0.0957
+   },
+   "short": {
+    "n": 399,
+    "avg_r": -0.0163
+   },
+   "funding_r_avg": -0.0078,
+   "exits": {
+    "time": 244,
+    "SL": 321,
+    "funding": 508,
+    "end": 10
+   }
+  },
+  {
+   "round": "2",
+   "config_hash": "2f9c876e5ffa0f81",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "zmulti",
+    "side": "both_btc",
+    "fund_filter": 0.0003
+   },
+   "n": 842,
+   "avg_r": 0.0418,
+   "pf": 1.15,
+   "t_day": 0.82,
+   "by_year": {
+    "2022": {
+     "n": 231,
+     "avg_r": -0.0217
+    },
+    "2023": {
+     "n": 280,
+     "avg_r": 0.158
+    },
+    "2024": {
+     "n": 331,
+     "avg_r": -0.012
+    }
+   },
+   "long": {
+    "n": 478,
+    "avg_r": 0.1093
+   },
+   "short": {
+    "n": 364,
+    "avg_r": -0.0467
+   },
+   "funding_r_avg": -0.0096,
+   "exits": {
+    "SL": 369,
+    "time": 228,
+    "funding": 233,
+    "end": 12
+   }
+  },
+  {
+   "round": "3",
+   "config_hash": "54f82eb739a52db3",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 4.0,
+    "trail_atr": 4.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 844,
+   "avg_r": 0.1099,
+   "pf": 1.574,
+   "t_day": 2.25,
+   "by_year": {
+    "2022": {
+     "n": 237,
+     "avg_r": 0.0389
+    },
+    "2023": {
+     "n": 278,
+     "avg_r": 0.1914
+    },
+    "2024": {
+     "n": 329,
+     "avg_r": 0.0922
+    }
+   },
+   "long": {
+    "n": 462,
+    "avg_r": 0.1841
+   },
+   "short": {
+    "n": 382,
+    "avg_r": 0.0203
+   },
+   "funding_r_avg": -0.0085,
+   "exits": {
+    "time": 393,
+    "SL": 163,
+    "funding": 276,
+    "end": 12
+   }
+  },
+  {
+   "round": "3",
+   "config_hash": "ee8ef2107f1541e2",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 40,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 791,
+   "avg_r": 0.0857,
+   "pf": 1.307,
+   "t_day": 1.58,
+   "by_year": {
+    "2022": {
+     "n": 210,
+     "avg_r": -0.0126
+    },
+    "2023": {
+     "n": 260,
+     "avg_r": 0.1857
+    },
+    "2024": {
+     "n": 321,
+     "avg_r": 0.0691
+    }
+   },
+   "long": {
+    "n": 467,
+    "avg_r": 0.1371
+   },
+   "short": {
+    "n": 324,
+    "avg_r": 0.0118
+   },
+   "funding_r_avg": -0.0091,
+   "exits": {
+    "SL": 446,
+    "time": 80,
+    "funding": 248,
+    "end": 17
+   }
+  },
+  {
+   "round": "3",
+   "config_hash": "f19e3f7862330d6e",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 0.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 943,
+   "avg_r": 0.164,
+   "pf": 1.656,
+   "t_day": 2.78,
+   "by_year": {
+    "2022": {
+     "n": 269,
+     "avg_r": 0.0395
+    },
+    "2023": {
+     "n": 307,
+     "avg_r": 0.2167
+    },
+    "2024": {
+     "n": 367,
+     "avg_r": 0.2112
+    }
+   },
+   "long": {
+    "n": 516,
+    "avg_r": 0.2697
+   },
+   "short": {
+    "n": 427,
+    "avg_r": 0.0363
+   },
+   "funding_r_avg": -0.0076,
+   "exits": {
+    "time": 297,
+    "SL": 344,
+    "funding": 292,
+    "end": 10
+   }
+  },
+  {
+   "round": "3",
+   "config_hash": "7cb952200f10bf7e",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret14",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 1059,
+   "avg_r": 0.0382,
+   "pf": 1.139,
+   "t_day": 0.87,
+   "by_year": {
+    "2022": {
+     "n": 317,
+     "avg_r": -0.0755
+    },
+    "2023": {
+     "n": 338,
+     "avg_r": 0.1516
+    },
+    "2024": {
+     "n": 404,
+     "avg_r": 0.0326
+    }
+   },
+   "long": {
+    "n": 561,
+    "avg_r": 0.0989
+   },
+   "short": {
+    "n": 498,
+    "avg_r": -0.0302
+   },
+   "funding_r_avg": -0.0066,
+   "exits": {
+    "SL": 450,
+    "time": 314,
+    "funding": 277,
+    "end": 18
+   }
+  },
+  {
+   "round": "3",
+   "config_hash": "a8130b857c704b00",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 3.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 54,
+    "signal": "ret42",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 893,
+   "avg_r": 0.045,
+   "pf": 1.171,
+   "t_day": 0.98,
+   "by_year": {
+    "2022": {
+     "n": 227,
+     "avg_r": -0.0605
+    },
+    "2023": {
+     "n": 308,
+     "avg_r": 0.1467
+    },
+    "2024": {
+     "n": 358,
+     "avg_r": 0.0243
+    }
+   },
+   "long": {
+    "n": 531,
+    "avg_r": 0.0727
+   },
+   "short": {
+    "n": 362,
+    "avg_r": 0.0044
+   },
+   "funding_r_avg": -0.0082,
+   "exits": {
+    "SL": 343,
+    "time": 276,
+    "funding": 265,
+    "end": 9
+   }
+  },
+  {
+   "round": "4",
+   "config_hash": "2abbed61b2230eef",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 0.0,
+    "max_hold_d": 10,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 1361,
+   "avg_r": 0.0912,
+   "pf": 1.48,
+   "t_day": 3.08,
+   "by_year": {
+    "2022": {
+     "n": 382,
+     "avg_r": 0.0301
+    },
+    "2023": {
+     "n": 475,
+     "avg_r": 0.128
+    },
+    "2024": {
+     "n": 504,
+     "avg_r": 0.1027
+    }
+   },
+   "long": {
+    "n": 752,
+    "avg_r": 0.1334
+   },
+   "short": {
+    "n": 609,
+    "avg_r": 0.039
+   },
+   "funding_r_avg": -0.0043,
+   "exits": {
+    "time": 688,
+    "SL": 334,
+    "funding": 329,
+    "end": 10
+   }
+  },
+  {
+   "round": "4",
+   "config_hash": "bbde45c2dfdc2da9",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 0.0,
+    "max_hold_d": 30,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 753,
+   "avg_r": 0.1736,
+   "pf": 1.582,
+   "t_day": 2.43,
+   "by_year": {
+    "2022": {
+     "n": 217,
+     "avg_r": 0.0481
+    },
+    "2023": {
+     "n": 245,
+     "avg_r": 0.2247
+    },
+    "2024": {
+     "n": 291,
+     "avg_r": 0.224
+    }
+   },
+   "long": {
+    "n": 403,
+    "avg_r": 0.285
+   },
+   "short": {
+    "n": 350,
+    "avg_r": 0.0453
+   },
+   "funding_r_avg": -0.012,
+   "exits": {
+    "time": 173,
+    "SL": 325,
+    "funding": 237,
+    "end": 18
+   }
+  },
+  {
+   "round": "4",
+   "config_hash": "7de55d33416de126",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 0.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "long",
+    "fund_filter": 0.0003
+   },
+   "n": 523,
+   "avg_r": 0.2644,
+   "pf": 2.005,
+   "t_day": 2.68,
+   "by_year": {
+    "2022": {
+     "n": 83,
+     "avg_r": -0.2148
+    },
+    "2023": {
+     "n": 186,
+     "avg_r": 0.3749
+    },
+    "2024": {
+     "n": 254,
+     "avg_r": 0.3402
+    }
+   },
+   "long": {
+    "n": 523,
+    "avg_r": 0.2644
+   },
+   "short": {
+    "n": 0,
+    "avg_r": 0.0
+   },
+   "funding_r_avg": -0.0174,
+   "exits": {
+    "time": 159,
+    "SL": 199,
+    "funding": 163,
+    "end": 2
+   }
+  },
+  {
+   "round": "4",
+   "config_hash": "9bcabce9db09e722",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 0.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both"
+   },
+   "n": 1240,
+   "avg_r": 0.1259,
+   "pf": 1.607,
+   "t_day": 2.81,
+   "by_year": {
+    "2022": {
+     "n": 304,
+     "avg_r": 0.0406
+    },
+    "2023": {
+     "n": 353,
+     "avg_r": 0.1824
+    },
+    "2024": {
+     "n": 583,
+     "avg_r": 0.1361
+    }
+   },
+   "long": {
+    "n": 769,
+    "avg_r": 0.1834
+   },
+   "short": {
+    "n": 471,
+    "avg_r": 0.0321
+   },
+   "funding_r_avg": -0.0066,
+   "exits": {
+    "time": 300,
+    "SL": 351,
+    "funding": 579,
+    "end": 10
+   }
+  },
+  {
+   "round": "4",
+   "config_hash": "d5bedcd09ad02986",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 4.0,
+    "trail_atr": 0.0,
+    "max_hold_d": 20,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 965,
+   "avg_r": 0.1129,
+   "pf": 1.613,
+   "t_day": 2.91,
+   "by_year": {
+    "2022": {
+     "n": 274,
+     "avg_r": 0.0384
+    },
+    "2023": {
+     "n": 315,
+     "avg_r": 0.1588
+    },
+    "2024": {
+     "n": 376,
+     "avg_r": 0.1287
+    }
+   },
+   "long": {
+    "n": 531,
+    "avg_r": 0.179
+   },
+   "short": {
+    "n": 434,
+    "avg_r": 0.032
+   },
+   "funding_r_avg": -0.0051,
+   "exits": {
+    "time": 369,
+    "SL": 237,
+    "funding": 346,
+    "end": 13
+   }
+  },
+  {
+   "round": "5",
+   "config_hash": "de3e7d854497474e",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 0.0,
+    "max_hold_d": 10,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "long_btc",
+    "fund_filter": 0.0003
+   },
+   "n": 633,
+   "avg_r": 0.1579,
+   "pf": 1.754,
+   "t_day": 2.89,
+   "by_year": {
+    "2022": {
+     "n": 104,
+     "avg_r": -0.1153
+    },
+    "2023": {
+     "n": 249,
+     "avg_r": 0.3005
+    },
+    "2024": {
+     "n": 280,
+     "avg_r": 0.1327
+    }
+   },
+   "long": {
+    "n": 633,
+    "avg_r": 0.1579
+   },
+   "short": {
+    "n": 0,
+    "avg_r": 0.0
+   },
+   "funding_r_avg": -0.0109,
+   "exits": {
+    "time": 287,
+    "SL": 191,
+    "funding": 155
+   }
+  },
+  {
+   "round": "5",
+   "config_hash": "02f17c115ceb12f0",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 4.0,
+    "trail_atr": 0.0,
+    "max_hold_d": 10,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "both",
+    "fund_filter": 0.0003
+   },
+   "n": 1404,
+   "avg_r": 0.0689,
+   "pf": 1.503,
+   "t_day": 3.38,
+   "by_year": {
+    "2022": {
+     "n": 397,
+     "avg_r": 0.0298
+    },
+    "2023": {
+     "n": 491,
+     "avg_r": 0.0936
+    },
+    "2024": {
+     "n": 516,
+     "avg_r": 0.0755
+    }
+   },
+   "long": {
+    "n": 779,
+    "avg_r": 0.0967
+   },
+   "short": {
+    "n": 625,
+    "avg_r": 0.0343
+   },
+   "funding_r_avg": -0.0027,
+   "exits": {
+    "time": 777,
+    "SL": 220,
+    "funding": 397,
+    "end": 10
+   }
+  },
+  {
+   "round": "5",
+   "config_hash": "126cc9909977db07",
+   "config": {
+    "screen": "ts_trend_hourly_v1",
+    "universe": "extended",
+    "entry": "market",
+    "sl_atr": 3.0,
+    "trail_atr": 0.0,
+    "max_hold_d": 10,
+    "z_min": 0.5,
+    "lookback_days": 40,
+    "signal": "ret28",
+    "side": "long",
+    "fund_filter": 0.0003
+   },
+   "n": 755,
+   "avg_r": 0.1313,
+   "pf": 1.618,
+   "t_day": 2.79,
+   "by_year": {
+    "2022": {
+     "n": 130,
+     "avg_r": -0.0999
+    },
+    "2023": {
+     "n": 289,
+     "avg_r": 0.235
+    },
+    "2024": {
+     "n": 336,
+     "avg_r": 0.1316
+    }
+   },
+   "long": {
+    "n": 755,
+    "avg_r": 0.1313
+   },
+   "short": {
+    "n": 0,
+    "avg_r": 0.0
+   },
+   "funding_r_avg": -0.0099,
+   "exits": {
+    "time": 353,
+    "SL": 212,
+    "funding": 187,
+    "end": 3
+   }
+  }
+ ]
+}

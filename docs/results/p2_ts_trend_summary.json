@@ -1,0 +1,162 @@
+{
+ "family": "ts_trend",
+ "alpha": "ts_trend_tsmom",
+ "file": "heartless/strategy/alphas/ts_trend_tsmom.py",
+ "train_window": [
+  "2022-01-13",
+  "2024-12-31"
+ ],
+ "universe": "extended (20 symbols)",
+ "n_family": 27,
+ "t_day_bar": 3.0,
+ "gate": "t_day >= max(3, sqrt(2 ln N)); avgR >= 0.05; avgR > 0 in >= 2 of 2022/2023/2024; stress avgR > 0 (ROADMAP section 6)",
+ "hypotheses": [
+  "H1 symmetric Donchian 20/50-day breakout with a 3-ATR chandelier trail and 20-day time stop (screen: t_day 1.14 / 0.75)",
+  "H2 long-only Donchian with a BTC 168h filter (screen: t_day 0.91 / 0.88; 2022 negative)",
+  "H3 vol-scaled 28-day return sign, both sides / long+BTC (screen: 2.13 / 1.59) -> chosen signal family",
+  "H3 refinements: 7/14/28 average (0.96), BTC alignment both sides (1.28), entry funding filter (2.16), 14/42-day look-back (0.87 / 0.98)",
+  "exits: fixed holding period without trail beats the chandelier (2.78 vs 2.16); 10-day hold 3.08, 30-day 2.43, sl 4 2.91 (20-day hold)",
+  "lab: A (10-day hold) 2.93, B3 (sl 4) 2.96, B1 (long+BTC) 2.81, C (A with same-close renewal after the time stop) 3.03"
+ ],
+ "lab_runs": [
+  {
+   "label": "tsmom28_h10",
+   "description": "A: defaults at 2abcfd1 (28-day z>0.5, both sides, fund_max 0.0003, sl 3, no trail, 10-day hold; whole-day time stop)",
+   "file": "docs/results/p2_ts_trend_tsmom28_h10.json",
+   "stress_file": "docs/results/p2_ts_trend_tsmom28_h10_stress.json",
+   "config_hash": "ed96c3044008bdcf",
+   "code_hash": "a7d34c851125df4c",
+   "git_commit": "4c3d686d9a54884ef2acbc588dd3cd31357c4f5e",
+   "git_dirty": true,
+   "overrides": [],
+   "n": 1316,
+   "avg_r": 0.0845,
+   "profit_factor": 1.439,
+   "t_day": 2.93,
+   "by_year_avg_r": {
+    "2022": 0.0159,
+    "2023": 0.1294,
+    "2024": 0.0939
+   },
+   "long_avg_r": 0.1305,
+   "short_avg_r": 0.0264,
+   "stress_avg_r": 0.0796,
+   "stress_t_day": 2.78,
+   "gate": {
+    "t_day": false,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": false
+  },
+  {
+   "label": "tsmom28_h10_sl4",
+   "description": "B3: A with sl_atr=4.0",
+   "file": "docs/results/p2_ts_trend_tsmom28_h10_sl4.json",
+   "stress_file": "docs/results/p2_ts_trend_tsmom28_h10_sl4_stress.json",
+   "config_hash": "7ef7fc66f3495b80",
+   "code_hash": "a7d34c851125df4c",
+   "git_commit": "2abcfd17bff487a8046313ffe22978d696cf683c",
+   "git_dirty": false,
+   "overrides": [
+    "ts_trend_tsmom.sl_atr=4.0"
+   ],
+   "n": 1352,
+   "avg_r": 0.0618,
+   "profit_factor": 1.439,
+   "t_day": 2.96,
+   "by_year_avg_r": {
+    "2022": 0.009,
+    "2023": 0.0934,
+    "2024": 0.0721
+   },
+   "long_avg_r": 0.0914,
+   "short_avg_r": 0.0241,
+   "stress_avg_r": 0.0583,
+   "stress_t_day": 2.8,
+   "gate": {
+    "t_day": false,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": false
+  },
+  {
+   "label": "tsmom28_h10_longbtc",
+   "description": "B1: A longs only with the BTC 168h filter (side_mode=1, btc_filter=1)",
+   "file": "docs/results/p2_ts_trend_tsmom28_h10_longbtc.json",
+   "stress_file": "docs/results/p2_ts_trend_tsmom28_h10_longbtc_stress.json",
+   "config_hash": "5151e949a0c4ff52",
+   "code_hash": "a7d34c851125df4c",
+   "git_commit": "2abcfd17bff487a8046313ffe22978d696cf683c",
+   "git_dirty": false,
+   "overrides": [
+    "ts_trend_tsmom.side_mode=1",
+    "ts_trend_tsmom.btc_filter=1"
+   ],
+   "n": 624,
+   "avg_r": 0.1486,
+   "profit_factor": 1.704,
+   "t_day": 2.81,
+   "by_year_avg_r": {
+    "2022": -0.1147,
+    "2023": 0.2694,
+    "2024": 0.1329
+   },
+   "long_avg_r": 0.1486,
+   "short_avg_r": null,
+   "stress_avg_r": 0.143,
+   "stress_t_day": 2.71,
+   "gate": {
+    "t_day": false,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": false
+  },
+  {
+   "label": "tsmom28_h10_renew",
+   "description": "C: defaults at 852ba08 = A with the time stop a minute before the daily close (renewal at the same close)",
+   "file": "docs/results/p2_ts_trend_tsmom28_h10_renew.json",
+   "stress_file": "docs/results/p2_ts_trend_tsmom28_h10_renew_stress.json",
+   "config_hash": "ce111fcb3c7bbc7e",
+   "code_hash": "c08ab6d96798c698",
+   "git_commit": "852ba08413a68b1c0df4f96d52effa5deb4a782b",
+   "git_dirty": false,
+   "overrides": [],
+   "n": 1335,
+   "avg_r": 0.0912,
+   "profit_factor": 1.478,
+   "t_day": 3.03,
+   "by_year_avg_r": {
+    "2022": 0.0205,
+    "2023": 0.1285,
+    "2024": 0.1083
+   },
+   "long_avg_r": 0.135,
+   "short_avg_r": 0.0353,
+   "stress_avg_r": 0.0861,
+   "stress_t_day": 2.88,
+   "gate": {
+    "t_day": true,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": true
+  }
+ ],
+ "final_candidates": [
+  "tsmom28_h10_renew"
+ ],
+ "caveats": [
+  "C clears the t_day bar by 0.03 after 27 recorded trials; the renewal fix was found by comparing the screen with the lab (post hoc, recorded as a new trial)",
+  "profit is concentrated: the 10 best exit days hold 67% of total R; without the 5 best exit days t_day is 2.17",
+  "longs carry the edge (+0.135R vs shorts +0.035R); 2022 longs lost (-0.082R); 2022 overall +0.021R (t_day 0.35)",
+  "the engine's funding-avoidance exit ends ~24% of trades near 0R; the time stop ends ~51% (avg -0.03R); 195 trail exits after a run past the deadline (+1.37R avg) make the profit"
+ ],
+ "screen_file": "docs/results/p2_ts_trend_screen.json"
+}
