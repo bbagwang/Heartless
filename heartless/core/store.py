@@ -403,6 +403,18 @@ class Store:
                      (json.dumps(metrics, default=str), note if note is not None else rows[0]["note"],
                       role or rows[0]["role"], vid))
 
+    def update_params_metrics(self, vid: str, fields: dict) -> None:
+        """Merge `fields` into the metrics of a stored parameter version (its other metrics are kept)."""
+        rows = self.query("SELECT metrics FROM params_versions WHERE id=?", (vid,))
+        if not rows:
+            return
+        try:
+            metrics = json.loads(rows[0]["metrics"] or "{}")
+        except Exception:  # noqa: BLE001
+            metrics = {}
+        metrics.update(fields)
+        self.execute("UPDATE params_versions SET metrics=? WHERE id=?", (json.dumps(metrics, default=str), vid))
+
     def params_versions_since(self, since: int, source: str | None = None) -> list[dict]:
         """Parameter versions created after `since` (optionally of one source, e.g. "kill-switch"), newest first: the
         champion changes a challenger's promotion must not undo (C2-B)."""

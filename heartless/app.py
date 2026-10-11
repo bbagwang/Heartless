@@ -803,9 +803,9 @@ class Heartless:
 
     # --- challenger / champion management ------------------------------------------------------
     def challenger_trial_ms(self, slot: ChallengerSlot) -> int:
-        """How long a challenger keeps its slot before a new candidate may replace it: the exit days it needs to be
-        promotable at all (PROMOTION_MIN_DAYS, or 30 days when it switches on an alpha that failed out of sample).
-        Research runs every few hours; evicting younger slots would churn challengers before any could qualify."""
+        """How long a challenger keeps its slot before a new candidate may replace it (unless it is losing): its whole
+        trial, i.e. its last promotion checkpoint (research.trial_days). Research runs every few hours; evicting
+        younger slots would churn challengers before the late checkpoints, where most of the power is."""
         return self.research.trial_days(slot) * MS_DAY
 
     async def install_challenger(self, params: StrategyParams, source: str) -> ChallengerSlot | None:
@@ -887,6 +887,10 @@ class Heartless:
     def _remember_tried(self, slot: ChallengerSlot, decision: dict, reason: str) -> None:
         diff = self.research.slot_diff(slot)
         if not any(diff.values()):
+            return
+        if decision.get("kind") == "kill_switch" and decision.get("alpha") not in R.diff_alphas(diff):
+            # the trip judged an alpha the challenger inherited from its base (it trades the base's settings of every
+            # alpha its change does not touch), not the change: a later trial of the change is no second look at it
             return
         since = now_ms() - max(1, self.s.challenger_retry_days) * MS_DAY
         rows = [r for r in (self.store.get(self.TRIED_KEY, []) or []) if int(r.get("at", 0)) >= since]

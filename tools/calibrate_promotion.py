@@ -20,7 +20,7 @@ Model (one simulated challenger = 90 calendar days)
   of its trades replaced by fresh draws (T, "tweak"). Under the alternative the changed part has the edge.
 
 The statistics are exactly those of research.judge_challenger: day-clustered t (t_day), PF and drawdown in R, the
-paired calendar-day difference t, the champion's trade count choosing the path (tests/test_c2b_calibration.py checks
+paired calendar-day difference t, the champion's trade count choosing the path (tests/test_c2b_promotion.py checks
 the vectorised versions against heartless.execution.stats on simulated paths). The other conditions of each path
 (n, exit days, mean, PF, drawdown) stay as they are; only the t threshold depends on the checkpoint.
 

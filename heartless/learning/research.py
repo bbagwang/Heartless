@@ -363,7 +363,16 @@ class ResearchManager:
                                   base=m.get("base", ""), base_created=int(m.get("base_created", 0) or 0),
                                   diff=m.get("diff") or {}, base_values=m.get("base_values") or {},
                                   base_params=m.get("base_params"))
-            self.slot_diff(slot)  # an older stored challenger without a recorded base: the current champion
+            if not m.get("diff"):
+                # an older stored challenger without a recorded base: the current champion, recorded now. Derived
+                # again at every start, it would be a later champion after a promotion or a kill-switch trip, and
+                # the challenger's stale values of what that champion change set would join its diff (a promotion
+                # would then undo the change)
+                self.slot_diff(slot)
+                if slot.diff:
+                    self.store.update_params_metrics(row["id"], {
+                        "base": slot.base, "base_created": slot.base_created, "diff": slot.diff,
+                        "base_values": slot.base_values, "base_params": slot.base_params})
             slots.append(slot)
         return slots
 
@@ -382,6 +391,16 @@ class ResearchManager:
     def due(self, now: int) -> bool:
         return (now - self.last_cycle_ts) >= self.s.research_interval_minutes * 60_000
 
+    async def _await_context_fill(self) -> None:
+        """Wait for the app's start-up fill of the live context store (app._fill_context_gaps). The worker loads the
+        context of its window once, when its backtester is built, and a cycle is due at once after a start that
+        followed a downtime of more than RESEARCH_INTERVAL_MINUTES (or on a fresh install): submitted while the fill
+        still runs, it backtested the hours not yet built with an empty ctx.market."""
+        task = getattr(self.app, "_ctx_fill_task", None)
+        if task is not None and not task.done():
+            log.info("research cycle waits for the live context store's start-up fill")
+            await asyncio.wait([task])  # never raises the fill's own error or cancellation (it logs its failures)
+
     async def cycle(self, force: bool = False) -> dict | None:
         if self.running:
             return None
@@ -392,6 +411,10 @@ class ResearchManager:
         self.last_cycle_ts = now
         self.store.set("research.last_cycle", now)
         try:
+            await self._await_context_fill()
+            if self.stopped:
+                self.running = False
+                return None
             if self.pool is None:
                 self.pool = _new_pool()
             loop = asyncio.get_running_loop()

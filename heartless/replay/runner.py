@@ -155,8 +155,11 @@ def _settings(cfg: ReplayConfig, work: Path, symbols: list[str]):
     from heartless.config import Settings
 
     always = [s for s in "BTCUSDT,ETHUSDT,SOLUSDT".split(",") if s in symbols]
+    # CONTEXT_DB is the replayed bot's live context store, pinned into the work dir like every other file it writes:
+    # taken from the environment (the lab's `CONTEXT_DB=data/longhist/context.db` habit), the bot appended its
+    # snapshots to that offline table and its retention prune, run at the virtual time, deleted every older row of it
     values = {**REPLAY_DEFAULTS, "ALWAYS_INCLUDE": ",".join(always) or symbols[0], **cfg.settings, **FORCED_SETTINGS,
-              "HEARTLESS_DATA_DIR": str(work), "LOG_LEVEL": cfg.log_level}
+              "HEARTLESS_DATA_DIR": str(work), "CONTEXT_DB": str(work / "context.db"), "LOG_LEVEL": cfg.log_level}
     s = Settings(_env_file=None, **values)
     s.data_dir.mkdir(parents=True, exist_ok=True)
     return s
