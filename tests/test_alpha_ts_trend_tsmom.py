@@ -105,7 +105,7 @@ def test_long_geometry_market_entry_no_target_daily_time_stop():
     assert s.entry_style is EntryStyle.MARKET and s.limit_price is None
     assert math.isclose(s.stop, 100.0 - 3.0 * 3.0) and s.take_profit is None and s.tp1 is None
     assert s.timeframe == "1d" and s.atr == 3.0 and s.trail_atr_mult == 0.0
-    assert s.max_hold_bars == 10 * 1440 and s.tags["ref_price"] == 100.0
+    assert s.max_hold_bars == 10 * 1440 - 1 and s.tags["ref_price"] == 100.0  # ends before the daily close
     assert math.isclose(s.tags["z"], (100 / 85 - 1) / (0.03 * math.sqrt(28)))
     assert not s.exit_on_regime_change and s.entry_ttl_bars is None
 
@@ -214,7 +214,8 @@ def test_synthetic_trends_give_the_trend_side_and_a_flat_market_nothing():
 
 def test_engine_round_trip_enters_after_the_daily_close_and_exits_on_the_time_stop():
     # 29 days of rise (the first decision with a 28-day look-back is at the day-28 close), then a flat market: the
-    # long opens at the next 00:00 UTC open and is closed by the time stop after 10 days, not 0.5R up
+    # long opens at the next 00:00 UTC open, is closed by the time stop a minute before its 10th daily close (not
+    # 0.5R up), and that same close renews it because the 28-day trend still holds
     s = Settings(_env_file=None, DAILY_LOSS_LIMIT_PCT=1000.0, WEEKLY_LOSS_LIMIT_PCT=1000.0, MAX_DRAWDOWN_HALT_PCT=1000.0)
     ca = _candles([0.01] * 29 + [0.0] * 16, seed=7)
     info = {SYM: SymbolInfo(SYM, "ETH", "USDT", tick_size=0.01, step_size=0.001, min_qty=0.001, min_notional=5.0,
@@ -226,9 +227,10 @@ def test_engine_round_trip_enters_after_the_daily_close_and_exits_on_the_time_st
     t0 = trades[0]
     assert t0["side"] == "LONG" and t0["entry_time"] == DAY0 + 29 * MS_DAY  # filled at the open after the day-28 close
     assert "time stop" in t0["exit_reason"]
-    held = (t0["exit_time"] - t0["entry_time"]) / MS_DAY
-    assert 10.0 - 2 / 1440 <= held <= 10.0 + 2 / 1440
+    assert t0["exit_time"] == t0["entry_time"] + 10 * MS_DAY - MS_MINUTE - 1  # close of the 23:58 bar
     assert math.isfinite(t0["r_multiple"]) and abs(t0["r_multiple"]) < 1.0
+    assert len(trades) >= 2 and trades[1]["side"] == "LONG"
+    assert trades[1]["entry_time"] == t0["entry_time"] + 10 * MS_DAY  # renewed at the same daily close, not a day late
 
 
 @pytest.mark.parametrize("field", ["lookback_d", "max_hold"])

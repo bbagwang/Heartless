@@ -15,7 +15,9 @@ of sample, so this design holds days to weeks, has no target and pays costs (~13
 Screening on TRAIN 2022-2024 only (ts_trend trial ledger; an hourly simulator of the engine's exits): the 28-day
 return beat 20/50-day Donchian breakouts and 7/14/42-day returns, the fixed holding period beat the 3-ATR chandelier
 (which cut trends at the forced breakeven), and a BTC 7-day trend filter did not help. Longs carried most of the
-edge. Lab results: docs/results/p2_ts_trend_*.json.
+edge. Lab results: docs/results/p2_ts_trend_*.json. The time stop ends a minute before the daily close so the
+same close can renew the position (with whole days the engine skipped that decision: 619 of 666 time stops in
+the first lab run fell on the 23:59 decision bar and the renewal came a day late).
 """
 from __future__ import annotations
 
@@ -88,6 +90,9 @@ class TsTrendTsmom(Alpha):
         if conf < p["min_conf"]:
             return None
         stop = close - sg * p["sl_atr"] * atr
+        # the hold ends one minute before a daily close: the entry fills at the 00:00 open, so whole days would end
+        # it on the 23:59 bar, which carries the day's only decision, and the engine (busy closing the position on
+        # that bar) would skip the re-decision until the next day instead of renewing a trend that still holds
         hold = int(p["max_hold"])
         up = side is Side.LONG
         reason = (f"{L}일 수익률 {'상승' if up else '하락'} 추세(변동성 z {z:+.2f}) → 일봉 마감 시장가 "
@@ -95,5 +100,6 @@ class TsTrendTsmom(Alpha):
                   f"(0.5R 이상이면 추적 손절로 연장)")
         return Signal(alpha=self.name, symbol=ctx.symbol, side=side, confidence=conf, reason=reason, stop=stop,
                       take_profit=None, tp1=None, entry_style=EntryStyle.MARKET,
-                      max_hold_bars=self.bars_to_1m(hold, TF), trail_atr_mult=p["trail_atr"], atr=atr, timeframe=TF,
+                      max_hold_bars=self.bars_to_1m(hold, TF) - 1, trail_atr_mult=p["trail_atr"], atr=atr,
+                      timeframe=TF,
                       tags={"ref_price": close, "z": z, "lookback_d": L, "funding": fund, "stop_atr": p["sl_atr"]})
