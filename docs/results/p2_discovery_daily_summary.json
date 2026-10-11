@@ -1,0 +1,710 @@
+{
+ "family": "discovery_daily",
+ "alpha": "discovery_daily_capdisp",
+ "file": "heartless/strategy/alphas/discovery_daily_capdisp.py",
+ "train_window": [
+  "2022-01-13",
+  "2024-12-31"
+ ],
+ "universe": "extended (20 symbols)",
+ "n_family": 105068,
+ "t_day_bar": 4.8088,
+ "gate": "t_day >= max(3, sqrt(2 ln N)); avgR >= 0.05; avgR > 0 in >= 2 of 2022/2023/2024; stress avgR > 0 (ROADMAP section 6); N = every rule the discovery run evaluated + screened rules + lab configurations",
+ "ledger": {
+  "lines": 13,
+  "tools": {
+   "discover": 1,
+   "screen": 2,
+   "lab": 10
+  },
+  "periods": {
+   "TRAIN": 13
+  },
+  "first": "2026-10-11T16:38:48Z",
+  "last": "2026-10-11T19:48:32Z",
+  "configs": 8,
+  "n_tests": 105068,
+  "threshold": 4.809
+ },
+ "discovery": {
+  "command": "heartless discover --universe extended --grid 1h,1d --templates all --context --tag discovery_daily --train 2022-01-13:2024-01-01 --valid 2024-01-01:2025-01-01 --workers 2 --out docs/results/p2_discovery_daily_discover.json",
+  "note": "run through a wrapper that only skips the CLI's discovery.last key write into the read-only candle DB (scratch discover_ro.py); everything else is the unchanged CLI code path",
+  "mine_window": "2022-01-13..2023-12-31",
+  "validate_window": "2024-01-01..2024-12-31 (inside TRAIN)",
+  "rules_evaluated": 104871,
+  "t_bar": 4.8084,
+  "rows": {
+   "train": 347109,
+   "valid": 183000,
+   "1h": {
+    "train": 333224,
+    "valid": 175680
+   },
+   "1d": {
+    "train": 13885,
+    "valid": 7320
+   }
+  },
+  "seconds": 424.0,
+  "config_hash": "923fa9c2bf28507b",
+  "kept_rules": 16,
+  "passed_rules": 3,
+  "passed": [
+   {
+    "id": "rcbde21f7",
+    "tf": "1h",
+    "side": "LONG",
+    "conds": [
+     [
+      "m.oi_chg_24h_agg",
+      "<",
+      -0.053439
+     ],
+     [
+      "x.top_ls_pos_chg_4h",
+      "<",
+      -0.033869
+     ],
+     [
+      "m.btc_ret_4h",
+      "<",
+      -0.010443
+     ]
+    ],
+    "sl_atr": 4.0,
+    "tp_r": null,
+    "hold_min": 1440,
+    "train": {
+     "n": 218,
+     "days": 44,
+     "avg_r": 0.2320151203450348,
+     "t": 4.68018267882443,
+     "t_ex": 6.075262051921427
+    },
+    "valid": {
+     "n": 473,
+     "days": 48,
+     "avg_r": 0.1545343640519478,
+     "t": 1.7643973774683723,
+     "t_ex": 2.590773214701394
+    }
+   },
+   {
+    "id": "r1458e9d8",
+    "tf": "1h",
+    "side": "LONG",
+    "conds": [
+     [
+      "c.ret_24h",
+      "<",
+      -0.067328
+     ],
+     [
+      "15m.hurst",
+      "<",
+      0.336784
+     ],
+     [
+      "1h.adx",
+      ">",
+      49.615152
+     ]
+    ],
+    "sl_atr": 4.0,
+    "tp_r": null,
+    "hold_min": 1440,
+    "train": {
+     "n": 157,
+     "days": 42,
+     "avg_r": 0.24391354687780928,
+     "t": 3.960850697848754,
+     "t_ex": 5.629792573941629
+    },
+    "valid": {
+     "n": 66,
+     "days": 24,
+     "avg_r": 0.2849231683101463,
+     "t": 1.7252556881910572,
+     "t_ex": 2.3916339606180586
+    }
+   },
+   {
+    "id": "rc899282d",
+    "tf": "1h",
+    "side": "LONG",
+    "conds": [
+     [
+      "c.ret_24h",
+      "<",
+      -0.067328
+     ],
+     [
+      "15m.hurst",
+      "<",
+      0.336784
+     ],
+     [
+      "m.disp_24h",
+      ">",
+      0.031298
+     ]
+    ],
+    "sl_atr": 4.0,
+    "tp_r": null,
+    "hold_min": 1440,
+    "train": {
+     "n": 172,
+     "days": 53,
+     "avg_r": 0.2455275758315099,
+     "t": 4.472366763938395,
+     "t_ex": 5.178410108384328
+    },
+    "valid": {
+     "n": 168,
+     "days": 55,
+     "avg_r": 0.2034701613994058,
+     "t": 2.676758896646077,
+     "t_ex": 2.72319029895754
+    }
+   }
+  ],
+  "observation": "all 16 kept rules (8 per grid) are LONG with the 4 ATR catastrophic stop and a time exit (15 of 16 at 24h): buy a sharp coin or market drop; every 1d-grid rule failed VALID-2024"
+ },
+ "dow_screen": {
+  "1d": {
+   "rules": 96,
+   "best": {
+    "side": "SHORT",
+    "tmpl": [
+     1.0,
+     1.5,
+     240
+    ],
+    "rule": "dow=0",
+    "n": 1992,
+    "avg_r": 0.0799,
+    "avg_ex": 0.1884,
+    "t": 1.04,
+    "t_ex": 2.5
+   },
+   "validated": 0,
+   "ledger_hash": "426e573edf07b836"
+  },
+  "1h": {
+   "rules": 96,
+   "best": {
+    "side": "LONG",
+    "tmpl": [
+     2.0,
+     3.0,
+     720
+    ],
+    "rule": "dow=5",
+    "n": 5057,
+    "avg_r": -0.0259,
+    "avg_ex": 0.0631,
+    "t": -0.76,
+    "t_ex": 1.9
+   },
+   "validated": 0,
+   "ledger_hash": "bb1d50724a837655"
+  }
+ },
+ "hypotheses": [
+  "H0 design (before any result): run the pre-registered miner once (1h + 1d grids, all six exit templates, market context, default search: beam 30, depth 3, min 150 trades) with its own split inside TRAIN (mine 2022-01-13..2023-12-31, validate 2024); take to the lab only rules that pass the miner's own validation (TRAIN excess t >= the family bar, raw t >= 2, 2024 n >= 40, avgR >= 0.03, t >= 1.5, excess > 0); lab set fixed in advance: each passing rule alone + all passing rules together; thresholds never tuned",
+  "H1 seasonality: the miner has hour-of-day (t.hour_utc, t.min_to_funding) but no weekday feature, so weekday d / weekend x side x template was screened on both grids with the miner's datasets and statistics (192 rules): best market-excess t 2.50 (Monday short, 1d grid, 2024 t -0.98), nothing validated, no lab",
+  "result of H0: 104,871 rules, bar 4.81; 3 rules passed, all LONG after a sharp drop with the 4 ATR catastrophic stop and a 24h time exit (no hour-of-day feature in any of the 16 kept rules): a market-wide OI flush (rcbde21f7) and two coin capitulations with mean-reverting 15m bars (r1458e9d8, rc899282d)",
+  "lab: rc899282d alone passes every TRAIN condition (t_day 4.89 vs 4.81); the OI flush rule fails (t_day 2.45: 2024 trades cluster on few days, 2022 has almost no top-trader data), the ADX variant fails (4.48), and the union of the three fails (3.54): the candidate is the single rule"
+ ],
+ "lab_runs": [
+  {
+   "label": "capdisp",
+   "description": "rule rc899282d alone (discovery VALID-2024 t 2.68, the best of the three passing rules)",
+   "rules": [
+    "rc899282d"
+   ],
+   "file": "docs/results/p2_discovery_daily_capdisp.json",
+   "stress_file": "docs/results/p2_discovery_daily_capdisp_stress.json",
+   "config_hash": "d2e6b58ed1e93e19",
+   "code_hash": "b642b10d24bb92fc",
+   "git_commit": "31919285529ce4e40fa044ffaa25238e4bf8f3fe",
+   "git_dirty": false,
+   "argv": [
+    "/home/user/Heartless/heartless/__main__.py",
+    "lab",
+    "--alpha",
+    "discovered",
+    "--params",
+    "docs/results/p2_discovery_daily_params_capdisp.json",
+    "--start",
+    "2022-01-13",
+    "--end",
+    "2025-01-01",
+    "--universe",
+    "extended",
+    "--tag",
+    "discovery_daily",
+    "--by-side",
+    "--workers",
+    "2",
+    "--out",
+    "docs/results/p2_discovery_daily_capdisp.json",
+    "--trades-out",
+    "/tmp/claude-0/-home-user-Heartless/f5dd91df-8b1b-5418-b9c6-337246e66c00/scratchpad/p2_discovery_daily/trades_capdisp.json"
+   ],
+   "n": 327,
+   "avg_r": 0.2245,
+   "profit_factor": 2.674,
+   "t_day": 4.89,
+   "by_year_avg_r": {
+    "2022": 0.2939,
+    "2023": 0.2143,
+    "2024": 0.1943
+   },
+   "by_year_n": {
+    "2022": 84,
+    "2023": 76,
+    "2024": 167
+   },
+   "by_year_t_day": {
+    "2022": 3.86,
+    "2023": 4.42,
+    "2024": 2.5
+   },
+   "long_avg_r": 0.2245,
+   "long_n": 327,
+   "short_avg_r": null,
+   "short_n": 0,
+   "months_positive": "15/19",
+   "symbols_positive": "18/19",
+   "avg_hold_h": 23.0,
+   "boundary_trades": 0,
+   "seconds": 1157.6,
+   "stress_avg_r": 0.2147,
+   "stress_t_day": 4.7,
+   "stress_profit_factor": 2.568,
+   "gate": {
+    "t_day": true,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": true
+  },
+  {
+   "label": "oiflush",
+   "description": "rule rcbde21f7 alone (market OI flush + top traders cutting longs + BTC -1% in 4h)",
+   "rules": [
+    "rcbde21f7"
+   ],
+   "file": "docs/results/p2_discovery_daily_oiflush.json",
+   "stress_file": "docs/results/p2_discovery_daily_oiflush_stress.json",
+   "config_hash": "9596f4d0724d7af4",
+   "code_hash": "b642b10d24bb92fc",
+   "git_commit": "31919285529ce4e40fa044ffaa25238e4bf8f3fe",
+   "git_dirty": true,
+   "argv": [
+    "/home/user/Heartless/heartless/__main__.py",
+    "lab",
+    "--alpha",
+    "discovered",
+    "--params",
+    "docs/results/p2_discovery_daily_params_oiflush.json",
+    "--start",
+    "2022-01-13",
+    "--end",
+    "2025-01-01",
+    "--universe",
+    "extended",
+    "--tag",
+    "discovery_daily",
+    "--by-side",
+    "--workers",
+    "2",
+    "--out",
+    "docs/results/p2_discovery_daily_oiflush.json",
+    "--trades-out",
+    "/tmp/claude-0/-home-user-Heartless/f5dd91df-8b1b-5418-b9c6-337246e66c00/scratchpad/p2_discovery_daily/trades_oiflush.json"
+   ],
+   "n": 689,
+   "avg_r": 0.1727,
+   "profit_factor": 2.15,
+   "t_day": 2.45,
+   "by_year_avg_r": {
+    "2022": -0.0286,
+    "2023": 0.2663,
+    "2024": 0.15
+   },
+   "by_year_n": {
+    "2022": 33,
+    "2023": 185,
+    "2024": 471
+   },
+   "by_year_t_day": {
+    "2022": -0.15,
+    "2023": 5.74,
+    "2024": 1.49
+   },
+   "long_avg_r": 0.1727,
+   "long_n": 689,
+   "short_avg_r": null,
+   "short_n": 0,
+   "months_positive": "19/25",
+   "symbols_positive": "20/20",
+   "avg_hold_h": 23.2,
+   "boundary_trades": 0,
+   "seconds": 1151.9,
+   "stress_avg_r": 0.1603,
+   "stress_t_day": 2.3,
+   "stress_profit_factor": 2.06,
+   "gate": {
+    "t_day": false,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": false
+  },
+  {
+   "label": "capadx",
+   "description": "rule r1458e9d8 alone (24h capitulation, mean-reverting 15m, 1h ADX > 49.6)",
+   "rules": [
+    "r1458e9d8"
+   ],
+   "file": "docs/results/p2_discovery_daily_capadx.json",
+   "stress_file": "docs/results/p2_discovery_daily_capadx_stress.json",
+   "config_hash": "be14d7d309a44db0",
+   "code_hash": "b642b10d24bb92fc",
+   "git_commit": "31919285529ce4e40fa044ffaa25238e4bf8f3fe",
+   "git_dirty": true,
+   "argv": [
+    "/home/user/Heartless/heartless/__main__.py",
+    "lab",
+    "--alpha",
+    "discovered",
+    "--params",
+    "docs/results/p2_discovery_daily_params_capadx.json",
+    "--start",
+    "2022-01-13",
+    "--end",
+    "2025-01-01",
+    "--universe",
+    "extended",
+    "--tag",
+    "discovery_daily",
+    "--by-side",
+    "--workers",
+    "2",
+    "--out",
+    "docs/results/p2_discovery_daily_capadx.json",
+    "--trades-out",
+    "/tmp/claude-0/-home-user-Heartless/f5dd91df-8b1b-5418-b9c6-337246e66c00/scratchpad/p2_discovery_daily/trades_capadx.json"
+   ],
+   "n": 208,
+   "avg_r": 0.2784,
+   "profit_factor": 3.22,
+   "t_day": 4.48,
+   "by_year_avg_r": {
+    "2022": 0.3288,
+    "2023": 0.1993,
+    "2024": 0.2758
+   },
+   "by_year_n": {
+    "2022": 88,
+    "2023": 54,
+    "2024": 66
+   },
+   "by_year_t_day": {
+    "2022": 3.91,
+    "2023": 3.25,
+    "2024": 1.8
+   },
+   "long_avg_r": 0.2784,
+   "long_n": 208,
+   "short_avg_r": null,
+   "short_n": 0,
+   "months_positive": "17/18",
+   "symbols_positive": "18/19",
+   "avg_hold_h": 24.1,
+   "boundary_trades": 0,
+   "seconds": 1144.1,
+   "stress_avg_r": 0.2669,
+   "stress_t_day": 4.33,
+   "stress_profit_factor": 3.074,
+   "gate": {
+    "t_day": false,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": false
+  },
+  {
+   "label": "all3",
+   "description": "the three passing rules together in one discovered alpha (what the live discovery cycle would install)",
+   "rules": [
+    "rcbde21f7",
+    "r1458e9d8",
+    "rc899282d"
+   ],
+   "file": "docs/results/p2_discovery_daily_all3.json",
+   "stress_file": "docs/results/p2_discovery_daily_all3_stress.json",
+   "config_hash": "b5685a228d300b6d",
+   "code_hash": "b642b10d24bb92fc",
+   "git_commit": "31919285529ce4e40fa044ffaa25238e4bf8f3fe",
+   "git_dirty": true,
+   "argv": [
+    "/home/user/Heartless/heartless/__main__.py",
+    "lab",
+    "--alpha",
+    "discovered",
+    "--params",
+    "docs/results/p2_discovery_daily_params_all3.json",
+    "--start",
+    "2022-01-13",
+    "--end",
+    "2025-01-01",
+    "--universe",
+    "extended",
+    "--tag",
+    "discovery_daily",
+    "--by-side",
+    "--workers",
+    "2",
+    "--out",
+    "docs/results/p2_discovery_daily_all3.json",
+    "--trades-out",
+    "/tmp/claude-0/-home-user-Heartless/f5dd91df-8b1b-5418-b9c6-337246e66c00/scratchpad/p2_discovery_daily/trades_all3.json"
+   ],
+   "n": 990,
+   "avg_r": 0.1804,
+   "profit_factor": 2.157,
+   "t_day": 3.54,
+   "by_year_avg_r": {
+    "2022": 0.2401,
+    "2023": 0.2287,
+    "2024": 0.1422
+   },
+   "by_year_n": {
+    "2022": 173,
+    "2023": 241,
+    "2024": 576
+   },
+   "by_year_t_day": {
+    "2022": 3.32,
+    "2023": 5.92,
+    "2024": 1.71
+   },
+   "long_avg_r": 0.1804,
+   "long_n": 990,
+   "short_avg_r": null,
+   "short_n": 0,
+   "months_positive": "25/32",
+   "symbols_positive": "20/20",
+   "avg_hold_h": 22.9,
+   "boundary_trades": 0,
+   "seconds": 1139.2,
+   "stress_avg_r": 0.1685,
+   "stress_t_day": 3.33,
+   "stress_profit_factor": 2.069,
+   "gate": {
+    "t_day": false,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": false
+  },
+  {
+   "label": "capdisp_alpha",
+   "description": "the candidate alpha file discovery_daily_capdisp (rule rc899282d hard-coded, shipped defaults): reproduction of capdisp",
+   "rules": [
+    "rc899282d"
+   ],
+   "file": "docs/results/p2_discovery_daily_capdisp_alpha.json",
+   "stress_file": "docs/results/p2_discovery_daily_capdisp_alpha_stress.json",
+   "config_hash": "2a59beb9ef0af63a",
+   "code_hash": "fcfcf0bc078d2460",
+   "git_commit": "31919285529ce4e40fa044ffaa25238e4bf8f3fe",
+   "git_dirty": true,
+   "argv": [
+    "/home/user/Heartless/heartless/__main__.py",
+    "lab",
+    "--alpha",
+    "discovery_daily_capdisp",
+    "--start",
+    "2022-01-13",
+    "--end",
+    "2025-01-01",
+    "--universe",
+    "extended",
+    "--tag",
+    "discovery_daily",
+    "--by-side",
+    "--workers",
+    "2",
+    "--out",
+    "docs/results/p2_discovery_daily_capdisp_alpha.json",
+    "--trades-out",
+    "/tmp/claude-0/-home-user-Heartless/f5dd91df-8b1b-5418-b9c6-337246e66c00/scratchpad/p2_discovery_daily/trades_capdisp_alpha.json"
+   ],
+   "n": 327,
+   "avg_r": 0.2245,
+   "profit_factor": 2.674,
+   "t_day": 4.89,
+   "by_year_avg_r": {
+    "2022": 0.2939,
+    "2023": 0.2143,
+    "2024": 0.1943
+   },
+   "by_year_n": {
+    "2022": 84,
+    "2023": 76,
+    "2024": 167
+   },
+   "by_year_t_day": {
+    "2022": 3.86,
+    "2023": 4.42,
+    "2024": 2.5
+   },
+   "long_avg_r": 0.2245,
+   "long_n": 327,
+   "short_avg_r": null,
+   "short_n": 0,
+   "months_positive": "15/19",
+   "symbols_positive": "18/19",
+   "avg_hold_h": 23.0,
+   "boundary_trades": 0,
+   "seconds": 995.9,
+   "stress_avg_r": 0.2147,
+   "stress_t_day": 4.7,
+   "stress_profit_factor": 2.568,
+   "gate": {
+    "t_day": true,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": true
+  }
+ ],
+ "final_candidates": [
+  {
+   "rank": 1,
+   "label": "capdisp",
+   "alpha": "discovery_daily_capdisp",
+   "rules": [
+    "rc899282d"
+   ],
+   "config_hash": "2a59beb9ef0af63a",
+   "code_hash": "fcfcf0bc078d2460",
+   "equivalent_discovered_config_hash": "d2e6b58ed1e93e19",
+   "valid_command": "HEARTLESS_DATA_DIR=data/longhist ARCHIVE_BACKFILL=false heartless lab --alpha discovery_daily_capdisp --start 2026-01-13 --end 2026-10-01 --universe extended --tag discovery_daily --by-side --workers 2 --out docs/results/p2_discovery_daily_capdisp_valid.json",
+   "train": {
+    "n": 327,
+    "avg_r": 0.2245,
+    "profit_factor": 2.674,
+    "t_day": 4.89,
+    "by_year_avg_r": {
+     "2022": 0.2939,
+     "2023": 0.2143,
+     "2024": 0.1943
+    },
+    "stress_avg_r": 0.2147,
+    "stress_t_day": 4.7
+   },
+   "gate": {
+    "t_day": true,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "t_day_margin": 0.081
+  }
+ ],
+ "not_candidates": [
+  {
+   "label": "oiflush",
+   "failed": [
+    "t_day"
+   ],
+   "t_day": 2.45,
+   "stress_avg_r": 0.1603
+  },
+  {
+   "label": "capadx",
+   "failed": [
+    "t_day"
+   ],
+   "t_day": 4.48,
+   "stress_avg_r": 0.2669
+  },
+  {
+   "label": "all3",
+   "failed": [
+    "t_day"
+   ],
+   "t_day": 3.54,
+   "stress_avg_r": 0.1685
+  }
+ ],
+ "diagnostics": {
+  "capdisp_concentration": {
+   "entry_days": 106,
+   "total_r": 73.4,
+   "top5_entry_days": [
+    [
+     "2024-07-05",
+     11.28
+    ],
+    [
+     "2024-11-24",
+     5.95
+    ],
+    [
+     "2024-06-18",
+     5.42
+    ],
+    [
+     "2022-11-09",
+     5.17
+    ],
+    [
+     "2023-08-17",
+     4.75
+    ]
+   ],
+   "top5_share": 0.444,
+   "without_top5_days": {
+    "n": 263,
+    "avg_r": 0.1553,
+    "t_day": 3.32
+   }
+  },
+  "capdisp_exits": {
+   "time stop": {
+    "n": 209,
+    "avg_r": 0.096
+   },
+   "trail": {
+    "n": 80,
+    "avg_r": 0.866
+   },
+   "stop": {
+    "n": 18,
+    "avg_r": -0.999
+   },
+   "funding avoidance": {
+    "n": 20,
+    "avg_r": 0.106
+   }
+  },
+  "capdisp_held_past_24h": 63,
+  "capdisp_lab_vs_miner": "miner 2022-2023 n 172 / +0.246R, 2024 n 168 / +0.203R; lab 2022-2023 n 160, 2024 n 167 / +0.194R. The engine lets 0.5R-up trades run past 24h under a 1.5 1h-ATR trail (the miner closed every trade at 24h)",
+  "capdisp_alpha_reproduction": "discovery_daily_capdisp (shipped defaults) gave the same 327 trades as the discovered alpha with rule rc899282d, field for field apart from the alpha name"
+ },
+ "scripts": {
+  "discover_ro.py": "\"\"\"Run `heartless discover` unchanged, except that the `discovery.last` key is not written into the candle DB.\n\nThe long-history candle DB is read-only for researchers; the CLI's last-result key is the only write discover makes\nto it (the trial ledger line and the --out JSON are written as usual).\"\"\"\nimport sys\n\n\ndef _run() -> None:\n    from heartless.core import store as S\n\n    orig = S.Store.set\n\n    def _set(self, key, value):\n        if key == \"discovery.last\":\n            return None\n        return orig(self, key, value)\n\n    S.Store.set = _set\n    from heartless.cli import main\n\n    main(sys.argv[1:])\n\n\nif __name__ == \"__main__\":\n    _run()\n",
+  "mkparams.py": "\"\"\"Build a StrategyParams JSON that runs the given discovered rule(s) in the `discovered` alpha.\n\nusage: mkparams.py <discover_out.json> <out_params.json> <rule_id> [<rule_id> ...]\"\"\"\nimport json\nimport sys\n\n\ndef main() -> None:\n    from heartless.strategy.params import StrategyParams\n\n    res = json.load(open(sys.argv[1]))\n    ids = sys.argv[3:]\n    by_id = {r[\"rule\"][\"id\"]: r[\"rule\"] for r in res[\"results\"]}\n    rules = [by_id[i] for i in ids]\n    p = StrategyParams.default()\n    p.version = \"p2-discovery_daily-\" + \"-\".join(ids)\n    p.note = \"discovery_daily rules \" + \", \".join(ids)\n    p.alphas[\"discovered\"][\"rules\"] = rules\n    p.enabled = {a: False for a in p.enabled}\n    p.enabled[\"discovered\"] = True\n    with open(sys.argv[2], \"w\") as f:\n        json.dump(p.to_dict(), f, indent=1)\n    print(json.dumps(rules, indent=1))\n\n\nif __name__ == \"__main__\":\n    main()\n"
+ }
+}

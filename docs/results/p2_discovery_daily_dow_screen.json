@@ -1,0 +1,1241 @@
+{
+ "about": "discovery_daily day-of-week seasonality screen (the miner has hour-of-day but no weekday feature): weekday d / weekend x side x 6 templates on the 1d and 1h grids, mined 2022-01-13..2023-12-31, validated on 2024 with discovery.validate and the family bar; 2 ledger lines (tool screen, count 96 each)",
+ "command": "HEARTLESS_DATA_DIR=data/longhist ARCHIVE_BACKFILL=false python dow_screen.py docs/results/p2_discovery_daily_dow_screen.json 1",
+ "train": [
+  "1642032000000",
+  "1704067199999"
+ ],
+ "valid": [
+  "1704067200000",
+  "1735689599999"
+ ],
+ "grids": {
+  "1d": {
+   "rules": 96,
+   "rows_train": 13885,
+   "rows_valid": 7320,
+   "n_family_bar": 104967,
+   "t_bar": 4.8086175339752835,
+   "ledger_hash": "426e573edf07b836",
+   "top": [
+    {
+     "side": "SHORT",
+     "tmpl": [
+      1.0,
+      1.5,
+      240
+     ],
+     "rule": "dow=0",
+     "n": 1992,
+     "avg_r": 0.0799,
+     "avg_ex": 0.1884,
+     "t": 1.04,
+     "t_ex": 2.5
+    },
+    {
+     "side": "SHORT",
+     "tmpl": [
+      1.5,
+      2.0,
+      480
+     ],
+     "rule": "dow=0",
+     "n": 1992,
+     "avg_r": 0.1003,
+     "avg_ex": 0.1972,
+     "t": 1.19,
+     "t_ex": 2.41
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      4320
+     ],
+     "rule": "dow=4",
+     "n": 1992,
+     "avg_r": 0.1072,
+     "avg_ex": 0.1709,
+     "t": 1.27,
+     "t_ex": 2.16
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.5,
+      2.0,
+      480
+     ],
+     "rule": "dow=5",
+     "n": 1992,
+     "avg_r": 0.0185,
+     "avg_ex": 0.1153,
+     "t": 0.33,
+     "t_ex": 2.14
+    },
+    {
+     "side": "SHORT",
+     "tmpl": [
+      2.0,
+      3.0,
+      720
+     ],
+     "rule": "dow=0",
+     "n": 1992,
+     "avg_r": 0.1093,
+     "avg_ex": 0.1853,
+     "t": 1.14,
+     "t_ex": 1.96
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.0,
+      1.5,
+      240
+     ],
+     "rule": "dow=5",
+     "n": 1992,
+     "avg_r": -0.0403,
+     "avg_ex": 0.1041,
+     "t": -0.74,
+     "t_ex": 1.95
+    },
+    {
+     "side": "SHORT",
+     "tmpl": [
+      1.5,
+      2.0,
+      480
+     ],
+     "rule": "dow=2",
+     "n": 1972,
+     "avg_r": 0.0276,
+     "avg_ex": 0.1244,
+     "t": 0.37,
+     "t_ex": 1.76
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      1440
+     ],
+     "rule": "dow=4",
+     "n": 1992,
+     "avg_r": 0.0522,
+     "avg_ex": 0.0964,
+     "t": 0.87,
+     "t_ex": 1.66
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.0,
+      1.5,
+      240
+     ],
+     "rule": "dow=4",
+     "n": 1992,
+     "avg_r": -0.0545,
+     "avg_ex": 0.0939,
+     "t": -0.84,
+     "t_ex": 1.44
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      1440
+     ],
+     "rule": "dow=5",
+     "n": 1992,
+     "avg_r": 0.0132,
+     "avg_ex": 0.0539,
+     "t": 0.32,
+     "t_ex": 1.37
+    },
+    {
+     "side": "SHORT",
+     "tmpl": [
+      1.0,
+      1.5,
+      240
+     ],
+     "rule": "dow=2",
+     "n": 1972,
+     "avg_r": -0.0148,
+     "avg_ex": 0.0921,
+     "t": -0.22,
+     "t_ex": 1.37
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      480
+     ],
+     "rule": "dow=5",
+     "n": 1992,
+     "avg_r": 0.0109,
+     "avg_ex": 0.0382,
+     "t": 0.37,
+     "t_ex": 1.35
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      480
+     ],
+     "rule": "weekend",
+     "n": 3984,
+     "avg_r": -0.0019,
+     "avg_ex": 0.0255,
+     "t": -0.1,
+     "t_ex": 1.31
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      480
+     ],
+     "rule": "dow=4",
+     "n": 1992,
+     "avg_r": 0.0103,
+     "avg_ex": 0.0388,
+     "t": 0.34,
+     "t_ex": 1.27
+    },
+    {
+     "side": "SHORT",
+     "tmpl": [
+      4.0,
+      null,
+      480
+     ],
+     "rule": "dow=0",
+     "n": 1992,
+     "avg_r": 0.0195,
+     "avg_ex": 0.0582,
+     "t": 0.42,
+     "t_ex": 1.27
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      2.0,
+      3.0,
+      720
+     ],
+     "rule": "dow=1",
+     "n": 1972,
+     "avg_r": 0.0154,
+     "avg_ex": 0.0839,
+     "t": 0.23,
+     "t_ex": 1.25
+    },
+    {
+     "side": "SHORT",
+     "tmpl": [
+      4.0,
+      null,
+      480
+     ],
+     "rule": "dow=2",
+     "n": 1972,
+     "avg_r": 0.0046,
+     "avg_ex": 0.0435,
+     "t": 0.12,
+     "t_ex": 1.23
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.5,
+      2.0,
+      480
+     ],
+     "rule": "dow=4",
+     "n": 1992,
+     "avg_r": -0.0224,
+     "avg_ex": 0.0789,
+     "t": -0.34,
+     "t_ex": 1.2
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.5,
+      2.0,
+      480
+     ],
+     "rule": "dow=1",
+     "n": 1972,
+     "avg_r": -0.0216,
+     "avg_ex": 0.0742,
+     "t": -0.31,
+     "t_ex": 1.08
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      4320
+     ],
+     "rule": "dow=3",
+     "n": 1972,
+     "avg_r": 0.0298,
+     "avg_ex": 0.0914,
+     "t": 0.32,
+     "t_ex": 1.05
+    }
+   ],
+   "validated": [],
+   "valid_of_top": [
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       -0.5
+      ],
+      [
+       "t.dow",
+       "<",
+       0.5
+      ]
+     ],
+     "side": "SHORT",
+     "hold": 240,
+     "tp": 1.5,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": -0.09989095547945576,
+      "avg_ex": 0.020877492765007305,
+      "t": -0.9787674802014235,
+      "t_ex": 0.2069338727761113,
+      "pf": 0.8135832364529144,
+      "win": 0.41346153846153844,
+      "sym_pos": 11,
+      "syms": 20,
+      "months_pos": 6,
+      "months": 12,
+      "thirds_pos": 2
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       -0.5
+      ],
+      [
+       "t.dow",
+       "<",
+       0.5
+      ]
+     ],
+     "side": "SHORT",
+     "hold": 480,
+     "tp": 2.0,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": -0.06122492120710669,
+      "avg_ex": 0.031156460312927917,
+      "t": -0.5121322667474371,
+      "t_ex": 0.2622104388519968,
+      "pf": 0.8862134742498895,
+      "win": 0.3855769230769231,
+      "sym_pos": 13,
+      "syms": 20,
+      "months_pos": 6,
+      "months": 12,
+      "thirds_pos": 1
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       3.5
+      ],
+      [
+       "t.dow",
+       "<",
+       4.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 4320,
+     "tp": null,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": 0.10282313062607308,
+      "avg_ex": 0.04868385335751671,
+      "t": 0.8118093033450796,
+      "t_ex": 0.46761061788185826,
+      "pf": 1.2451227760189805,
+      "win": 0.47596153846153844,
+      "sym_pos": 16,
+      "syms": 20,
+      "months_pos": 7,
+      "months": 12,
+      "thirds_pos": 2
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       4.5
+      ],
+      [
+       "t.dow",
+       "<",
+       5.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 480,
+     "tp": 2.0,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": 0.08302443298858014,
+      "avg_ex": 0.16658470578501128,
+      "t": 1.2734968121893069,
+      "t_ex": 2.6290236289410953,
+      "pf": 1.3130281785192264,
+      "win": 0.5307692307692308,
+      "sym_pos": 20,
+      "syms": 20,
+      "months_pos": 8,
+      "months": 12,
+      "thirds_pos": 3
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       -0.5
+      ],
+      [
+       "t.dow",
+       "<",
+       0.5
+      ]
+     ],
+     "side": "SHORT",
+     "hold": 720,
+     "tp": 3.0,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": -0.10032907036795671,
+      "avg_ex": -0.01470674266995798,
+      "t": -0.7578169537891709,
+      "t_ex": -0.11190940725494987,
+      "pf": 0.8165806749724874,
+      "win": 0.35865384615384616,
+      "sym_pos": 7,
+      "syms": 20,
+      "months_pos": 5,
+      "months": 12,
+      "thirds_pos": 1
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       4.5
+      ],
+      [
+       "t.dow",
+       "<",
+       5.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 240,
+     "tp": 1.5,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": -0.0945743399254052,
+      "avg_ex": 0.035410383432854055,
+      "t": -1.4307498390171127,
+      "t_ex": 0.5479743445411203,
+      "pf": 0.7405224922019642,
+      "win": 0.42403846153846153,
+      "sym_pos": 13,
+      "syms": 20,
+      "months_pos": 8,
+      "months": 12,
+      "thirds_pos": 3
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       1.5
+      ],
+      [
+       "t.dow",
+       "<",
+       2.5
+      ]
+     ],
+     "side": "SHORT",
+     "hold": 480,
+     "tp": 2.0,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": -0.08372256249418876,
+      "avg_ex": 0.005201900678146638,
+      "t": -0.9398587460753601,
+      "t_ex": 0.057042716841975476,
+      "pf": 0.7973495884948937,
+      "win": 0.4307692307692308,
+      "sym_pos": 11,
+      "syms": 20,
+      "months_pos": 6,
+      "months": 12,
+      "thirds_pos": 1
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       3.5
+      ],
+      [
+       "t.dow",
+       "<",
+       4.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 1440,
+     "tp": null,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": 0.005141089864679448,
+      "avg_ex": 0.023354436640855014,
+      "t": 0.05580538083564483,
+      "t_ex": 0.27328752812855056,
+      "pf": 1.015560335619739,
+      "win": 0.5086538461538461,
+      "sym_pos": 10,
+      "syms": 20,
+      "months_pos": 8,
+      "months": 12,
+      "thirds_pos": 2
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       3.5
+      ],
+      [
+       "t.dow",
+       "<",
+       4.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 240,
+     "tp": 1.5,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": -0.07375571675763891,
+      "avg_ex": 0.05691131611295759,
+      "t": -0.8666373683241603,
+      "t_ex": 0.6884227906725927,
+      "pf": 0.8255604292250843,
+      "win": 0.4634615384615385,
+      "sym_pos": 15,
+      "syms": 20,
+      "months_pos": 6,
+      "months": 12,
+      "thirds_pos": 1
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       4.5
+      ],
+      [
+       "t.dow",
+       "<",
+       5.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 1440,
+     "tp": null,
+     "valid": {
+      "n": 1040,
+      "days": 52,
+      "avg_r": 0.1002685993251677,
+      "avg_ex": 0.11710550646671442,
+      "t": 1.6668600619139784,
+      "t_ex": 1.9920628997133718,
+      "pf": 1.54637296369015,
+      "win": 0.5336538461538461,
+      "sym_pos": 20,
+      "syms": 20,
+      "months_pos": 10,
+      "months": 12,
+      "thirds_pos": 3
+     }
+    }
+   ]
+  },
+  "1h": {
+   "rules": 96,
+   "rows_train": 333224,
+   "rows_valid": 175680,
+   "n_family_bar": 105063,
+   "t_bar": 4.808807637910177,
+   "ledger_hash": "bb1d50724a837655",
+   "top": [
+    {
+     "side": "LONG",
+     "tmpl": [
+      2.0,
+      3.0,
+      720
+     ],
+     "rule": "dow=5",
+     "n": 5057,
+     "avg_r": -0.0259,
+     "avg_ex": 0.0631,
+     "t": -0.76,
+     "t_ex": 1.9
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      4320
+     ],
+     "rule": "dow=4",
+     "n": 2369,
+     "avg_r": 0.0506,
+     "avg_ex": 0.1248,
+     "t": 0.66,
+     "t_ex": 1.76
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.0,
+      1.5,
+      240
+     ],
+     "rule": "dow=4",
+     "n": 16851,
+     "avg_r": -0.0925,
+     "avg_ex": 0.0407,
+     "t": -3.75,
+     "t_ex": 1.67
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      1440
+     ],
+     "rule": "dow=5",
+     "n": 2184,
+     "avg_r": 0.0155,
+     "avg_ex": 0.0623,
+     "t": 0.4,
+     "t_ex": 1.66
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      2.0,
+      3.0,
+      720
+     ],
+     "rule": "dow=4",
+     "n": 5611,
+     "avg_r": -0.0191,
+     "avg_ex": 0.0698,
+     "t": -0.42,
+     "t_ex": 1.56
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.5,
+      2.0,
+      480
+     ],
+     "rule": "dow=4",
+     "n": 8618,
+     "avg_r": -0.0513,
+     "avg_ex": 0.0555,
+     "t": -1.37,
+     "t_ex": 1.52
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      480
+     ],
+     "rule": "dow=4",
+     "n": 6232,
+     "avg_r": -0.0124,
+     "avg_ex": 0.0281,
+     "t": -0.58,
+     "t_ex": 1.36
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      1440
+     ],
+     "rule": "dow=4",
+     "n": 2369,
+     "avg_r": 0.0197,
+     "avg_ex": 0.0712,
+     "t": 0.36,
+     "t_ex": 1.36
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      4320
+     ],
+     "rule": "dow=3",
+     "n": 2517,
+     "avg_r": 0.0215,
+     "avg_ex": 0.0972,
+     "t": 0.28,
+     "t_ex": 1.36
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      2.0,
+      3.0,
+      720
+     ],
+     "rule": "dow=1",
+     "n": 5734,
+     "avg_r": -0.0343,
+     "avg_ex": 0.0549,
+     "t": -0.8,
+     "t_ex": 1.26
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      1440
+     ],
+     "rule": "dow=1",
+     "n": 2442,
+     "avg_r": 0.0178,
+     "avg_ex": 0.0622,
+     "t": 0.35,
+     "t_ex": 1.2
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      480
+     ],
+     "rule": "dow=5",
+     "n": 6139,
+     "avg_r": -0.0224,
+     "avg_ex": 0.0174,
+     "t": -1.34,
+     "t_ex": 1.06
+    },
+    {
+     "side": "SHORT",
+     "tmpl": [
+      1.0,
+      1.5,
+      240
+     ],
+     "rule": "dow=3",
+     "n": 16834,
+     "avg_r": -0.0762,
+     "avg_ex": 0.0261,
+     "t": -3.02,
+     "t_ex": 1.06
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.5,
+      2.0,
+      480
+     ],
+     "rule": "dow=5",
+     "n": 8005,
+     "avg_r": -0.0782,
+     "avg_ex": 0.028,
+     "t": -2.72,
+     "t_ex": 0.99
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      480
+     ],
+     "rule": "dow=1",
+     "n": 6225,
+     "avg_r": -0.0172,
+     "avg_ex": 0.0219,
+     "t": -0.78,
+     "t_ex": 0.98
+    },
+    {
+     "side": "SHORT",
+     "tmpl": [
+      4.0,
+      null,
+      480
+     ],
+     "rule": "dow=3",
+     "n": 6148,
+     "avg_r": -0.0068,
+     "avg_ex": 0.0213,
+     "t": -0.3,
+     "t_ex": 0.95
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.5,
+      2.0,
+      480
+     ],
+     "rule": "dow=1",
+     "n": 8672,
+     "avg_r": -0.0772,
+     "avg_ex": 0.031,
+     "t": -2.27,
+     "t_ex": 0.9
+    },
+    {
+     "side": "SHORT",
+     "tmpl": [
+      4.0,
+      null,
+      1440
+     ],
+     "rule": "dow=0",
+     "n": 2580,
+     "avg_r": 0.0245,
+     "avg_ex": 0.0548,
+     "t": 0.39,
+     "t_ex": 0.87
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      4.0,
+      null,
+      4320
+     ],
+     "rule": "dow=2",
+     "n": 2570,
+     "avg_r": -0.0043,
+     "avg_ex": 0.0661,
+     "t": -0.05,
+     "t_ex": 0.86
+    },
+    {
+     "side": "LONG",
+     "tmpl": [
+      1.0,
+      1.5,
+      240
+     ],
+     "rule": "dow=2",
+     "n": 17091,
+     "avg_r": -0.115,
+     "avg_ex": 0.0214,
+     "t": -4.3,
+     "t_ex": 0.85
+    }
+   ],
+   "validated": [],
+   "valid_of_top": [
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       4.5
+      ],
+      [
+       "t.dow",
+       "<",
+       5.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 720,
+     "tp": 3.0,
+     "valid": {
+      "n": 2612,
+      "days": 104,
+      "avg_r": 0.02506925728745722,
+      "avg_ex": 0.08995275820564716,
+      "t": 0.4882998416690009,
+      "t_ex": 1.7849218633899142,
+      "pf": 1.0787230044730751,
+      "win": 0.48545176110260335,
+      "sym_pos": 20,
+      "syms": 20,
+      "months_pos": 9,
+      "months": 12,
+      "thirds_pos": 3
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       3.5
+      ],
+      [
+       "t.dow",
+       "<",
+       4.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 4320,
+     "tp": null,
+     "valid": {
+      "n": 1351,
+      "days": 78,
+      "avg_r": 0.0738457010140337,
+      "avg_ex": 0.07237177819544267,
+      "t": 0.6626479774525768,
+      "t_ex": 0.7625753449070004,
+      "pf": 1.1729211801487187,
+      "win": 0.46632124352331605,
+      "sym_pos": 15,
+      "syms": 20,
+      "months_pos": 8,
+      "months": 12,
+      "thirds_pos": 2
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       3.5
+      ],
+      [
+       "t.dow",
+       "<",
+       4.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 240,
+     "tp": 1.5,
+     "valid": {
+      "n": 9017,
+      "days": 104,
+      "avg_r": -0.0910077626968068,
+      "avg_ex": 0.03855402411413476,
+      "t": -2.8027374433797667,
+      "t_ex": 1.2405931266673709,
+      "pf": 0.7962950821529936,
+      "win": 0.4390595541754464,
+      "sym_pos": 18,
+      "syms": 20,
+      "months_pos": 9,
+      "months": 12,
+      "thirds_pos": 2
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       4.5
+      ],
+      [
+       "t.dow",
+       "<",
+       5.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 1440,
+     "tp": null,
+     "valid": {
+      "n": 1119,
+      "days": 69,
+      "avg_r": 0.10564599352059287,
+      "avg_ex": 0.12706676524863358,
+      "t": 1.8678348288752131,
+      "t_ex": 2.3087574703158213,
+      "pf": 1.5708922999075003,
+      "win": 0.5460232350312779,
+      "sym_pos": 20,
+      "syms": 20,
+      "months_pos": 11,
+      "months": 12,
+      "thirds_pos": 3
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       3.5
+      ],
+      [
+       "t.dow",
+       "<",
+       4.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 720,
+     "tp": 3.0,
+     "valid": {
+      "n": 3065,
+      "days": 104,
+      "avg_r": -0.0009698458800225865,
+      "avg_ex": 0.06900325030884874,
+      "t": -0.0162333680108375,
+      "t_ex": 1.197410647099648,
+      "pf": 0.9975494562134126,
+      "win": 0.48972267536704733,
+      "sym_pos": 20,
+      "syms": 20,
+      "months_pos": 8,
+      "months": 12,
+      "thirds_pos": 2
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       3.5
+      ],
+      [
+       "t.dow",
+       "<",
+       4.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 480,
+     "tp": 2.0,
+     "valid": {
+      "n": 4583,
+      "days": 104,
+      "avg_r": -0.027908962235708254,
+      "avg_ex": 0.06722527055868568,
+      "t": -0.5804216072279237,
+      "t_ex": 1.4564038264634314,
+      "pf": 0.9335892209930856,
+      "win": 0.4538511891773947,
+      "sym_pos": 19,
+      "syms": 20,
+      "months_pos": 9,
+      "months": 12,
+      "thirds_pos": 2
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       3.5
+      ],
+      [
+       "t.dow",
+       "<",
+       4.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 1440,
+     "tp": null,
+     "valid": {
+      "n": 1351,
+      "days": 78,
+      "avg_r": 0.021253929134484005,
+      "avg_ex": 0.056577167516741425,
+      "t": 0.2696940358354489,
+      "t_ex": 0.7660156228708586,
+      "pf": 1.0684696624465782,
+      "win": 0.5181347150259067,
+      "sym_pos": 19,
+      "syms": 20,
+      "months_pos": 8,
+      "months": 12,
+      "thirds_pos": 2
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       2.5
+      ],
+      [
+       "t.dow",
+       "<",
+       3.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 4320,
+     "tp": null,
+     "valid": {
+      "n": 1267,
+      "days": 76,
+      "avg_r": 0.09154784114200903,
+      "avg_ex": 0.0809694109390489,
+      "t": 0.8397706499197308,
+      "t_ex": 0.8654246299932317,
+      "pf": 1.2109349743922293,
+      "win": 0.46408839779005523,
+      "sym_pos": 15,
+      "syms": 20,
+      "months_pos": 7,
+      "months": 12,
+      "thirds_pos": 3
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       3.5
+      ],
+      [
+       "t.dow",
+       "<",
+       4.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 480,
+     "tp": null,
+     "valid": {
+      "n": 3331,
+      "days": 104,
+      "avg_r": -0.009076569715126173,
+      "avg_ex": 0.021021564825412606,
+      "t": -0.2886000830555566,
+      "t_ex": 0.6961181042111737,
+      "pf": 0.9496026162853919,
+      "win": 0.5127589312518763,
+      "sym_pos": 16,
+      "syms": 20,
+      "months_pos": 9,
+      "months": 12,
+      "thirds_pos": 2
+     }
+    },
+    {
+     "rule": [
+      [
+       "t.dow",
+       ">",
+       0.5
+      ],
+      [
+       "t.dow",
+       "<",
+       1.5
+      ]
+     ],
+     "side": "LONG",
+     "hold": 720,
+     "tp": 3.0,
+     "valid": {
+      "n": 3220,
+      "days": 106,
+      "avg_r": -0.19173914764989408,
+      "avg_ex": -0.1199322324638703,
+      "t": -3.967966440225521,
+      "t_ex": -2.4604588909279435,
+      "pf": 0.5975934473696876,
+      "win": 0.3972049689440994,
+      "sym_pos": 1,
+      "syms": 20,
+      "months_pos": 4,
+      "months": 12,
+      "thirds_pos": 0
+     }
+    }
+   ]
+  }
+ },
+ "script": "\"\"\"Day-of-week seasonality screen for the discovery_daily family (the miner has hour-of-day but no weekday feature).\n\nSame datasets, exit templates, statistics and validation as `heartless discover` (discovery.build_dataset /\nrule_stats / validate), same split inside TRAIN (mine 2022-01-13..2023-12-31, validate 2024). Rules: \"enter on\nweekday d\" (entry minute's UTC weekday, Monday = 0) x side x template, plus \"enter on a weekend day\", on each grid.\nEvery evaluated rule is counted: one ledger line per grid with count = rules evaluated.\"\"\"\nfrom __future__ import annotations\n\nimport json\nimport sys\n\nimport numpy as np\n\n\ndef main() -> None:\n    from heartless.learning import discovery as D\n    from heartless.learning import trials\n    from heartless.learning.lab import parse_when, universe_symbols\n\n    db = \"/home/user/Heartless/data/longhist/heartless.db\"\n    out_path = sys.argv[1]\n    syms = universe_symbols(\"extended\")\n    train = (parse_when(\"2022-01-13\"), parse_when(\"2024-01-01\", end=True))\n    valid = (parse_when(\"2024-01-01\"), parse_when(\"2025-01-01\", end=True))\n    report = {\"train\": [str(x) for x in train], \"valid\": [str(x) for x in valid], \"grids\": {}}\n    for grid in (\"1d\", \"1h\"):\n        sets = {}\n        for name, (a, b) in ((\"train\", train), (\"valid\", valid)):\n            ds = D.build_dataset(db, syms, a, b, grid, workers=int(sys.argv[2]) if len(sys.argv) > 2 else 2, templates=\"all\")\n            dow = (((ds.times + 1) // D.DAY_MS + 3) % 7).astype(float)  # weekday of the entry minute, Monday = 0\n            wkd = (dow >= 5).astype(float)\n            ds.X = np.asfortranarray(np.column_stack([ds.X, dow, wkd]))\n            ds.names = list(ds.names) + [\"t.dow\", \"t.weekend\"]\n            sets[name] = ds\n        tr, va = sets[\"train\"], sets[\"valid\"]\n        fi_dow, fi_wkd = len(tr.names) - 2, len(tr.names) - 1\n        rules = []\n        for side in (1, -1):\n            for ti in tr.templates:\n                for d in range(7):\n                    rules.append(D.Rule(side, ti, ((fi_dow, \">\", d - 0.5), (fi_dow, \"<\", d + 0.5)), grid))\n                rules.append(D.Rule(side, ti, ((fi_wkd, \">\", 0.5),), grid))\n        cfg = {\"screen\": \"dow_seasonality\", \"grid\": grid, \"templates\": \"all\", \"universe\": \"extended\",\n               \"rules\": \"weekday d (0..6) or weekend x side x template, entry-minute UTC weekday\",\n               \"stats\": \"discovery.rule_stats (non-overlapping per symbol, excess vs same-month same-side mean)\",\n               \"train\": \"2022-01-13:2024-01-01\", \"valid\": \"2024-01-01:2025-01-01\"}\n        scored = []\n        for r in rules:\n            st = D.rule_stats(tr, r, 1)\n            scored.append((r, st))\n        n_family = trials.family_tests(\"discovery_daily\") + len(rules)\n        val = D.validate(sorted(scored, key=lambda x: -x[1].get(\"t_ex\", -99))[:20], va, n_family)\n        best = max(scored, key=lambda x: x[1].get(\"t_ex\", -99))[1]\n        line = trials.record(\"screen\", \"discovery_daily\", cfg, train, n=best.get(\"n\"), avg_r=best.get(\"avg_r\"),\n                             t_day=best.get(\"t_ex\"), count=len(rules))\n        rows = []\n        for r, st in scored:\n            rows.append({\"side\": \"LONG\" if r.side > 0 else \"SHORT\", \"tmpl\": D.TEMPLATES[r.tmpl],\n                         \"rule\": \"weekend\" if len(r.conds) == 1 else f\"dow={int(r.conds[0][2] + 0.5)}\",\n                         \"n\": st[\"n\"], \"avg_r\": round(st[\"avg_r\"], 4), \"avg_ex\": round(st.get(\"avg_ex\", 0), 4),\n                         \"t\": round(st[\"t\"], 2), \"t_ex\": round(st.get(\"t_ex\", -99), 2)})\n        rows.sort(key=lambda x: -x[\"t_ex\"])\n        report[\"grids\"][grid] = {\"rules\": len(rules), \"rows_train\": int(len(tr.times)), \"rows_valid\": int(len(va.times)),\n                                 \"n_family_bar\": n_family, \"t_bar\": D.multiple_testing_t(n_family),\n                                 \"ledger_hash\": line[\"config_hash\"], \"top\": rows[:20],\n                                 \"validated\": [v for v in val if v[\"passed\"]],\n                                 \"valid_of_top\": [{\"rule\": v[\"rule\"][\"conds\"], \"side\": v[\"rule\"][\"side\"],\n                                                   \"hold\": v[\"rule\"][\"hold_min\"], \"tp\": v[\"rule\"][\"tp_r\"],\n                                                   \"valid\": v[\"rule\"][\"stats\"][\"valid\"]} for v in val[:10]]}\n        print(grid, json.dumps(rows[:10]), flush=True)\n        del sets, tr, va\n    with open(out_path, \"w\") as f:\n        json.dump(report, f, indent=1, default=str)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+}
