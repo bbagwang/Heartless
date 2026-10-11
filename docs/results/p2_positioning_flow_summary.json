@@ -1,0 +1,209 @@
+{
+ "family": "positioning_flow",
+ "N_family": 21,
+ "t_bar": 3.0,
+ "n_family_breakdown": "19 screened configurations (docs/results/p2_positioning_flow_screen.json) + 2 lab configurations; stress reruns and two screen reruns of S12 / S15 (fidelity checks) have the same hashes",
+ "prior_hypotheses": {
+  "build_up_squeeze": "fade a >= 1 daily-ATR 24h move made with >= 10% OI build-up: -0.078R, t_day -3.13 (S2) -> rejected; read the other way it is OI-confirmed momentum",
+  "deleveraging_reversal": "fade a >= 1 daily-ATR 24h move made while OI fell >= 8%: +0.023R, t_day 0.62 (S1); stronger flush +0.010R (S7) -> rejected",
+  "informed_vs_retail": "follow the 4h divergence of the top-trader position ratio from the global account ratio: -0.018R, t_day -1.92 (S4; effectively 2023-2024, top-trader ratios ~13% of 2022) -> rejected",
+  "control": "fade every >= 1 daily-ATR 24h move: -0.045R, t_day -2.35 (S3)"
+ },
+ "lab_runs": [
+  {
+   "label": "oimom48",
+   "file": "docs/results/p2_positioning_flow_oimom48.json",
+   "stress_file": "docs/results/p2_positioning_flow_oimom48_stress.json",
+   "note": "alpha code 983b8dd71212731c: no retail filter (= retail_filter 0 of the final code); screen S12",
+   "config_hash": "672fe082457a381f",
+   "n": 701,
+   "avg_r": 0.0637,
+   "pf": 1.39,
+   "t_day": 2.7,
+   "years": {
+    "2022": {
+     "n": 236,
+     "avg_r": 0.052,
+     "t_day": 1.16
+    },
+    "2023": {
+     "n": 263,
+     "avg_r": 0.0426,
+     "t_day": 1.11
+    },
+    "2024": {
+     "n": 202,
+     "avg_r": 0.1049,
+     "t_day": 2.72
+    }
+   },
+   "sides": {
+    "LONG": {
+     "n": 627,
+     "avg_r": 0.0661,
+     "t_day": 2.61
+    },
+    "SHORT": {
+     "n": 74,
+     "avg_r": 0.0432,
+     "t_day": 0.63
+    }
+   },
+   "stress": {
+    "avg_r": 0.0576,
+    "pf": 1.345,
+    "t_day": 2.45
+   },
+   "symbols_positive": "13/20",
+   "months_positive": "23/36",
+   "boundary_trades": 0
+  },
+  {
+   "label": "oimom48_retail",
+   "file": "docs/results/p2_positioning_flow_oimom48_retail.json",
+   "stress_file": "docs/results/p2_positioning_flow_oimom48_retail_stress.json",
+   "note": "final code 32cb67ec764b1129, shipped defaults; screen S15",
+   "config_hash": "1c3d8915ee9fa943",
+   "n": 624,
+   "avg_r": 0.0855,
+   "pf": 1.567,
+   "t_day": 3.29,
+   "years": {
+    "2022": {
+     "n": 211,
+     "avg_r": 0.0853,
+     "t_day": 1.8
+    },
+    "2023": {
+     "n": 236,
+     "avg_r": 0.0575,
+     "t_day": 1.35
+    },
+    "2024": {
+     "n": 177,
+     "avg_r": 0.1232,
+     "t_day": 2.72
+    }
+   },
+   "sides": {
+    "LONG": {
+     "n": 571,
+     "avg_r": 0.0843,
+     "t_day": 3.06
+    },
+    "SHORT": {
+     "n": 53,
+     "avg_r": 0.0984,
+     "t_day": 1.23
+    }
+   },
+   "stress": {
+    "avg_r": 0.0792,
+    "pf": 1.516,
+    "t_day": 3.06
+   },
+   "symbols_positive": "18/20",
+   "months_positive": "23/35",
+   "boundary_trades": 0
+  }
+ ],
+ "final_candidates": [
+  {
+   "alpha": "positioning_flow_oimom",
+   "file": "heartless/strategy/alphas/positioning_flow_oimom.py",
+   "code_hash": "32cb67ec764b1129",
+   "config_hash": "1c3d8915ee9fa943",
+   "defaults": {
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "retail_filter": 1,
+    "side_mode": 0,
+    "fund_max": 0.0003,
+    "sl_atr": 2.5,
+    "max_hold": 48
+   },
+   "rule": "at each 4h close: |24h return| / (daily ATR14 / close) >= 1.0, ctx.extras oi_chg_24h >= +10% and ctx.extras ls_acc_chg_4h against the trade -> follow the move; skip if the upcoming funding x side > 0.03%/8h; market entry, stop 2.5 daily ATR, no target, time stop 48h - 1 min (engine 0.5R extension)",
+   "gate": {
+    "t_day": {
+     "value": 3.29,
+     "bar": 3.0,
+     "pass": true
+    },
+    "avg_r": {
+     "value": 0.0855,
+     "bar": 0.05,
+     "pass": true
+    },
+    "years_positive": {
+     "value": 3,
+     "bar": 2,
+     "pass": true
+    },
+    "stress_avg_r": {
+     "value": 0.0792,
+     "bar": 0.0,
+     "pass": true
+    }
+   },
+   "passes_train_gate": true
+  }
+ ],
+ "trades_per_year": {
+  "2022": 211,
+  "2023": 236,
+  "2024": 177
+ },
+ "coverage": "OI 99.7% and global account ratio 95% of 2022 buckets (the rule needs only these two), so every year trades; top-trader ratios (~13% of 2022) and the taker ratio (65%) are not used by the candidate",
+ "diagnostics": {
+  "screen_fidelity": "623 of 624 lab trades matched by the screen (S15), mean R difference -0.0012",
+  "drift_adjusted": {
+   "note": "R minus the side's share of the symbol's average log drift of that year over the same holding time (scratch drift.py)",
+   "avg_r": 0.0822,
+   "t_day": 3.15,
+   "years": {
+    "2022": 0.1229,
+    "2023": 0.0355,
+    "2024": 0.096
+   }
+  },
+  "exit_composition": {
+   "time_stop": {
+    "n": 496,
+    "avg_r": -0.066
+   },
+   "trail_after_deadline": {
+    "n": 75,
+    "avg_r": 1.291
+   },
+   "stop": {
+    "n": 11,
+    "avg_r": -0.999
+   },
+   "funding_avoid": {
+    "n": 42
+   }
+  },
+  "concentration": "top 5 exit days 19.3R of 53.4R total; bottom 5 -9.6R",
+  "robustness_neighbours": {
+   "m_min 0.75": [
+    0.0602,
+    2.73
+   ],
+   "m_min 1.25": [
+    0.1055,
+    3.4
+   ],
+   "oi_min 0.08": [
+    0.076,
+    3.3
+   ],
+   "oi_min 0.12": [
+    0.0763,
+    2.68
+   ],
+   "note": "screen avgR, t_day; every neighbour positive in all three years; read only, the defaults were fixed before"
+  },
+  "long_short": "571 longs / 53 shorts: the rule is symmetric but large moves with OI build-up are mostly rallies; 2022 (bear market, -69% equal-weight) longs +0.082R"
+ },
+ "selection_caveat": "the direction (follow, not fade) was taken from the rejected build-up fade (S2); the 48h hold, funding filter, 2.5-ATR stop and retail filter were each chosen after one screen; the in-sample t_day is selected from 21 configurations. VALID (once, gatekeeper) is the real test."
+}

@@ -1,0 +1,2276 @@
+{
+ "family": "positioning_flow",
+ "tool": "screen (hourly simulator of the engine's exits on the production positioning snapshot, scratch screen.py)",
+ "window": "TRAIN 2022-01-13..2024-12-31",
+ "universe": "extended (20; SUI from 2023-05)",
+ "costs": "taker 5bp, slippage 1.5bp, half spread 0.5bp; funding at 8h settlements as the backtester; funding-avoidance exit mirrored",
+ "decision": "every 4h close (03:59, 07:59, ... UTC); move = 24h return / (daily ATR14 / close); OI = ctx.extras oi_chg_24h (contracts); market entry at the next open, stop sl_atr x daily ATR14, no target, time stop hold_h (engine 0.5R extension with a 1.5 x 4h-ATR trail mirrored)",
+ "rules": {
+  "dlv": "|move| >= m_min and OI change <= -oi_min: fade the move",
+  "bld": "|move| >= m_min and OI change >= +oi_min: fade the move (dir=follow: follow it)",
+  "fade": "|move| >= m_min: fade the move",
+  "div": "d = 4h relative change of the top-trader position ratio - that of the global account ratio; long d >= d_min, short d <= -d_min",
+  "quad": "|move| >= m_min and |OI change| >= oi_min: follow if OI grew, fade if it fell",
+  "fund_max": "skip if the upcoming funding rate x side > fund_max",
+  "retail=against": "require the global account ratio's 4h change (ls_acc_chg_4h) x side < 0"
+ },
+ "coverage": "top-trader ratios ~13% of 2022 (div is effectively 2023-2024), taker ratio 65% of 2022, global account ratio 95% of 2022, OI 99.7%",
+ "fidelity": "S12 vs lab p2_positioning_flow_oimom48: 695 of 701 lab trades matched by symbol and decision time, mean R difference -0.0009; S15 vs lab p2_positioning_flow_oimom48_retail: 623 of 624, -0.0012",
+ "configs": [
+  {
+   "label": "S1 dlv fade m1.0 oi<=-8% h24 sl1.5",
+   "note": "prior H2: deleveraging reversal",
+   "cfg": {
+    "rule": "dlv",
+    "m_min": 1.0,
+    "oi_min": 0.08,
+    "sl_atr": 1.5,
+    "hold_h": 24
+   },
+   "all": {
+    "n": 719,
+    "days": 279,
+    "avg_r": 0.0233,
+    "pf": 1.131,
+    "t_day": 0.62,
+    "win": 58.7
+   },
+   "2022": {
+    "n": 234,
+    "days": 89,
+    "avg_r": -0.0094,
+    "pf": 0.952,
+    "t_day": -0.13,
+    "win": 57.7
+   },
+   "2023": {
+    "n": 258,
+    "days": 103,
+    "avg_r": 0.0399,
+    "pf": 1.253,
+    "t_day": 0.79,
+    "win": 58.1
+   },
+   "2024": {
+    "n": 227,
+    "days": 87,
+    "avg_r": 0.0382,
+    "pf": 1.213,
+    "t_day": 0.52,
+    "win": 60.4
+   },
+   "LONG": {
+    "n": 509,
+    "days": 194,
+    "avg_r": 0.0408,
+    "pf": 1.243,
+    "t_day": 0.86,
+    "win": 60.1
+   },
+   "SHORT": {
+    "n": 210,
+    "days": 99,
+    "avg_r": -0.019,
+    "pf": 0.906,
+    "t_day": -0.31,
+    "win": 55.2
+   },
+   "LONG_2022": {
+    "n": 165,
+    "days": 60,
+    "avg_r": -0.0424,
+    "pf": 0.811,
+    "t_day": -0.46,
+    "win": 57.6
+   },
+   "LONG_2023": {
+    "n": 162,
+    "days": 66,
+    "avg_r": 0.0882,
+    "pf": 1.76,
+    "t_day": 1.73,
+    "win": 59.9
+   },
+   "LONG_2024": {
+    "n": 182,
+    "days": 68,
+    "avg_r": 0.074,
+    "pf": 1.456,
+    "t_day": 0.82,
+    "win": 62.6
+   },
+   "SHORT_2022": {
+    "n": 69,
+    "days": 34,
+    "avg_r": 0.0693,
+    "pf": 1.505,
+    "t_day": 0.93,
+    "win": 58.0
+   },
+   "SHORT_2023": {
+    "n": 96,
+    "days": 39,
+    "avg_r": -0.0415,
+    "pf": 0.818,
+    "t_day": -0.37,
+    "win": 55.2
+   },
+   "SHORT_2024": {
+    "n": 45,
+    "days": 26,
+    "avg_r": -0.1065,
+    "pf": 0.572,
+    "t_day": -0.93,
+    "win": 51.1
+   },
+   "reasons": {
+    "time": 542,
+    "time_cap": 3,
+    "stop": 153,
+    "funding_avoid": 21
+   },
+   "sym_pos": 13,
+   "sym_n": 20,
+   "sum_r": 16.77,
+   "top5_days_r": 27.85,
+   "fund_r": 0.0005
+  },
+  {
+   "label": "S2 bld fade m1.0 oi>=+10% h24 sl1.5",
+   "note": "prior H1: build-up squeeze (fade leveraged moves)",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "sl_atr": 1.5,
+    "hold_h": 24
+   },
+   "all": {
+    "n": 1027,
+    "days": 590,
+    "avg_r": -0.0784,
+    "pf": 0.72,
+    "t_day": -3.13,
+    "win": 51.0
+   },
+   "2022": {
+    "n": 345,
+    "days": 188,
+    "avg_r": -0.0762,
+    "pf": 0.727,
+    "t_day": -1.64,
+    "win": 51.6
+   },
+   "2023": {
+    "n": 359,
+    "days": 208,
+    "avg_r": -0.0496,
+    "pf": 0.822,
+    "t_day": -1.1,
+    "win": 51.8
+   },
+   "2024": {
+    "n": 323,
+    "days": 194,
+    "avg_r": -0.1128,
+    "pf": 0.598,
+    "t_day": -3.06,
+    "win": 49.5
+   },
+   "LONG": {
+    "n": 121,
+    "days": 84,
+    "avg_r": -0.0158,
+    "pf": 0.937,
+    "t_day": -0.16,
+    "win": 56.2
+   },
+   "SHORT": {
+    "n": 906,
+    "days": 528,
+    "avg_r": -0.0868,
+    "pf": 0.694,
+    "t_day": -3.42,
+    "win": 50.3
+   },
+   "LONG_2022": {
+    "n": 64,
+    "days": 34,
+    "avg_r": -0.0166,
+    "pf": 0.944,
+    "t_day": -0.1,
+    "win": 59.4
+   },
+   "LONG_2023": {
+    "n": 36,
+    "days": 29,
+    "avg_r": 0.0072,
+    "pf": 1.037,
+    "t_day": 0.05,
+    "win": 55.6
+   },
+   "LONG_2024": {
+    "n": 21,
+    "days": 21,
+    "avg_r": -0.053,
+    "pf": 0.749,
+    "t_day": -0.52,
+    "win": 47.6
+   },
+   "SHORT_2022": {
+    "n": 281,
+    "days": 161,
+    "avg_r": -0.0898,
+    "pf": 0.675,
+    "t_day": -2.09,
+    "win": 49.8
+   },
+   "SHORT_2023": {
+    "n": 323,
+    "days": 186,
+    "avg_r": -0.0559,
+    "pf": 0.806,
+    "t_day": -1.17,
+    "win": 51.4
+   },
+   "SHORT_2024": {
+    "n": 302,
+    "days": 181,
+    "avg_r": -0.117,
+    "pf": 0.59,
+    "t_day": -2.96,
+    "win": 49.7
+   },
+   "reasons": {
+    "stop": 338,
+    "time": 639,
+    "funding_avoid": 45,
+    "time_cap": 5
+   },
+   "sym_pos": 3,
+   "sym_n": 20,
+   "sum_r": -80.54,
+   "top5_days_r": 20.66,
+   "fund_r": 0.0035
+  },
+  {
+   "label": "S3 fade control m1.0 h24 sl1.5",
+   "note": "control: fade every large 24h move (no OI condition)",
+   "cfg": {
+    "rule": "fade",
+    "m_min": 1.0,
+    "sl_atr": 1.5,
+    "hold_h": 24
+   },
+   "all": {
+    "n": 4155,
+    "days": 853,
+    "avg_r": -0.045,
+    "pf": 0.807,
+    "t_day": -2.35,
+    "win": 51.9
+   },
+   "2022": {
+    "n": 1206,
+    "days": 252,
+    "avg_r": -0.0426,
+    "pf": 0.819,
+    "t_day": -1.08,
+    "win": 52.6
+   },
+   "2023": {
+    "n": 1376,
+    "days": 292,
+    "avg_r": -0.0228,
+    "pf": 0.896,
+    "t_day": -0.81,
+    "win": 54.2
+   },
+   "2024": {
+    "n": 1573,
+    "days": 309,
+    "avg_r": -0.0662,
+    "pf": 0.729,
+    "t_day": -2.06,
+    "win": 49.4
+   },
+   "LONG": {
+    "n": 1502,
+    "days": 348,
+    "avg_r": 0.0067,
+    "pf": 1.034,
+    "t_day": 0.17,
+    "win": 55.8
+   },
+   "SHORT": {
+    "n": 2653,
+    "days": 703,
+    "avg_r": -0.0743,
+    "pf": 0.705,
+    "t_day": -3.55,
+    "win": 49.7
+   },
+   "LONG_2022": {
+    "n": 542,
+    "days": 101,
+    "avg_r": -0.0333,
+    "pf": 0.859,
+    "t_day": -0.45,
+    "win": 56.3
+   },
+   "LONG_2023": {
+    "n": 434,
+    "days": 118,
+    "avg_r": 0.0436,
+    "pf": 1.294,
+    "t_day": 0.87,
+    "win": 56.7
+   },
+   "LONG_2024": {
+    "n": 526,
+    "days": 129,
+    "avg_r": 0.0177,
+    "pf": 1.085,
+    "t_day": 0.26,
+    "win": 54.6
+   },
+   "SHORT_2022": {
+    "n": 664,
+    "days": 198,
+    "avg_r": -0.0502,
+    "pf": 0.785,
+    "t_day": -1.28,
+    "win": 49.5
+   },
+   "SHORT_2023": {
+    "n": 942,
+    "days": 248,
+    "avg_r": -0.0533,
+    "pf": 0.788,
+    "t_day": -1.53,
+    "win": 53.1
+   },
+   "SHORT_2024": {
+    "n": 1047,
+    "days": 257,
+    "avg_r": -0.1083,
+    "pf": 0.588,
+    "t_day": -3.14,
+    "win": 46.8
+   },
+   "reasons": {
+    "stop": 1087,
+    "time": 2925,
+    "time_cap": 27,
+    "funding_avoid": 116
+   },
+   "sym_pos": 3,
+   "sym_n": 20,
+   "sum_r": -186.9,
+   "top5_days_r": 57.73,
+   "fund_r": 0.0023
+  },
+  {
+   "label": "S4 div follow top traders |d|>=0.12 h24 sl1.5",
+   "note": "prior H3: top-trader vs global account ratio divergence",
+   "cfg": {
+    "rule": "div",
+    "d_min": 0.12,
+    "sl_atr": 1.5,
+    "hold_h": 24
+   },
+   "all": {
+    "n": 5605,
+    "days": 763,
+    "avg_r": -0.0179,
+    "pf": 0.896,
+    "t_day": -1.92,
+    "win": 47.0
+   },
+   "2022": {
+    "n": 292,
+    "days": 50,
+    "avg_r": 0.0199,
+    "pf": 1.151,
+    "t_day": 0.63,
+    "win": 51.0
+   },
+   "2023": {
+    "n": 2402,
+    "days": 353,
+    "avg_r": -0.0282,
+    "pf": 0.844,
+    "t_day": -1.74,
+    "win": 44.9
+   },
+   "2024": {
+    "n": 2911,
+    "days": 361,
+    "avg_r": -0.0133,
+    "pf": 0.922,
+    "t_day": -1.14,
+    "win": 48.3
+   },
+   "LONG": {
+    "n": 2631,
+    "days": 693,
+    "avg_r": -0.0041,
+    "pf": 0.976,
+    "t_day": -0.25,
+    "win": 46.4
+   },
+   "SHORT": {
+    "n": 2974,
+    "days": 672,
+    "avg_r": -0.0302,
+    "pf": 0.826,
+    "t_day": -2.14,
+    "win": 47.5
+   },
+   "LONG_2022": {
+    "n": 141,
+    "days": 45,
+    "avg_r": -0.0472,
+    "pf": 0.732,
+    "t_day": -0.87,
+    "win": 48.2
+   },
+   "LONG_2023": {
+    "n": 1138,
+    "days": 310,
+    "avg_r": -0.0106,
+    "pf": 0.943,
+    "t_day": -0.37,
+    "win": 44.3
+   },
+   "LONG_2024": {
+    "n": 1352,
+    "days": 338,
+    "avg_r": 0.0058,
+    "pf": 1.037,
+    "t_day": 0.28,
+    "win": 48.0
+   },
+   "SHORT_2022": {
+    "n": 151,
+    "days": 43,
+    "avg_r": 0.0825,
+    "pf": 1.904,
+    "t_day": 1.62,
+    "win": 53.6
+   },
+   "SHORT_2023": {
+    "n": 1264,
+    "days": 298,
+    "avg_r": -0.044,
+    "pf": 0.747,
+    "t_day": -2.11,
+    "win": 45.4
+   },
+   "SHORT_2024": {
+    "n": 1559,
+    "days": 331,
+    "avg_r": -0.0299,
+    "pf": 0.834,
+    "t_day": -1.47,
+    "win": 48.6
+   },
+   "reasons": {
+    "time": 4439,
+    "stop": 736,
+    "funding_avoid": 416,
+    "window_end": 6,
+    "time_cap": 8
+   },
+   "sym_pos": 3,
+   "sym_n": 20,
+   "sum_r": -100.58,
+   "top5_days_r": 50.24,
+   "fund_r": 0.0005
+  },
+  {
+   "label": "S5 bld follow m1.0 oi>=+10% h24 sl1.5",
+   "note": "S2 read the other way: OI-confirmed momentum",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 1.5,
+    "hold_h": 24
+   },
+   "all": {
+    "n": 965,
+    "days": 548,
+    "avg_r": 0.0378,
+    "pf": 1.184,
+    "t_day": 1.37,
+    "win": 43.6
+   },
+   "2022": {
+    "n": 302,
+    "days": 177,
+    "avg_r": 0.0368,
+    "pf": 1.174,
+    "t_day": 0.69,
+    "win": 42.7
+   },
+   "2023": {
+    "n": 349,
+    "days": 193,
+    "avg_r": -0.0101,
+    "pf": 0.957,
+    "t_day": -0.26,
+    "win": 41.3
+   },
+   "2024": {
+    "n": 314,
+    "days": 179,
+    "avg_r": 0.0921,
+    "pf": 1.539,
+    "t_day": 1.82,
+    "win": 47.1
+   },
+   "LONG": {
+    "n": 825,
+    "days": 480,
+    "avg_r": 0.0505,
+    "pf": 1.241,
+    "t_day": 1.6,
+    "win": 44.6
+   },
+   "SHORT": {
+    "n": 140,
+    "days": 88,
+    "avg_r": -0.0367,
+    "pf": 0.803,
+    "t_day": -0.92,
+    "win": 37.9
+   },
+   "LONG_2022": {
+    "n": 233,
+    "days": 148,
+    "avg_r": 0.0577,
+    "pf": 1.267,
+    "t_day": 0.87,
+    "win": 44.6
+   },
+   "LONG_2023": {
+    "n": 300,
+    "days": 167,
+    "avg_r": -0.0009,
+    "pf": 0.996,
+    "t_day": -0.02,
+    "win": 43.0
+   },
+   "LONG_2024": {
+    "n": 292,
+    "days": 166,
+    "avg_r": 0.0975,
+    "pf": 1.57,
+    "t_day": 1.77,
+    "win": 46.2
+   },
+   "SHORT_2022": {
+    "n": 69,
+    "days": 33,
+    "avg_r": -0.0338,
+    "pf": 0.825,
+    "t_day": -0.61,
+    "win": 36.2
+   },
+   "SHORT_2023": {
+    "n": 49,
+    "days": 34,
+    "avg_r": -0.0661,
+    "pf": 0.645,
+    "t_day": -0.99,
+    "win": 30.6
+   },
+   "SHORT_2024": {
+    "n": 22,
+    "days": 21,
+    "avg_r": 0.0196,
+    "pf": 1.118,
+    "t_day": 0.17,
+    "win": 59.1
+   },
+   "reasons": {
+    "stop": 193,
+    "time": 592,
+    "funding_avoid": 180
+   },
+   "sym_pos": 12,
+   "sym_n": 20,
+   "sum_r": 36.51,
+   "top5_days_r": 37.42,
+   "fund_r": -0.0017
+  },
+  {
+   "label": "S6 bld follow h48",
+   "note": "hold 48h",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 1.5,
+    "hold_h": 48
+   },
+   "all": {
+    "n": 890,
+    "days": 512,
+    "avg_r": 0.0649,
+    "pf": 1.253,
+    "t_day": 1.93,
+    "win": 44.9
+   },
+   "2022": {
+    "n": 277,
+    "days": 164,
+    "avg_r": 0.0489,
+    "pf": 1.177,
+    "t_day": 0.74,
+    "win": 43.0
+   },
+   "2023": {
+    "n": 327,
+    "days": 182,
+    "avg_r": 0.0283,
+    "pf": 1.105,
+    "t_day": 0.53,
+    "win": 43.4
+   },
+   "2024": {
+    "n": 286,
+    "days": 167,
+    "avg_r": 0.1221,
+    "pf": 1.552,
+    "t_day": 2.21,
+    "win": 48.6
+   },
+   "LONG": {
+    "n": 759,
+    "days": 451,
+    "avg_r": 0.0765,
+    "pf": 1.291,
+    "t_day": 2.04,
+    "win": 45.6
+   },
+   "SHORT": {
+    "n": 131,
+    "days": 87,
+    "avg_r": -0.0026,
+    "pf": 0.988,
+    "t_day": -0.04,
+    "win": 41.2
+   },
+   "LONG_2022": {
+    "n": 215,
+    "days": 139,
+    "avg_r": 0.0661,
+    "pf": 1.226,
+    "t_day": 0.84,
+    "win": 44.7
+   },
+   "LONG_2023": {
+    "n": 280,
+    "days": 159,
+    "avg_r": 0.0359,
+    "pf": 1.129,
+    "t_day": 0.6,
+    "win": 43.9
+   },
+   "LONG_2024": {
+    "n": 264,
+    "days": 154,
+    "avg_r": 0.1281,
+    "pf": 1.577,
+    "t_day": 2.14,
+    "win": 48.1
+   },
+   "SHORT_2022": {
+    "n": 62,
+    "days": 31,
+    "avg_r": -0.0107,
+    "pf": 0.952,
+    "t_day": -0.1,
+    "win": 37.1
+   },
+   "SHORT_2023": {
+    "n": 47,
+    "days": 35,
+    "avg_r": -0.017,
+    "pf": 0.924,
+    "t_day": -0.15,
+    "win": 40.4
+   },
+   "SHORT_2024": {
+    "n": 22,
+    "days": 21,
+    "avg_r": 0.0509,
+    "pf": 1.24,
+    "t_day": 0.34,
+    "win": 54.5
+   },
+   "reasons": {
+    "stop": 265,
+    "time": 438,
+    "funding_avoid": 187
+   },
+   "sym_pos": 12,
+   "sym_n": 20,
+   "sum_r": 57.73,
+   "top5_days_r": 33.99,
+   "fund_r": -0.0032
+  },
+  {
+   "label": "S7 dlv fade m1.5 oi<=-10% h24",
+   "note": "stronger flush for H2",
+   "cfg": {
+    "rule": "dlv",
+    "m_min": 1.5,
+    "oi_min": 0.1,
+    "sl_atr": 1.5,
+    "hold_h": 24
+   },
+   "all": {
+    "n": 195,
+    "days": 84,
+    "avg_r": 0.01,
+    "pf": 1.048,
+    "t_day": 0.13,
+    "win": 57.4
+   },
+   "2022": {
+    "n": 59,
+    "days": 30,
+    "avg_r": -0.0716,
+    "pf": 0.711,
+    "t_day": -0.5,
+    "win": 54.2
+   },
+   "2023": {
+    "n": 81,
+    "days": 30,
+    "avg_r": 0.0133,
+    "pf": 1.068,
+    "t_day": 0.11,
+    "win": 60.5
+   },
+   "2024": {
+    "n": 55,
+    "days": 24,
+    "avg_r": 0.0926,
+    "pf": 1.521,
+    "t_day": 0.66,
+    "win": 56.4
+   },
+   "LONG": {
+    "n": 122,
+    "days": 58,
+    "avg_r": 0.0383,
+    "pf": 1.192,
+    "t_day": 0.38,
+    "win": 56.6
+   },
+   "SHORT": {
+    "n": 73,
+    "days": 31,
+    "avg_r": -0.0373,
+    "pf": 0.829,
+    "t_day": -0.28,
+    "win": 58.9
+   },
+   "LONG_2022": {
+    "n": 40,
+    "days": 19,
+    "avg_r": -0.129,
+    "pf": 0.574,
+    "t_day": -0.67,
+    "win": 47.5
+   },
+   "LONG_2023": {
+    "n": 41,
+    "days": 19,
+    "avg_r": 0.0896,
+    "pf": 1.725,
+    "t_day": 1.0,
+    "win": 61.0
+   },
+   "LONG_2024": {
+    "n": 41,
+    "days": 20,
+    "avg_r": 0.1502,
+    "pf": 1.871,
+    "t_day": 0.79,
+    "win": 61.0
+   },
+   "SHORT_2022": {
+    "n": 19,
+    "days": 12,
+    "avg_r": 0.0493,
+    "pf": 1.377,
+    "t_day": 0.45,
+    "win": 68.4
+   },
+   "SHORT_2023": {
+    "n": 40,
+    "days": 12,
+    "avg_r": -0.0649,
+    "pf": 0.759,
+    "t_day": -0.27,
+    "win": 60.0
+   },
+   "SHORT_2024": {
+    "n": 14,
+    "days": 7,
+    "avg_r": -0.076,
+    "pf": 0.607,
+    "t_day": -0.42,
+    "win": 42.9
+   },
+   "reasons": {
+    "time": 130,
+    "stop": 58,
+    "funding_avoid": 6,
+    "time_cap": 1
+   },
+   "sym_pos": 11,
+   "sym_n": 20,
+   "sum_r": 1.95,
+   "top5_days_r": 17.03,
+   "fund_r": 0.0017
+  },
+  {
+   "label": "S8 quad h24",
+   "note": "follow OI build-up moves, fade OI collapse moves",
+   "cfg": {
+    "rule": "quad",
+    "m_min": 1.0,
+    "oi_min": 0.08,
+    "sl_atr": 1.5,
+    "hold_h": 24
+   },
+   "all": {
+    "n": 1862,
+    "days": 705,
+    "avg_r": 0.0244,
+    "pf": 1.124,
+    "t_day": 1.16,
+    "win": 49.0
+   },
+   "2022": {
+    "n": 585,
+    "days": 218,
+    "avg_r": 0.0153,
+    "pf": 1.074,
+    "t_day": 0.37,
+    "win": 49.2
+   },
+   "2023": {
+    "n": 657,
+    "days": 242,
+    "avg_r": -0.0037,
+    "pf": 0.983,
+    "t_day": -0.12,
+    "win": 46.4
+   },
+   "2024": {
+    "n": 620,
+    "days": 246,
+    "avg_r": 0.0627,
+    "pf": 1.361,
+    "t_day": 1.62,
+    "win": 51.6
+   },
+   "LONG": {
+    "n": 1481,
+    "days": 636,
+    "avg_r": 0.042,
+    "pf": 1.218,
+    "t_day": 1.7,
+    "win": 50.0
+   },
+   "SHORT": {
+    "n": 381,
+    "days": 193,
+    "avg_r": -0.0439,
+    "pf": 0.793,
+    "t_day": -1.11,
+    "win": 45.4
+   },
+   "LONG_2022": {
+    "n": 432,
+    "days": 198,
+    "avg_r": 0.0218,
+    "pf": 1.102,
+    "t_day": 0.42,
+    "win": 50.9
+   },
+   "LONG_2023": {
+    "n": 507,
+    "days": 213,
+    "avg_r": 0.0149,
+    "pf": 1.073,
+    "t_day": 0.48,
+    "win": 46.9
+   },
+   "LONG_2024": {
+    "n": 542,
+    "days": 226,
+    "avg_r": 0.0833,
+    "pf": 1.511,
+    "t_day": 1.88,
+    "win": 52.0
+   },
+   "SHORT_2022": {
+    "n": 153,
+    "days": 66,
+    "avg_r": -0.0031,
+    "pf": 0.983,
+    "t_day": -0.06,
+    "win": 44.4
+   },
+   "SHORT_2023": {
+    "n": 150,
+    "days": 74,
+    "avg_r": -0.0665,
+    "pf": 0.705,
+    "t_day": -0.87,
+    "win": 44.7
+   },
+   "SHORT_2024": {
+    "n": 78,
+    "days": 53,
+    "avg_r": -0.0807,
+    "pf": 0.671,
+    "t_day": -1.06,
+    "win": 48.7
+   },
+   "reasons": {
+    "stop": 369,
+    "time": 1250,
+    "time_cap": 3,
+    "funding_avoid": 240
+   },
+   "sym_pos": 12,
+   "sym_n": 20,
+   "sum_r": 45.41,
+   "top5_days_r": 42.03,
+   "fund_r": -0.0009
+  },
+  {
+   "label": "S9 bld follow h48 fund_max 3bp",
+   "note": "skip entries whose side pays > 0.03%/8h",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 1.5,
+    "hold_h": 48,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 712,
+    "days": 459,
+    "avg_r": 0.0787,
+    "pf": 1.29,
+    "t_day": 1.99,
+    "win": 46.8
+   },
+   "2022": {
+    "n": 245,
+    "days": 157,
+    "avg_r": 0.0609,
+    "pf": 1.205,
+    "t_day": 0.83,
+    "win": 43.7
+   },
+   "2023": {
+    "n": 264,
+    "days": 164,
+    "avg_r": 0.0584,
+    "pf": 1.211,
+    "t_day": 0.86,
+    "win": 45.1
+   },
+   "2024": {
+    "n": 203,
+    "days": 138,
+    "avg_r": 0.1267,
+    "pf": 1.537,
+    "t_day": 2.07,
+    "win": 52.7
+   },
+   "LONG": {
+    "n": 638,
+    "days": 412,
+    "avg_r": 0.0792,
+    "pf": 1.29,
+    "t_day": 1.87,
+    "win": 46.9
+   },
+   "SHORT": {
+    "n": 74,
+    "days": 62,
+    "avg_r": 0.0746,
+    "pf": 1.289,
+    "t_day": 0.68,
+    "win": 45.9
+   },
+   "LONG_2022": {
+    "n": 216,
+    "days": 139,
+    "avg_r": 0.0612,
+    "pf": 1.207,
+    "t_day": 0.78,
+    "win": 44.4
+   },
+   "LONG_2023": {
+    "n": 235,
+    "days": 145,
+    "avg_r": 0.055,
+    "pf": 1.193,
+    "t_day": 0.75,
+    "win": 45.1
+   },
+   "LONG_2024": {
+    "n": 187,
+    "days": 128,
+    "avg_r": 0.1304,
+    "pf": 1.557,
+    "t_day": 1.98,
+    "win": 51.9
+   },
+   "SHORT_2022": {
+    "n": 29,
+    "days": 21,
+    "avg_r": 0.0584,
+    "pf": 1.19,
+    "t_day": 0.29,
+    "win": 37.9
+   },
+   "SHORT_2023": {
+    "n": 29,
+    "days": 25,
+    "avg_r": 0.0857,
+    "pf": 1.413,
+    "t_day": 0.51,
+    "win": 44.8
+   },
+   "SHORT_2024": {
+    "n": 16,
+    "days": 16,
+    "avg_r": 0.0836,
+    "pf": 1.321,
+    "t_day": 0.41,
+    "win": 62.5
+   },
+   "reasons": {
+    "stop": 236,
+    "time": 423,
+    "funding_avoid": 53
+   },
+   "sym_pos": 11,
+   "sym_n": 20,
+   "sum_r": 56.05,
+   "top5_days_r": 33.12,
+   "fund_r": -0.0026
+  },
+  {
+   "label": "S10 bld follow h48 oi>=+15%",
+   "note": "stronger build-up",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.15,
+    "dir": "follow",
+    "sl_atr": 1.5,
+    "hold_h": 48
+   },
+   "all": {
+    "n": 595,
+    "days": 410,
+    "avg_r": 0.0358,
+    "pf": 1.126,
+    "t_day": 0.88,
+    "win": 42.9
+   },
+   "2022": {
+    "n": 195,
+    "days": 137,
+    "avg_r": 0.0268,
+    "pf": 1.086,
+    "t_day": 0.34,
+    "win": 42.1
+   },
+   "2023": {
+    "n": 227,
+    "days": 151,
+    "avg_r": -0.0315,
+    "pf": 0.894,
+    "t_day": -0.55,
+    "win": 40.1
+   },
+   "2024": {
+    "n": 173,
+    "days": 122,
+    "avg_r": 0.1341,
+    "pf": 1.558,
+    "t_day": 1.76,
+    "win": 47.4
+   },
+   "LONG": {
+    "n": 517,
+    "days": 368,
+    "avg_r": 0.0413,
+    "pf": 1.139,
+    "t_day": 0.91,
+    "win": 42.7
+   },
+   "SHORT": {
+    "n": 78,
+    "days": 52,
+    "avg_r": -0.0009,
+    "pf": 0.995,
+    "t_day": -0.01,
+    "win": 43.6
+   },
+   "LONG_2022": {
+    "n": 156,
+    "days": 117,
+    "avg_r": 0.0404,
+    "pf": 1.121,
+    "t_day": 0.43,
+    "win": 42.3
+   },
+   "LONG_2023": {
+    "n": 196,
+    "days": 135,
+    "avg_r": -0.0204,
+    "pf": 0.934,
+    "t_day": -0.32,
+    "win": 40.3
+   },
+   "LONG_2024": {
+    "n": 165,
+    "days": 116,
+    "avg_r": 0.1154,
+    "pf": 1.461,
+    "t_day": 1.46,
+    "win": 46.1
+   },
+   "SHORT_2022": {
+    "n": 39,
+    "days": 21,
+    "avg_r": -0.0275,
+    "pf": 0.874,
+    "t_day": -0.22,
+    "win": 41.0
+   },
+   "SHORT_2023": {
+    "n": 31,
+    "days": 23,
+    "avg_r": -0.1016,
+    "pf": 0.553,
+    "t_day": -1.07,
+    "win": 38.7
+   },
+   "SHORT_2024": {
+    "n": 8,
+    "days": 8,
+    "avg_r": 0.519,
+    "pf": 18.515,
+    "t_day": 1.83,
+    "win": 75.0
+   },
+   "reasons": {
+    "stop": 187,
+    "time": 288,
+    "funding_avoid": 120
+   },
+   "sym_pos": 13,
+   "sym_n": 20,
+   "sum_r": 21.28,
+   "top5_days_r": 28.48,
+   "fund_r": -0.0029
+  },
+  {
+   "label": "S11 bld follow h48 sl2.5",
+   "note": "wider stop",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 2.5,
+    "hold_h": 48
+   },
+   "all": {
+    "n": 907,
+    "days": 524,
+    "avg_r": 0.0479,
+    "pf": 1.331,
+    "t_day": 2.48,
+    "win": 46.5
+   },
+   "2022": {
+    "n": 283,
+    "days": 167,
+    "avg_r": 0.0363,
+    "pf": 1.231,
+    "t_day": 0.95,
+    "win": 45.6
+   },
+   "2023": {
+    "n": 329,
+    "days": 192,
+    "avg_r": 0.0244,
+    "pf": 1.155,
+    "t_day": 0.8,
+    "win": 44.7
+   },
+   "2024": {
+    "n": 295,
+    "days": 165,
+    "avg_r": 0.0851,
+    "pf": 1.723,
+    "t_day": 2.66,
+    "win": 49.5
+   },
+   "LONG": {
+    "n": 770,
+    "days": 459,
+    "avg_r": 0.0576,
+    "pf": 1.392,
+    "t_day": 2.63,
+    "win": 46.9
+   },
+   "SHORT": {
+    "n": 137,
+    "days": 87,
+    "avg_r": -0.0068,
+    "pf": 0.949,
+    "t_day": -0.19,
+    "win": 44.5
+   },
+   "LONG_2022": {
+    "n": 212,
+    "days": 140,
+    "avg_r": 0.0626,
+    "pf": 1.388,
+    "t_day": 1.32,
+    "win": 46.2
+   },
+   "LONG_2023": {
+    "n": 284,
+    "days": 167,
+    "avg_r": 0.0233,
+    "pf": 1.141,
+    "t_day": 0.68,
+    "win": 45.1
+   },
+   "LONG_2024": {
+    "n": 274,
+    "days": 152,
+    "avg_r": 0.0892,
+    "pf": 1.765,
+    "t_day": 2.6,
+    "win": 49.3
+   },
+   "SHORT_2022": {
+    "n": 71,
+    "days": 34,
+    "avg_r": -0.0424,
+    "pf": 0.708,
+    "t_day": -0.86,
+    "win": 43.7
+   },
+   "SHORT_2023": {
+    "n": 45,
+    "days": 33,
+    "avg_r": 0.0316,
+    "pf": 1.282,
+    "t_day": 0.49,
+    "win": 42.2
+   },
+   "SHORT_2024": {
+    "n": 21,
+    "days": 20,
+    "avg_r": 0.0312,
+    "pf": 1.235,
+    "t_day": 0.33,
+    "win": 52.4
+   },
+   "reasons": {
+    "time": 563,
+    "funding_avoid": 230,
+    "stop": 114
+   },
+   "sym_pos": 13,
+   "sym_n": 20,
+   "sum_r": 43.42,
+   "top5_days_r": 19.44,
+   "fund_r": -0.0017
+  },
+  {
+   "label": "S12 bld follow h48 sl2.5 fund_max 3bp",
+   "note": "S9 + S11 (lab: positioning_flow_oimom retail_filter=0)",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 2.5,
+    "hold_h": 48,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 708,
+    "days": 467,
+    "avg_r": 0.0587,
+    "pf": 1.376,
+    "t_day": 2.53,
+    "win": 48.3
+   },
+   "2022": {
+    "n": 242,
+    "days": 159,
+    "avg_r": 0.0429,
+    "pf": 1.253,
+    "t_day": 0.98,
+    "win": 45.5
+   },
+   "2023": {
+    "n": 263,
+    "days": 170,
+    "avg_r": 0.0418,
+    "pf": 1.252,
+    "t_day": 1.09,
+    "win": 46.0
+   },
+   "2024": {
+    "n": 203,
+    "days": 138,
+    "avg_r": 0.0993,
+    "pf": 1.781,
+    "t_day": 2.64,
+    "win": 54.7
+   },
+   "LONG": {
+    "n": 634,
+    "days": 417,
+    "avg_r": 0.0639,
+    "pf": 1.412,
+    "t_day": 2.55,
+    "win": 48.4
+   },
+   "SHORT": {
+    "n": 74,
+    "days": 61,
+    "avg_r": 0.0133,
+    "pf": 1.081,
+    "t_day": 0.22,
+    "win": 47.3
+   },
+   "LONG_2022": {
+    "n": 213,
+    "days": 141,
+    "avg_r": 0.0615,
+    "pf": 1.381,
+    "t_day": 1.3,
+    "win": 46.0
+   },
+   "LONG_2023": {
+    "n": 234,
+    "days": 150,
+    "avg_r": 0.035,
+    "pf": 1.202,
+    "t_day": 0.84,
+    "win": 46.2
+   },
+   "LONG_2024": {
+    "n": 187,
+    "days": 126,
+    "avg_r": 0.103,
+    "pf": 1.826,
+    "t_day": 2.55,
+    "win": 54.0
+   },
+   "SHORT_2022": {
+    "n": 29,
+    "days": 21,
+    "avg_r": -0.0932,
+    "pf": 0.598,
+    "t_day": -0.91,
+    "win": 41.4
+   },
+   "SHORT_2023": {
+    "n": 29,
+    "days": 24,
+    "avg_r": 0.0961,
+    "pf": 1.941,
+    "t_day": 1.03,
+    "win": 44.8
+   },
+   "SHORT_2024": {
+    "n": 16,
+    "days": 16,
+    "avg_r": 0.0564,
+    "pf": 1.363,
+    "t_day": 0.45,
+    "win": 62.5
+   },
+   "reasons": {
+    "time": 545,
+    "stop": 102,
+    "funding_avoid": 61
+   },
+   "sym_pos": 13,
+   "sym_n": 20,
+   "sum_r": 41.53,
+   "top5_days_r": 18.06,
+   "fund_r": -0.0013
+  },
+  {
+   "label": "S13 bld follow h24 sl2.5 fund_max 3bp",
+   "note": "S12 with a 24h hold",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 2.5,
+    "hold_h": 24,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 776,
+    "days": 504,
+    "avg_r": 0.0299,
+    "pf": 1.24,
+    "t_day": 1.62,
+    "win": 45.6
+   },
+   "2022": {
+    "n": 268,
+    "days": 172,
+    "avg_r": 0.0311,
+    "pf": 1.24,
+    "t_day": 0.86,
+    "win": 44.4
+   },
+   "2023": {
+    "n": 288,
+    "days": 182,
+    "avg_r": 0.0116,
+    "pf": 1.082,
+    "t_day": 0.39,
+    "win": 43.1
+   },
+   "2024": {
+    "n": 220,
+    "days": 150,
+    "avg_r": 0.0524,
+    "pf": 1.54,
+    "t_day": 1.86,
+    "win": 50.5
+   },
+   "LONG": {
+    "n": 697,
+    "days": 454,
+    "avg_r": 0.0357,
+    "pf": 1.286,
+    "t_day": 1.77,
+    "win": 46.2
+   },
+   "SHORT": {
+    "n": 79,
+    "days": 61,
+    "avg_r": -0.0215,
+    "pf": 0.822,
+    "t_day": -0.54,
+    "win": 40.5
+   },
+   "LONG_2022": {
+    "n": 236,
+    "days": 153,
+    "avg_r": 0.0391,
+    "pf": 1.302,
+    "t_day": 0.99,
+    "win": 44.9
+   },
+   "LONG_2023": {
+    "n": 257,
+    "days": 162,
+    "avg_r": 0.0154,
+    "pf": 1.107,
+    "t_day": 0.47,
+    "win": 44.7
+   },
+   "LONG_2024": {
+    "n": 204,
+    "days": 139,
+    "avg_r": 0.0574,
+    "pf": 1.6,
+    "t_day": 1.86,
+    "win": 49.5
+   },
+   "SHORT_2022": {
+    "n": 32,
+    "days": 21,
+    "avg_r": -0.0279,
+    "pf": 0.79,
+    "t_day": -0.41,
+    "win": 40.6
+   },
+   "SHORT_2023": {
+    "n": 31,
+    "days": 24,
+    "avg_r": -0.0204,
+    "pf": 0.818,
+    "t_day": -0.3,
+    "win": 29.0
+   },
+   "SHORT_2024": {
+    "n": 16,
+    "days": 16,
+    "avg_r": -0.0109,
+    "pf": 0.904,
+    "t_day": -0.16,
+    "win": 62.5
+   },
+   "reasons": {
+    "time": 643,
+    "stop": 80,
+    "funding_avoid": 53
+   },
+   "sym_pos": 11,
+   "sym_n": 20,
+   "sum_r": 23.2,
+   "top5_days_r": 19.16,
+   "fund_r": -0.0007
+  },
+  {
+   "label": "S14 bld follow h72 sl2.5 fund_max 3bp",
+   "note": "S12 with a 72h hold",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 2.5,
+    "hold_h": 72,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 669,
+    "days": 453,
+    "avg_r": 0.0761,
+    "pf": 1.395,
+    "t_day": 2.22,
+    "win": 49.0
+   },
+   "2022": {
+    "n": 229,
+    "days": 154,
+    "avg_r": 0.0412,
+    "pf": 1.188,
+    "t_day": 0.59,
+    "win": 42.8
+   },
+   "2023": {
+    "n": 251,
+    "days": 163,
+    "avg_r": 0.0635,
+    "pf": 1.308,
+    "t_day": 1.21,
+    "win": 49.8
+   },
+   "2024": {
+    "n": 189,
+    "days": 136,
+    "avg_r": 0.1353,
+    "pf": 1.947,
+    "t_day": 2.58,
+    "win": 55.6
+   },
+   "LONG": {
+    "n": 597,
+    "days": 397,
+    "avg_r": 0.08,
+    "pf": 1.419,
+    "t_day": 2.18,
+    "win": 49.4
+   },
+   "SHORT": {
+    "n": 72,
+    "days": 64,
+    "avg_r": 0.0442,
+    "pf": 1.212,
+    "t_day": 0.47,
+    "win": 45.8
+   },
+   "LONG_2022": {
+    "n": 201,
+    "days": 133,
+    "avg_r": 0.0613,
+    "pf": 1.295,
+    "t_day": 0.79,
+    "win": 44.3
+   },
+   "LONG_2023": {
+    "n": 223,
+    "days": 142,
+    "avg_r": 0.05,
+    "pf": 1.234,
+    "t_day": 0.93,
+    "win": 49.8
+   },
+   "LONG_2024": {
+    "n": 173,
+    "days": 122,
+    "avg_r": 0.1404,
+    "pf": 1.998,
+    "t_day": 2.51,
+    "win": 54.9
+   },
+   "SHORT_2022": {
+    "n": 28,
+    "days": 25,
+    "avg_r": -0.103,
+    "pf": 0.655,
+    "t_day": -0.86,
+    "win": 32.1
+   },
+   "SHORT_2023": {
+    "n": 28,
+    "days": 23,
+    "avg_r": 0.1709,
+    "pf": 2.198,
+    "t_day": 0.94,
+    "win": 50.0
+   },
+   "SHORT_2024": {
+    "n": 16,
+    "days": 16,
+    "avg_r": 0.0803,
+    "pf": 1.482,
+    "t_day": 0.56,
+    "win": 62.5
+   },
+   "reasons": {
+    "time": 469,
+    "stop": 135,
+    "funding_avoid": 65
+   },
+   "sym_pos": 14,
+   "sym_n": 20,
+   "sum_r": 50.94,
+   "top5_days_r": 31.93,
+   "fund_r": -0.002
+  },
+  {
+   "label": "S15 S12 + retail against",
+   "note": "global account ratio's 4h change opposes the trade (lab: positioning_flow_oimom)",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 2.5,
+    "hold_h": 48,
+    "fund_max": 0.0003,
+    "retail": "against"
+   },
+   "all": {
+    "n": 625,
+    "days": 438,
+    "avg_r": 0.0853,
+    "pf": 1.57,
+    "t_day": 3.27,
+    "win": 49.4
+   },
+   "2022": {
+    "n": 211,
+    "days": 148,
+    "avg_r": 0.0885,
+    "pf": 1.592,
+    "t_day": 1.84,
+    "win": 46.9
+   },
+   "2023": {
+    "n": 236,
+    "days": 162,
+    "avg_r": 0.0567,
+    "pf": 1.34,
+    "t_day": 1.33,
+    "win": 48.3
+   },
+   "2024": {
+    "n": 178,
+    "days": 128,
+    "avg_r": 0.1195,
+    "pf": 1.938,
+    "t_day": 2.65,
+    "win": 53.9
+   },
+   "LONG": {
+    "n": 572,
+    "days": 399,
+    "avg_r": 0.0843,
+    "pf": 1.559,
+    "t_day": 3.05,
+    "win": 49.5
+   },
+   "SHORT": {
+    "n": 53,
+    "days": 48,
+    "avg_r": 0.0959,
+    "pf": 1.709,
+    "t_day": 1.2,
+    "win": 49.1
+   },
+   "LONG_2022": {
+    "n": 195,
+    "days": 136,
+    "avg_r": 0.0858,
+    "pf": 1.575,
+    "t_day": 1.71,
+    "win": 47.2
+   },
+   "LONG_2023": {
+    "n": 213,
+    "days": 145,
+    "avg_r": 0.0525,
+    "pf": 1.304,
+    "t_day": 1.15,
+    "win": 48.8
+   },
+   "LONG_2024": {
+    "n": 164,
+    "days": 118,
+    "avg_r": 0.1239,
+    "pf": 1.992,
+    "t_day": 2.58,
+    "win": 53.0
+   },
+   "SHORT_2022": {
+    "n": 16,
+    "days": 14,
+    "avg_r": 0.1211,
+    "pf": 1.8,
+    "t_day": 0.66,
+    "win": 43.8
+   },
+   "SHORT_2023": {
+    "n": 23,
+    "days": 20,
+    "avg_r": 0.0956,
+    "pf": 1.859,
+    "t_day": 0.84,
+    "win": 43.5
+   },
+   "SHORT_2024": {
+    "n": 14,
+    "days": 14,
+    "avg_r": 0.0677,
+    "pf": 1.433,
+    "t_day": 0.53,
+    "win": 64.3
+   },
+   "reasons": {
+    "time": 491,
+    "stop": 92,
+    "funding_avoid": 42
+   },
+   "sym_pos": 18,
+   "sym_n": 20,
+   "sum_r": 53.32,
+   "top5_days_r": 19.11,
+   "fund_r": -0.0013
+  },
+  {
+   "label": "S16 S15 m_min 0.75",
+   "note": "robustness neighbour (read only; the candidate keeps its defaults)",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 0.75,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 2.5,
+    "hold_h": 48,
+    "fund_max": 0.0003,
+    "retail": "against"
+   },
+   "all": {
+    "n": 806,
+    "days": 529,
+    "avg_r": 0.0602,
+    "pf": 1.398,
+    "t_day": 2.73,
+    "win": 47.8
+   },
+   "2022": {
+    "n": 291,
+    "days": 182,
+    "avg_r": 0.046,
+    "pf": 1.293,
+    "t_day": 1.2,
+    "win": 45.4
+   },
+   "2023": {
+    "n": 295,
+    "days": 190,
+    "avg_r": 0.0413,
+    "pf": 1.253,
+    "t_day": 1.13,
+    "win": 46.8
+   },
+   "2024": {
+    "n": 220,
+    "days": 157,
+    "avg_r": 0.1044,
+    "pf": 1.824,
+    "t_day": 2.65,
+    "win": 52.3
+   },
+   "LONG": {
+    "n": 717,
+    "days": 466,
+    "avg_r": 0.058,
+    "pf": 1.377,
+    "t_day": 2.41,
+    "win": 48.0
+   },
+   "SHORT": {
+    "n": 89,
+    "days": 79,
+    "avg_r": 0.0784,
+    "pf": 1.602,
+    "t_day": 1.37,
+    "win": 46.1
+   },
+   "LONG_2022": {
+    "n": 256,
+    "days": 159,
+    "avg_r": 0.0374,
+    "pf": 1.231,
+    "t_day": 0.88,
+    "win": 45.3
+   },
+   "LONG_2023": {
+    "n": 262,
+    "days": 166,
+    "avg_r": 0.0434,
+    "pf": 1.261,
+    "t_day": 1.09,
+    "win": 48.1
+   },
+   "LONG_2024": {
+    "n": 199,
+    "days": 141,
+    "avg_r": 0.1036,
+    "pf": 1.817,
+    "t_day": 2.44,
+    "win": 51.3
+   },
+   "SHORT_2022": {
+    "n": 35,
+    "days": 30,
+    "avg_r": 0.1092,
+    "pf": 1.897,
+    "t_day": 1.12,
+    "win": 45.7
+   },
+   "SHORT_2023": {
+    "n": 33,
+    "days": 28,
+    "avg_r": 0.0247,
+    "pf": 1.173,
+    "t_day": 0.26,
+    "win": 36.4
+   },
+   "SHORT_2024": {
+    "n": 21,
+    "days": 21,
+    "avg_r": 0.1117,
+    "pf": 1.895,
+    "t_day": 1.02,
+    "win": 61.9
+   },
+   "reasons": {
+    "time": 645,
+    "stop": 107,
+    "funding_avoid": 54
+   },
+   "sym_pos": 14,
+   "sym_n": 20,
+   "sum_r": 48.53,
+   "top5_days_r": 19.72,
+   "fund_r": -0.0012
+  },
+  {
+   "label": "S17 S15 m_min 1.25",
+   "note": "robustness neighbour (read only; the candidate keeps its defaults)",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.25,
+    "oi_min": 0.1,
+    "dir": "follow",
+    "sl_atr": 2.5,
+    "hold_h": 48,
+    "fund_max": 0.0003,
+    "retail": "against"
+   },
+   "all": {
+    "n": 478,
+    "days": 353,
+    "avg_r": 0.1055,
+    "pf": 1.682,
+    "t_day": 3.4,
+    "win": 50.4
+   },
+   "2022": {
+    "n": 154,
+    "days": 111,
+    "avg_r": 0.117,
+    "pf": 1.772,
+    "t_day": 2.07,
+    "win": 47.4
+   },
+   "2023": {
+    "n": 182,
+    "days": 136,
+    "avg_r": 0.0723,
+    "pf": 1.406,
+    "t_day": 1.39,
+    "win": 50.5
+   },
+   "2024": {
+    "n": 142,
+    "days": 106,
+    "avg_r": 0.1356,
+    "pf": 2.056,
+    "t_day": 2.58,
+    "win": 53.5
+   },
+   "LONG": {
+    "n": 452,
+    "days": 333,
+    "avg_r": 0.0991,
+    "pf": 1.637,
+    "t_day": 3.12,
+    "win": 50.7
+   },
+   "SHORT": {
+    "n": 26,
+    "days": 23,
+    "avg_r": 0.2161,
+    "pf": 2.535,
+    "t_day": 1.46,
+    "win": 46.2
+   },
+   "LONG_2022": {
+    "n": 147,
+    "days": 106,
+    "avg_r": 0.1082,
+    "pf": 1.722,
+    "t_day": 1.92,
+    "win": 48.3
+   },
+   "LONG_2023": {
+    "n": 170,
+    "days": 126,
+    "avg_r": 0.0656,
+    "pf": 1.363,
+    "t_day": 1.22,
+    "win": 51.2
+   },
+   "LONG_2024": {
+    "n": 135,
+    "days": 101,
+    "avg_r": 0.1315,
+    "pf": 2.014,
+    "t_day": 2.4,
+    "win": 52.6
+   },
+   "SHORT_2022": {
+    "n": 7,
+    "days": 6,
+    "avg_r": 0.3035,
+    "pf": 2.583,
+    "t_day": 0.74,
+    "win": 28.6
+   },
+   "SHORT_2023": {
+    "n": 12,
+    "days": 10,
+    "avg_r": 0.166,
+    "pf": 2.248,
+    "t_day": 0.79,
+    "win": 41.7
+   },
+   "SHORT_2024": {
+    "n": 7,
+    "days": 7,
+    "avg_r": 0.2146,
+    "pf": 3.084,
+    "t_day": 1.08,
+    "win": 71.4
+   },
+   "reasons": {
+    "time": 363,
+    "stop": 81,
+    "funding_avoid": 34
+   },
+   "sym_pos": 16,
+   "sym_n": 20,
+   "sum_r": 50.43,
+   "top5_days_r": 18.27,
+   "fund_r": -0.0017
+  },
+  {
+   "label": "S18 S15 oi_min 0.08",
+   "note": "robustness neighbour (read only; the candidate keeps its defaults)",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.08,
+    "dir": "follow",
+    "sl_atr": 2.5,
+    "hold_h": 48,
+    "fund_max": 0.0003,
+    "retail": "against"
+   },
+   "all": {
+    "n": 756,
+    "days": 483,
+    "avg_r": 0.076,
+    "pf": 1.528,
+    "t_day": 3.3,
+    "win": 48.9
+   },
+   "2022": {
+    "n": 254,
+    "days": 158,
+    "avg_r": 0.0789,
+    "pf": 1.567,
+    "t_day": 1.89,
+    "win": 46.5
+   },
+   "2023": {
+    "n": 280,
+    "days": 176,
+    "avg_r": 0.0328,
+    "pf": 1.189,
+    "t_day": 0.83,
+    "win": 47.1
+   },
+   "2024": {
+    "n": 222,
+    "days": 149,
+    "avg_r": 0.1272,
+    "pf": 2.132,
+    "t_day": 3.44,
+    "win": 54.1
+   },
+   "LONG": {
+    "n": 684,
+    "days": 435,
+    "avg_r": 0.0784,
+    "pf": 1.54,
+    "t_day": 3.18,
+    "win": 49.3
+   },
+   "SHORT": {
+    "n": 72,
+    "days": 58,
+    "avg_r": 0.0535,
+    "pf": 1.408,
+    "t_day": 0.84,
+    "win": 45.8
+   },
+   "LONG_2022": {
+    "n": 228,
+    "days": 144,
+    "avg_r": 0.0811,
+    "pf": 1.587,
+    "t_day": 1.83,
+    "win": 46.9
+   },
+   "LONG_2023": {
+    "n": 252,
+    "days": 156,
+    "avg_r": 0.0297,
+    "pf": 1.165,
+    "t_day": 0.7,
+    "win": 47.6
+   },
+   "LONG_2024": {
+    "n": 204,
+    "days": 135,
+    "avg_r": 0.1354,
+    "pf": 2.228,
+    "t_day": 3.42,
+    "win": 53.9
+   },
+   "SHORT_2022": {
+    "n": 26,
+    "days": 18,
+    "avg_r": 0.0592,
+    "pf": 1.402,
+    "t_day": 0.46,
+    "win": 42.3
+   },
+   "SHORT_2023": {
+    "n": 28,
+    "days": 22,
+    "avg_r": 0.0607,
+    "pf": 1.538,
+    "t_day": 0.62,
+    "win": 42.9
+   },
+   "SHORT_2024": {
+    "n": 18,
+    "days": 18,
+    "avg_r": 0.0341,
+    "pf": 1.25,
+    "t_day": 0.35,
+    "win": 55.6
+   },
+   "reasons": {
+    "time": 597,
+    "stop": 104,
+    "funding_avoid": 55
+   },
+   "sym_pos": 17,
+   "sym_n": 20,
+   "sum_r": 57.44,
+   "top5_days_r": 19.42,
+   "fund_r": -0.0014
+  },
+  {
+   "label": "S19 S15 oi_min 0.12",
+   "note": "robustness neighbour (read only; the candidate keeps its defaults)",
+   "cfg": {
+    "rule": "bld",
+    "m_min": 1.0,
+    "oi_min": 0.12,
+    "dir": "follow",
+    "sl_atr": 2.5,
+    "hold_h": 48,
+    "fund_max": 0.0003,
+    "retail": "against"
+   },
+   "all": {
+    "n": 531,
+    "days": 395,
+    "avg_r": 0.0763,
+    "pf": 1.482,
+    "t_day": 2.68,
+    "win": 48.0
+   },
+   "2022": {
+    "n": 181,
+    "days": 131,
+    "avg_r": 0.0852,
+    "pf": 1.544,
+    "t_day": 1.58,
+    "win": 45.9
+   },
+   "2023": {
+    "n": 197,
+    "days": 149,
+    "avg_r": 0.0359,
+    "pf": 1.205,
+    "t_day": 0.81,
+    "win": 45.2
+   },
+   "2024": {
+    "n": 153,
+    "days": 115,
+    "avg_r": 0.118,
+    "pf": 1.852,
+    "t_day": 2.39,
+    "win": 54.2
+   },
+   "LONG": {
+    "n": 496,
+    "days": 368,
+    "avg_r": 0.0738,
+    "pf": 1.462,
+    "t_day": 2.47,
+    "win": 47.6
+   },
+   "SHORT": {
+    "n": 35,
+    "days": 34,
+    "avg_r": 0.1125,
+    "pf": 1.805,
+    "t_day": 1.14,
+    "win": 54.3
+   },
+   "LONG_2022": {
+    "n": 170,
+    "days": 122,
+    "avg_r": 0.0812,
+    "pf": 1.53,
+    "t_day": 1.47,
+    "win": 46.5
+   },
+   "LONG_2023": {
+    "n": 184,
+    "days": 138,
+    "avg_r": 0.0303,
+    "pf": 1.165,
+    "t_day": 0.64,
+    "win": 44.0
+   },
+   "LONG_2024": {
+    "n": 142,
+    "days": 108,
+    "avg_r": 0.1213,
+    "pf": 1.886,
+    "t_day": 2.32,
+    "win": 53.5
+   },
+   "SHORT_2022": {
+    "n": 11,
+    "days": 10,
+    "avg_r": 0.1468,
+    "pf": 1.691,
+    "t_day": 0.55,
+    "win": 36.4
+   },
+   "SHORT_2023": {
+    "n": 13,
+    "days": 13,
+    "avg_r": 0.115,
+    "pf": 2.823,
+    "t_day": 1.32,
+    "win": 61.5
+   },
+   "SHORT_2024": {
+    "n": 11,
+    "days": 11,
+    "avg_r": 0.0751,
+    "pf": 1.477,
+    "t_day": 0.49,
+    "win": 63.6
+   },
+   "reasons": {
+    "time": 419,
+    "stop": 79,
+    "funding_avoid": 33
+   },
+   "sym_pos": 15,
+   "sym_n": 20,
+   "sum_r": 40.54,
+   "top5_days_r": 17.54,
+   "fund_r": -0.0013
+  }
+ ]
+}
