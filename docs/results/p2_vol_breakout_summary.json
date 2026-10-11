@@ -1,0 +1,138 @@
+{
+ "family": "vol_breakout",
+ "alpha": "vol_breakout_dbox",
+ "file": "heartless/strategy/alphas/vol_breakout_dbox.py",
+ "train_window": [
+  "2022-01-13",
+  "2024-12-31"
+ ],
+ "universe": "extended (20 symbols)",
+ "n_family": 23,
+ "t_day_bar": 3.0,
+ "gate": "t_day >= max(3, sqrt(2 ln N)); avgR >= 0.05; avgR > 0 in >= 2 of 2022/2023/2024; stress avgR > 0 (ROADMAP section 6)",
+ "hypotheses": [
+  "H1 1d: first daily close beyond the prior 20-day Donchian after the daily BB width sat in the lowest 25% of its 60-day range within the 5 days before, stop 2 daily ATR, 5-day hold; trend filter none / own SMA20>SMA50 / BTC 168h / both (screen t_day 2.12 / 2.14 / 2.16 / 2.57, avgR +0.15..+0.21, both sides positive)",
+  "H2 4h: first 4h close beyond the 20-bar 4h Donchian after the 4h bb_width_rank <= 0.20 within 24 h, stop 2.5 4h ATR, 72 h hold, same filters (screen t_day 0.99..1.20, avgR +0.06..+0.09): a 3-day box is too short",
+  "H1 with the pre-registered BTC filter: compression dose q 0.15 / 0.25 / 0.40 / off = avgR +0.150 / +0.160 / +0.149 / +0.128 (t 1.72 / 2.16 / 2.13 / 2.15): compression lifts the average trade a little and halves the count; a 10-day box is weaker (t 1.81); hold 48 / 72 / 120 / 240 h = t 2.42 / 2.76 / 2.16 / 1.09 (the follow-through is front-loaded); stop 1.5 / 2 / 3 ATR scales R, t ~2.1 for all",
+  "H3 hybrid (the alpha): the H1 daily compression and 20-day box, entered at the first 4h close beyond the box instead of the daily close, 72 h hold: screen t 3.23 (avgR +0.159, n 595, every year and both sides positive); the same without compression t 3.50 (avgR +0.130, n 1142)",
+  "lab: A (compression, alpha defaults) t_day 2.97 (fails the bar by 0.03); B (compression off) t_day 3.21 and passes every TRAIN condition"
+ ],
+ "lab_runs": [
+  {
+   "label": "dbox",
+   "description": "A: defaults of vol_breakout_dbox (daily BB-width rank <= 0.25 within the 5 days before the breakout day, first 4h close beyond the 20-day box, with BTC's 168h return, funding filter 3bp, stop 2 daily ATR, 72 h time stop, no trail)",
+   "file": "docs/results/p2_vol_breakout_dbox.json",
+   "stress_file": "docs/results/p2_vol_breakout_dbox_stress.json",
+   "config_hash": "726da82fe87dcb7b",
+   "code_hash": "7d3f1297aca94371",
+   "git_commit": "bab485d979a7389ada6bf2f6fe563a39f65e4cdd",
+   "git_dirty": true,
+   "overrides": [],
+   "n": 595,
+   "avg_r": 0.1584,
+   "profit_factor": 1.77,
+   "t_day": 2.97,
+   "by_year_avg_r": {
+    "2022": 0.1307,
+    "2023": 0.2409,
+    "2024": 0.092
+   },
+   "by_year_n": {
+    "2022": 178,
+    "2023": 219,
+    "2024": 198
+   },
+   "long_avg_r": 0.16,
+   "short_avg_r": 0.1569,
+   "long_n": 288,
+   "short_n": 307,
+   "months_positive": "19/31",
+   "symbols_positive": "17/20",
+   "avg_hold_h": 71.1,
+   "stress_avg_r": 0.1492,
+   "stress_t_day": 2.82,
+   "stress_profit_factor": 1.711,
+   "seconds": 1070.2,
+   "gate": {
+    "t_day": false,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": false
+  },
+  {
+   "label": "nocomp",
+   "description": "B: A with the compression filter off (--set vol_breakout_dbox.comp_q=1.0): the control of the family premise",
+   "file": "docs/results/p2_vol_breakout_nocomp.json",
+   "stress_file": "docs/results/p2_vol_breakout_nocomp_stress.json",
+   "config_hash": "a8356702eb374c77",
+   "code_hash": "7d3f1297aca94371",
+   "git_commit": "bab485d979a7389ada6bf2f6fe563a39f65e4cdd",
+   "git_dirty": true,
+   "overrides": [
+    "vol_breakout_dbox.comp_q=1.0"
+   ],
+   "n": 1148,
+   "avg_r": 0.1282,
+   "profit_factor": 1.62,
+   "t_day": 3.21,
+   "by_year_avg_r": {
+    "2022": 0.0644,
+    "2023": 0.1734,
+    "2024": 0.129
+   },
+   "by_year_n": {
+    "2022": 312,
+    "2023": 433,
+    "2024": 403
+   },
+   "long_avg_r": 0.1367,
+   "short_avg_r": 0.1178,
+   "long_n": 629,
+   "short_n": 519,
+   "months_positive": "22/33",
+   "symbols_positive": "18/20",
+   "avg_hold_h": 68.9,
+   "stress_avg_r": 0.1196,
+   "stress_t_day": 3.02,
+   "stress_profit_factor": 1.567,
+   "seconds": 1090.9,
+   "gate": {
+    "t_day": true,
+    "avg_r_0.05": true,
+    "years_positive_2of3": true,
+    "stress_avg_r_pos": true
+   },
+   "passes_train_gate": true
+  }
+ ],
+ "final_candidates": [
+  {
+   "rank": 1,
+   "label": "nocomp",
+   "alpha": "vol_breakout_dbox",
+   "overrides": [
+    "vol_breakout_dbox.comp_q=1.0"
+   ],
+   "config_hash": "a8356702eb374c77",
+   "code_hash": "7d3f1297aca94371",
+   "valid_command": "HEARTLESS_DATA_DIR=data/longhist ARCHIVE_BACKFILL=false heartless lab --alpha vol_breakout_dbox --set vol_breakout_dbox.comp_q=1.0 --start 2026-01-13 --end 2026-10-01 --universe extended --tag vol_breakout --by-side --workers 2 --out docs/results/p2_vol_breakout_nocomp_valid.json",
+   "note": "the family premise (compression) is not what carries the effect: the passing configuration is the alpha with its compression filter off, i.e. a 20-day box breakout entered at the first 4h close in the direction of BTC's week, held ~3 days. The alpha file is committed byte-identical to the code the lab ran (code hash above), so the VALID run with the same override keeps the config hash (no new N). If it passes VALID, enabling it means setting comp_q's default to 1.0 together with enabled_by_default."
+  }
+ ],
+ "not_candidates": [
+  {
+   "label": "dbox",
+   "reason": "t_day 2.97 < 3.00 (all other TRAIN conditions met)"
+  }
+ ],
+ "diagnostics": {
+  "screen_fidelity": "lab vs screen, same configuration: A 594/595 trades matched (median |dR| 0.003), B 1141/1148; the screen's t_day was 0.26-0.29 higher only through UTC exit-day assignment (the lab's daily-trail exits fill at 00:00 the next day)",
+  "concentration_B": "top 5 exit days carry 50% of the total R (73 of 147 R); without them avgR +0.067, t_day 2.27; top 5 entry months 79% (2024-11, 2023-01, 2023-06, 2022-05, 2023-08)",
+  "overlap_with_ts_trend_tsmom": "daily R correlation with the ts_trend candidate (tsmom28_h10_renew) 0.17; 511 of B's 1148 entries came while ts_trend held the same side of that symbol, 98 while it held the opposite side",
+  "exits_A": "time stop 398 (avgR -0.04), trailing stop after the extension 92 (+1.53), stop 37 (-1.00), funding-avoidance 62, 3x cap 6",
+  "year_side_B": "2022 long -0.072 (107) / short +0.135 (205); 2023 long +0.194 (275) / short +0.138 (158); 2024 long +0.164 (247) / short +0.074 (156)",
+  "year_side_A": "2022 long +0.025 (63) / short +0.188 (115); 2023 long +0.302 (112) / short +0.177 (107); 2024 long +0.094 (113) / short +0.089 (85)"
+ }
+}

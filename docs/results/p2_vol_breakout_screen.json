@@ -1,0 +1,1310 @@
+{
+ "family": "vol_breakout",
+ "tool": "screen",
+ "window": [
+  "2022-01-13 00:00",
+  "2024-12-31 23:59"
+ ],
+ "universe": "extended (20 symbols)",
+ "simulator": "hourly event simulator of the engine's exits (scratch screen.py): decision at the close of the signal bar (1d: 23:59, 4h: every 4h close) on closed bars only, market fill at the next hour's open (+0.25bp half spread +1.5bp slippage, taker 5bp; stress 3bp / 7.5bp), stop sl_atr x ATR14 of the stop timeframe, no target, time stop at hold_h hours minus a minute (close below 0.5R, else breakeven + 1.5 ATR trail on the stop timeframe up to 3x), funding-avoidance exit (r < 0.3, adverse rate > 0.0003), funding paid every 8h, one position per symbol, force-close at the window end; lab warm-up first candle + lookback_days + 2 days; reads nothing at or after 2025-01-01",
+ "fidelity": "bars and indicators equal the engine's 4h/1d FeatureFrame columns (max rel. diff 1e-6 for ATR, exact for BB width rank and Donchian); BTC 168h return equal to the stored market context (max diff 0); the alpha's decisions on a real MarketView equal the screen's candidates (ETH and SOL 2023-24: 43/43 and 48/48); vs the engine lab for the default (hybrid, q 0.25): 594 of 595 trades matched with a median |dR| of 0.003, avgR +0.160 vs +0.157; the screen's t_day ran 0.26 above the lab (3.23 vs 2.97) only because 25 trades fall on another UTC exit day (the lab's daily-trail exits fill at 00:00 of the next day, the screen books them at 23:59)",
+ "keys": {
+  "tf": "decision timeframe (1d: daily close; 4h: every 4h close)",
+  "mtf": "stop / trail / box timeframe when it differs from tf",
+  "trigger": "4h_dbox: the first 4h close beyond the daily dc-day box of the closed days before its UTC day (the alpha vol_breakout_dbox); absent: the first tf close beyond the prior dc-bar Donchian extreme of tf bars",
+  "dc": "box length in bars of the box timeframe",
+  "rank": "w60: percentile of the daily BB(20,2) width among its last 60 values; f120: the frame column bb_width_rank (120 bars)",
+  "q": "compression: min rank over the k bars before the breakout bar (day) <= q; q >= 1 turns the filter off (control)",
+  "trend": "none / btc (BTC 168h return agrees) / own (daily SMA20 vs SMA50 agrees) / both",
+  "sl_atr": "stop distance in ATR14 of the stop timeframe",
+  "hold_h": "time stop in hours",
+  "fund_max": "skip an entry while the upcoming funding rate is adverse by more than this",
+  "lookback_days": "warm-up before the first decision (the alpha's lookback_days)"
+ },
+ "configs": [
+  {
+   "round": "1-structure (1d close vs 4h box x trend filter)",
+   "config_hash": "78fb2d60424d686a",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "none",
+    "sl_atr": 2.0,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 465,
+   "avg_r": 0.15,
+   "pf": 1.633,
+   "t_day": 2.12,
+   "by_year": {
+    "2022": {
+     "n": 130,
+     "avg_r": 0.1123
+    },
+    "2023": {
+     "n": 168,
+     "avg_r": 0.2817
+    },
+    "2024": {
+     "n": 167,
+     "avg_r": 0.0468
+    }
+   },
+   "long": {
+    "n": 225,
+    "avg_r": 0.1466
+   },
+   "short": {
+    "n": 240,
+    "avg_r": 0.1531
+   },
+   "funding_r_avg": -0.0045,
+   "ret_avg_bp": 171.9,
+   "hold_h_avg": 114.6,
+   "stop_pct_median": 11.74,
+   "exits": {
+    "time": 259,
+    "BE/trail": 95,
+    "SL": 63,
+    "funding": 45,
+    "time3x": 3
+   }
+  },
+  {
+   "round": "1-structure (1d close vs 4h box x trend filter)",
+   "config_hash": "a9208eb728890e94",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "own",
+    "sl_atr": 2.0,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 254,
+   "avg_r": 0.1662,
+   "pf": 1.786,
+   "t_day": 2.14,
+   "by_year": {
+    "2022": {
+     "n": 73,
+     "avg_r": 0.175
+    },
+    "2023": {
+     "n": 97,
+     "avg_r": 0.3177
+    },
+    "2024": {
+     "n": 84,
+     "avg_r": -0.0165
+    }
+   },
+   "long": {
+    "n": 97,
+    "avg_r": 0.0366
+   },
+   "short": {
+    "n": 157,
+    "avg_r": 0.2462
+   },
+   "funding_r_avg": -0.0049,
+   "ret_avg_bp": 232.1,
+   "hold_h_avg": 113.4,
+   "stop_pct_median": 11.58,
+   "exits": {
+    "time": 136,
+    "BE/trail": 56,
+    "SL": 31,
+    "funding": 29,
+    "time3x": 2
+   }
+  },
+  {
+   "round": "1-structure (1d close vs 4h box x trend filter)",
+   "config_hash": "c547768663c27f79",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 424,
+   "avg_r": 0.1603,
+   "pf": 1.714,
+   "t_day": 2.16,
+   "by_year": {
+    "2022": {
+     "n": 125,
+     "avg_r": 0.0753
+    },
+    "2023": {
+     "n": 151,
+     "avg_r": 0.3496
+    },
+    "2024": {
+     "n": 148,
+     "avg_r": 0.039
+    }
+   },
+   "long": {
+    "n": 205,
+    "avg_r": 0.1535
+   },
+   "short": {
+    "n": 219,
+    "avg_r": 0.1667
+   },
+   "funding_r_avg": -0.005,
+   "ret_avg_bp": 181.8,
+   "hold_h_avg": 114.3,
+   "stop_pct_median": 11.74,
+   "exits": {
+    "time": 238,
+    "BE/trail": 87,
+    "SL": 54,
+    "funding": 42,
+    "time3x": 3
+   }
+  },
+  {
+   "round": "1-structure (1d close vs 4h box x trend filter)",
+   "config_hash": "804c2c6d85df2801",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "both",
+    "sl_atr": 2.0,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 231,
+   "avg_r": 0.2095,
+   "pf": 2.106,
+   "t_day": 2.57,
+   "by_year": {
+    "2022": {
+     "n": 71,
+     "avg_r": 0.188
+    },
+    "2023": {
+     "n": 87,
+     "avg_r": 0.3949
+    },
+    "2024": {
+     "n": 73,
+     "avg_r": 0.0094
+    }
+   },
+   "long": {
+    "n": 86,
+    "avg_r": 0.0863
+   },
+   "short": {
+    "n": 145,
+    "avg_r": 0.2825
+   },
+   "funding_r_avg": -0.0053,
+   "ret_avg_bp": 276.7,
+   "hold_h_avg": 113.8,
+   "stop_pct_median": 11.57,
+   "exits": {
+    "time": 123,
+    "BE/trail": 54,
+    "SL": 25,
+    "funding": 27,
+    "time3x": 2
+   }
+  },
+  {
+   "round": "1-structure (1d close vs 4h box x trend filter)",
+   "config_hash": "67f7512bdcfbecd8",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "4h",
+    "dc": 20,
+    "rank": "f120",
+    "q": 0.2,
+    "k": 6,
+    "trend": "none",
+    "sl_atr": 2.5,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 60
+   },
+   "n": 2222,
+   "avg_r": 0.0586,
+   "pf": 1.141,
+   "t_day": 1.12,
+   "by_year": {
+    "2022": {
+     "n": 715,
+     "avg_r": 0.01
+    },
+    "2023": {
+     "n": 703,
+     "avg_r": 0.0346
+    },
+    "2024": {
+     "n": 804,
+     "avg_r": 0.1229
+    }
+   },
+   "long": {
+    "n": 1062,
+    "avg_r": 0.0669
+   },
+   "short": {
+    "n": 1160,
+    "avg_r": 0.0511
+   },
+   "funding_r_avg": -0.0025,
+   "ret_avg_bp": 35.1,
+   "hold_h_avg": 58.3,
+   "stop_pct_median": 5.4,
+   "exits": {
+    "BE/trail": 623,
+    "SL": 792,
+    "time": 688,
+    "funding": 107,
+    "end": 12
+   }
+  },
+  {
+   "round": "1-structure (1d close vs 4h box x trend filter)",
+   "config_hash": "0927843b604bb3d8",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "4h",
+    "dc": 20,
+    "rank": "f120",
+    "q": 0.2,
+    "k": 6,
+    "trend": "own",
+    "sl_atr": 2.5,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 60
+   },
+   "n": 1054,
+   "avg_r": 0.0831,
+   "pf": 1.205,
+   "t_day": 1.2,
+   "by_year": {
+    "2022": {
+     "n": 354,
+     "avg_r": 0.0424
+    },
+    "2023": {
+     "n": 315,
+     "avg_r": 0.1239
+    },
+    "2024": {
+     "n": 385,
+     "avg_r": 0.0871
+    }
+   },
+   "long": {
+    "n": 460,
+    "avg_r": 0.02
+   },
+   "short": {
+    "n": 594,
+    "avg_r": 0.1319
+   },
+   "funding_r_avg": -0.0041,
+   "ret_avg_bp": 60.6,
+   "hold_h_avg": 56.9,
+   "stop_pct_median": 5.39,
+   "exits": {
+    "SL": 362,
+    "time": 318,
+    "BE/trail": 290,
+    "funding": 79,
+    "end": 5
+   }
+  },
+  {
+   "round": "1-structure (1d close vs 4h box x trend filter)",
+   "config_hash": "fdd1600086922d51",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "4h",
+    "dc": 20,
+    "rank": "f120",
+    "q": 0.2,
+    "k": 6,
+    "trend": "btc",
+    "sl_atr": 2.5,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 60
+   },
+   "n": 1574,
+   "avg_r": 0.0683,
+   "pf": 1.158,
+   "t_day": 0.99,
+   "by_year": {
+    "2022": {
+     "n": 502,
+     "avg_r": 0.0226
+    },
+    "2023": {
+     "n": 518,
+     "avg_r": 0.0832
+    },
+    "2024": {
+     "n": 554,
+     "avg_r": 0.0959
+    }
+   },
+   "long": {
+    "n": 783,
+    "avg_r": 0.0745
+   },
+   "short": {
+    "n": 791,
+    "avg_r": 0.0622
+   },
+   "funding_r_avg": -0.0042,
+   "ret_avg_bp": 40.6,
+   "hold_h_avg": 56.9,
+   "stop_pct_median": 5.24,
+   "exits": {
+    "SL": 587,
+    "time": 451,
+    "BE/trail": 438,
+    "funding": 87,
+    "end": 11
+   }
+  },
+  {
+   "round": "1-structure (1d close vs 4h box x trend filter)",
+   "config_hash": "01a89ea89ef42a6e",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "4h",
+    "dc": 20,
+    "rank": "f120",
+    "q": 0.2,
+    "k": 6,
+    "trend": "both",
+    "sl_atr": 2.5,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 60
+   },
+   "n": 756,
+   "avg_r": 0.0902,
+   "pf": 1.214,
+   "t_day": 1.01,
+   "by_year": {
+    "2022": {
+     "n": 251,
+     "avg_r": 0.0425
+    },
+    "2023": {
+     "n": 239,
+     "avg_r": 0.1523
+    },
+    "2024": {
+     "n": 266,
+     "avg_r": 0.0793
+    }
+   },
+   "long": {
+    "n": 331,
+    "avg_r": 0.0471
+   },
+   "short": {
+    "n": 425,
+    "avg_r": 0.1237
+   },
+   "funding_r_avg": -0.0053,
+   "ret_avg_bp": 63.0,
+   "hold_h_avg": 54.8,
+   "stop_pct_median": 5.27,
+   "exits": {
+    "SL": 272,
+    "time": 214,
+    "BE/trail": 199,
+    "funding": 67,
+    "end": 4
+   }
+  },
+  {
+   "round": "2-1d design: compression dose / box / exits",
+   "config_hash": "d5b45e9a0da53e5d",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 1.0,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 775,
+   "avg_r": 0.1277,
+   "pf": 1.504,
+   "t_day": 2.15,
+   "by_year": {
+    "2022": {
+     "n": 201,
+     "avg_r": -0.0015
+    },
+    "2023": {
+     "n": 286,
+     "avg_r": 0.2273
+    },
+    "2024": {
+     "n": 288,
+     "avg_r": 0.1191
+    }
+   },
+   "long": {
+    "n": 420,
+    "avg_r": 0.147
+   },
+   "short": {
+    "n": 355,
+    "avg_r": 0.105
+   },
+   "funding_r_avg": -0.0045,
+   "ret_avg_bp": 157.6,
+   "hold_h_avg": 110.6,
+   "stop_pct_median": 11.91,
+   "exits": {
+    "time": 408,
+    "BE/trail": 150,
+    "SL": 115,
+    "funding": 97,
+    "time3x": 5
+   }
+  },
+  {
+   "round": "2-1d design: compression dose / box / exits",
+   "config_hash": "71081b1f6d2f9b69",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.15,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 336,
+   "avg_r": 0.1499,
+   "pf": 1.634,
+   "t_day": 1.72,
+   "by_year": {
+    "2022": {
+     "n": 99,
+     "avg_r": 0.0485
+    },
+    "2023": {
+     "n": 111,
+     "avg_r": 0.4131
+    },
+    "2024": {
+     "n": 126,
+     "avg_r": -0.0025
+    }
+   },
+   "long": {
+    "n": 171,
+    "avg_r": 0.1441
+   },
+   "short": {
+    "n": 165,
+    "avg_r": 0.1558
+   },
+   "funding_r_avg": -0.0052,
+   "ret_avg_bp": 150.4,
+   "hold_h_avg": 116.2,
+   "stop_pct_median": 11.45,
+   "exits": {
+    "time": 191,
+    "BE/trail": 68,
+    "SL": 45,
+    "funding": 29,
+    "time3x": 3
+   }
+  },
+  {
+   "round": "2-1d design: compression dose / box / exits",
+   "config_hash": "dce8d82e5ca08a9c",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.4,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 526,
+   "avg_r": 0.149,
+   "pf": 1.623,
+   "t_day": 2.13,
+   "by_year": {
+    "2022": {
+     "n": 140,
+     "avg_r": 0.0392
+    },
+    "2023": {
+     "n": 190,
+     "avg_r": 0.3138
+    },
+    "2024": {
+     "n": 196,
+     "avg_r": 0.0675
+    }
+   },
+   "long": {
+    "n": 262,
+    "avg_r": 0.1533
+   },
+   "short": {
+    "n": 264,
+    "avg_r": 0.1446
+   },
+   "funding_r_avg": -0.005,
+   "ret_avg_bp": 162.5,
+   "hold_h_avg": 112.9,
+   "stop_pct_median": 11.76,
+   "exits": {
+    "time": 285,
+    "BE/trail": 109,
+    "SL": 72,
+    "funding": 57,
+    "time3x": 3
+   }
+  },
+  {
+   "round": "2-1d design: compression dose / box / exits",
+   "config_hash": "29f7e6cf8a813a79",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 10,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 548,
+   "avg_r": 0.1154,
+   "pf": 1.481,
+   "t_day": 1.81,
+   "by_year": {
+    "2022": {
+     "n": 151,
+     "avg_r": 0.1047
+    },
+    "2023": {
+     "n": 195,
+     "avg_r": 0.2307
+    },
+    "2024": {
+     "n": 202,
+     "avg_r": 0.0121
+    }
+   },
+   "long": {
+    "n": 262,
+    "avg_r": 0.1325
+   },
+   "short": {
+    "n": 286,
+    "avg_r": 0.0997
+   },
+   "funding_r_avg": -0.0042,
+   "ret_avg_bp": 115.2,
+   "hold_h_avg": 116.1,
+   "stop_pct_median": 11.52,
+   "exits": {
+    "time": 330,
+    "BE/trail": 95,
+    "SL": 72,
+    "funding": 46,
+    "time3x": 5
+   }
+  },
+  {
+   "round": "2-1d design: compression dose / box / exits",
+   "config_hash": "7f3f16e40cf66ff7",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 468,
+   "avg_r": 0.1533,
+   "pf": 1.877,
+   "t_day": 2.76,
+   "by_year": {
+    "2022": {
+     "n": 141,
+     "avg_r": 0.1223
+    },
+    "2023": {
+     "n": 161,
+     "avg_r": 0.2641
+    },
+    "2024": {
+     "n": 166,
+     "avg_r": 0.0721
+    }
+   },
+   "long": {
+    "n": 228,
+    "avg_r": 0.1476
+   },
+   "short": {
+    "n": 240,
+    "avg_r": 0.1586
+   },
+   "funding_r_avg": -0.0034,
+   "ret_avg_bp": 193.3,
+   "hold_h_avg": 74.0,
+   "stop_pct_median": 11.76,
+   "exits": {
+    "time": 317,
+    "BE/trail": 73,
+    "SL": 32,
+    "time3x": 7,
+    "funding": 39
+   }
+  },
+  {
+   "round": "2-1d design: compression dose / box / exits",
+   "config_hash": "e85393f01396bad4",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 240,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 401,
+   "avg_r": 0.1056,
+   "pf": 1.315,
+   "t_day": 1.09,
+   "by_year": {
+    "2022": {
+     "n": 119,
+     "avg_r": 0.1788
+    },
+    "2023": {
+     "n": 141,
+     "avg_r": 0.2455
+    },
+    "2024": {
+     "n": 141,
+     "avg_r": -0.0961
+    }
+   },
+   "long": {
+    "n": 197,
+    "avg_r": 0.0443
+   },
+   "short": {
+    "n": 204,
+    "avg_r": 0.1649
+   },
+   "funding_r_avg": -0.0082,
+   "ret_avg_bp": 118.6,
+   "hold_h_avg": 200.4,
+   "stop_pct_median": 11.73,
+   "exits": {
+    "time": 157,
+    "BE/trail": 94,
+    "SL": 102,
+    "funding": 47,
+    "time3x": 1
+   }
+  },
+  {
+   "round": "2-1d design: compression dose / box / exits",
+   "config_hash": "3536ca2212a5b83c",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 1.5,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 422,
+   "avg_r": 0.2092,
+   "pf": 1.719,
+   "t_day": 2.16,
+   "by_year": {
+    "2022": {
+     "n": 125,
+     "avg_r": 0.0938
+    },
+    "2023": {
+     "n": 151,
+     "avg_r": 0.4441
+    },
+    "2024": {
+     "n": 146,
+     "avg_r": 0.0649
+    }
+   },
+   "long": {
+    "n": 203,
+    "avg_r": 0.2235
+   },
+   "short": {
+    "n": 219,
+    "avg_r": 0.1959
+   },
+   "funding_r_avg": -0.0069,
+   "ret_avg_bp": 174.5,
+   "hold_h_avg": 112.3,
+   "stop_pct_median": 8.83,
+   "exits": {
+    "time": 183,
+    "BE/trail": 109,
+    "SL": 87,
+    "funding": 40,
+    "time3x": 3
+   }
+  },
+  {
+   "round": "2-1d design: compression dose / box / exits",
+   "config_hash": "75cdd67a5ebb6250",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 3.0,
+    "hold_h": 120,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 429,
+   "avg_r": 0.1071,
+   "pf": 1.687,
+   "t_day": 2.12,
+   "by_year": {
+    "2022": {
+     "n": 128,
+     "avg_r": 0.0408
+    },
+    "2023": {
+     "n": 152,
+     "avg_r": 0.2316
+    },
+    "2024": {
+     "n": 149,
+     "avg_r": 0.0372
+    }
+   },
+   "long": {
+    "n": 206,
+    "avg_r": 0.1118
+   },
+   "short": {
+    "n": 223,
+    "avg_r": 0.1029
+   },
+   "funding_r_avg": -0.0029,
+   "ret_avg_bp": 182.7,
+   "hold_h_avg": 111.4,
+   "stop_pct_median": 17.59,
+   "exits": {
+    "time": 292,
+    "BE/trail": 62,
+    "SL": 20,
+    "funding": 54,
+    "time3x": 1
+   }
+  },
+  {
+   "round": "3-hold, control, filter, hybrid 4h trigger of the daily box",
+   "config_hash": "067abc5912a8cd8a",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 48,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 507,
+   "avg_r": 0.1061,
+   "pf": 1.694,
+   "t_day": 2.42,
+   "by_year": {
+    "2022": {
+     "n": 151,
+     "avg_r": 0.0511
+    },
+    "2023": {
+     "n": 178,
+     "avg_r": 0.2313
+    },
+    "2024": {
+     "n": 178,
+     "avg_r": 0.0277
+    }
+   },
+   "long": {
+    "n": 257,
+    "avg_r": 0.1189
+   },
+   "short": {
+    "n": 250,
+    "avg_r": 0.093
+   },
+   "funding_r_avg": -0.0024,
+   "ret_avg_bp": 124.0,
+   "hold_h_avg": 50.6,
+   "stop_pct_median": 11.6,
+   "exits": {
+    "time": 393,
+    "BE/trail": 55,
+    "time3x": 11,
+    "SL": 13,
+    "funding": 35
+   }
+  },
+  {
+   "round": "3-hold, control, filter, hybrid 4h trigger of the daily box",
+   "config_hash": "c030c8db8cd82707",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 1.0,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 855,
+   "avg_r": 0.1292,
+   "pf": 1.7,
+   "t_day": 3.01,
+   "by_year": {
+    "2022": {
+     "n": 223,
+     "avg_r": 0.0483
+    },
+    "2023": {
+     "n": 307,
+     "avg_r": 0.1788
+    },
+    "2024": {
+     "n": 325,
+     "avg_r": 0.1378
+    }
+   },
+   "long": {
+    "n": 468,
+    "avg_r": 0.1229
+   },
+   "short": {
+    "n": 387,
+    "avg_r": 0.1369
+   },
+   "funding_r_avg": -0.0034,
+   "ret_avg_bp": 172.2,
+   "hold_h_avg": 71.8,
+   "stop_pct_median": 11.94,
+   "exits": {
+    "time": 558,
+    "BE/trail": 130,
+    "SL": 63,
+    "time3x": 12,
+    "funding": 92
+   }
+  },
+  {
+   "round": "3-hold, control, filter, hybrid 4h trigger of the daily box",
+   "config_hash": "a4c22952e8f75285",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "1d",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "both",
+    "sl_atr": 2.0,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90
+   },
+   "n": 252,
+   "avg_r": 0.1834,
+   "pf": 2.198,
+   "t_day": 3.0,
+   "by_year": {
+    "2022": {
+     "n": 82,
+     "avg_r": 0.2427
+    },
+    "2023": {
+     "n": 92,
+     "avg_r": 0.2598
+    },
+    "2024": {
+     "n": 78,
+     "avg_r": 0.031
+    }
+   },
+   "long": {
+    "n": 90,
+    "avg_r": 0.1156
+   },
+   "short": {
+    "n": 162,
+    "avg_r": 0.2211
+   },
+   "funding_r_avg": -0.0037,
+   "ret_avg_bp": 269.6,
+   "hold_h_avg": 74.4,
+   "stop_pct_median": 11.85,
+   "exits": {
+    "time": 164,
+    "BE/trail": 44,
+    "time3x": 6,
+    "SL": 12,
+    "funding": 26
+   }
+  },
+  {
+   "round": "3-hold, control, filter, hybrid 4h trigger of the daily box",
+   "config_hash": "e5f82d84aa856f81",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "4h",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90,
+    "mtf": "1d",
+    "trigger": "4h_dbox"
+   },
+   "n": 595,
+   "avg_r": 0.1585,
+   "pf": 1.877,
+   "t_day": 3.23,
+   "by_year": {
+    "2022": {
+     "n": 178,
+     "avg_r": 0.1353
+    },
+    "2023": {
+     "n": 219,
+     "avg_r": 0.2379
+    },
+    "2024": {
+     "n": 198,
+     "avg_r": 0.0914
+    }
+   },
+   "long": {
+    "n": 288,
+    "avg_r": 0.1568
+   },
+   "short": {
+    "n": 307,
+    "avg_r": 0.16
+   },
+   "funding_r_avg": -0.0039,
+   "ret_avg_bp": 179.1,
+   "hold_h_avg": 72.0,
+   "stop_pct_median": 10.79,
+   "exits": {
+    "time": 387,
+    "BE/trail": 101,
+    "SL": 38,
+    "time3x": 7,
+    "funding": 62
+   }
+  },
+  {
+   "round": "4-hybrid control and stress",
+   "config_hash": "42c2fd592ec8cdfc",
+   "stress": false,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "4h",
+    "dc": 20,
+    "rank": "w60",
+    "q": 1.0,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90,
+    "mtf": "1d",
+    "trigger": "4h_dbox"
+   },
+   "n": 1142,
+   "avg_r": 0.1304,
+   "pf": 1.684,
+   "t_day": 3.5,
+   "by_year": {
+    "2022": {
+     "n": 311,
+     "avg_r": 0.0669
+    },
+    "2023": {
+     "n": 430,
+     "avg_r": 0.1715
+    },
+    "2024": {
+     "n": 401,
+     "avg_r": 0.1355
+    }
+   },
+   "long": {
+    "n": 625,
+    "avg_r": 0.1385
+   },
+   "short": {
+    "n": 517,
+    "avg_r": 0.1206
+   },
+   "funding_r_avg": -0.0039,
+   "ret_avg_bp": 148.5,
+   "hold_h_avg": 69.8,
+   "stop_pct_median": 11.22,
+   "exits": {
+    "time": 718,
+    "BE/trail": 191,
+    "SL": 78,
+    "time3x": 13,
+    "funding": 141,
+    "end": 1
+   }
+  },
+  {
+   "round": "4-hybrid control and stress",
+   "config_hash": "e5f82d84aa856f81",
+   "stress": true,
+   "config": {
+    "screen": "vol_breakout",
+    "universe": "extended",
+    "tf": "4h",
+    "dc": 20,
+    "rank": "w60",
+    "q": 0.25,
+    "k": 5,
+    "trend": "btc",
+    "sl_atr": 2.0,
+    "hold_h": 72,
+    "trail_atr": 0.0,
+    "fund_max": 0.0003,
+    "side_mode": 0,
+    "lookback_days": 90,
+    "mtf": "1d",
+    "trigger": "4h_dbox"
+   },
+   "n": 595,
+   "avg_r": 0.1493,
+   "pf": 1.814,
+   "t_day": 3.07,
+   "by_year": {
+    "2022": {
+     "n": 178,
+     "avg_r": 0.1285
+    },
+    "2023": {
+     "n": 219,
+     "avg_r": 0.2262
+    },
+    "2024": {
+     "n": 198,
+     "avg_r": 0.0831
+    }
+   },
+   "long": {
+    "n": 288,
+    "avg_r": 0.1467
+   },
+   "short": {
+    "n": 307,
+    "avg_r": 0.1518
+   },
+   "funding_r_avg": -0.0039,
+   "ret_avg_bp": 176.1,
+   "hold_h_avg": 72.0,
+   "stop_pct_median": 10.81,
+   "exits": {
+    "time": 387,
+    "BE/trail": 101,
+    "SL": 38,
+    "time3x": 7,
+    "funding": 62
+   }
+  }
+ ],
+ "n_screen_configs": 21
+}
