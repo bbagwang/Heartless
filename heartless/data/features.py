@@ -222,7 +222,9 @@ class MarketView:
             if idx >= 0 and ct[idx] > close_time - 60_000:
                 self.just_closed.add(tf)
         for tf in LONG_TIMEFRAMES:
-            if tf in frames and (close_time + 1) % TF_MS[tf] < 60_000:
+            # also when the frame does not exist yet: a live view built on an empty history (a failed backfill) gets
+            # its first long frame here once streamed bars arrive, or a daily alpha would never be asked on it
+            if (close_time + 1) % TF_MS[tf] < 60_000:
                 cur = self._long_cursor(tf)
                 if cur.idx >= 0 and cur.frame.close_times()[cur.idx] > close_time - 60_000:
                     self.just_closed.add(tf)

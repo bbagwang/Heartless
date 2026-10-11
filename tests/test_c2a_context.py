@@ -169,6 +169,36 @@ def test_appended_history_rebuilds_only_the_hours_it_can_change(tmp_path):
         s.close()
 
 
+def test_a_build_of_another_window_after_an_append_leaves_no_stale_rows_for_readers_that_do_not_build(tmp_path):
+    """Review regression: XRP lags 30 minutes at build time, so the last built hour holds its partial hour. After the
+    append, a run over the first year only moves the metadata to the new source and re-opens that hour; a reader with
+    auto-build off must then find it missing (empty ctx.market), not the row computed from the shorter history."""
+    src, dst = Store(tmp_path / "src.db"), Store(tmp_path / "ctx.db")
+    full = {k: _bars(k, START, 45 * 1440, 1 + k) for k in range(len(SYMS))}
+    cut = {sym: 40 * 1440 - (30 if sym == "XRPUSDT" else 0) for sym in SYMS}
+    for k, sym in enumerate(SYMS):
+        src.save_candles(sym, full[k][:cut[sym]])
+    C.build(src, dst, universe=SYMS)
+    last_hour = dst.get("context.meta")["built"][-1][1]
+    for k, sym in enumerate(SYMS):
+        src.save_candles(sym, full[k][cut[sym]:])
+    assert C.usable(src, dst, SYMS)[1] == "extended"
+    assert C.ensure(src, dst, START, START + 20 * DAY, SYMS)  # the 2023 unit: nothing to compute there
+    assert C.usable(src, dst, SYMS)[1] == "same" and dst.get("context.meta")["built"][-1][1] < last_hour
+    assert C.ensure(src, dst, START, START + 45 * DAY, SYMS, auto_build=False)
+    fresh = Store(tmp_path / "fresh.db")
+    C.build(src, fresh, universe=SYMS)
+    served, truth = _rows(dst), _rows(fresh)
+    assert not any(k[1] >= last_hour for k in served)  # the re-opened hour reads as missing
+    assert all(truth[k] == v for k, v in served.items())  # whatever is served equals a fresh build
+    table = C.ContextTable.load(dst, list(SYMS), START, START + 45 * DAY, source=src.path)
+    assert table.view("XRPUSDT", last_hour) is C.EMPTY
+    # the building path then fills it in, identical to a fresh build
+    assert C.ensure(src, dst, START, START + 45 * DAY, SYMS) and _rows(dst) == truth
+    for s in (src, dst, fresh):
+        s.close()
+
+
 def _build_in_child(db: str, ctx: str, out: str) -> None:
     src, dst = Store(db), Store(ctx)
     msgs = []

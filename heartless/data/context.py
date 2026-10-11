@@ -627,6 +627,11 @@ def _check_or_reset(dst, meta, source: dict, universe: list[str], rebuild: bool)
         elif status == "mismatch":
             raise _refuse(dst, why)
         elif status == "extended":
+            # the stored rows of the re-opened hours go as well, before the metadata moves on to the new source: a run
+            # that builds only its own window leaves the other re-opened hours to later, and a reader that does not
+            # build (CONTEXT_AUTO_BUILD=false) must then find them missing (an empty ctx.market), never values computed
+            # from the shorter history
+            dst.delete_market_context(after=hour_close(hour_of(stable)))
             meta["built"] = _clip_built(meta.get("built", []), stable)
             note = f"{why}: hours after {_iso(hour_close(hour_of(stable)))} are rebuilt"
     meta["source"] = source

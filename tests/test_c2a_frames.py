@@ -157,6 +157,27 @@ def test_live_long_frames_are_rebuilt_once_per_period_not_per_minute(monkeypatch
     assert set(built) <= set(LONG_TIMEFRAMES)  # base frames are app._rebuild_view's business (not touched here)
 
 
+def test_a_live_view_built_on_an_empty_history_gets_its_long_frames_from_streamed_bars():
+    """Review regression: a symbol whose backfill returned nothing starts with an empty base, so rebuild() made no 4h /
+    1d frame; seek() then never reported their closes and a daily alpha was never asked on that symbol."""
+    full = _candles(4 * 1440, 6)
+    ca = CandleArrays("1m", capacity=full.n + 16)
+    v = MarketView("X")
+    v.rebuild(ca, live=True)
+    assert not set(LONG_TIMEFRAMES) & set(v.frames)
+    closes = {"4h": 0, "1d": 0}
+    for i in range(full.n):
+        ca.append(full.candle_at(i))
+        Heartless._rebuild_view(v, ca, ["1m"])  # what the app does on every bar (sets view.base)
+        t = int(ca.close_time[ca.n - 1])
+        v.seek(t)
+        for tf in closes:
+            closes[tf] += v.closed(tf)
+            if v.closed(tf):
+                assert v.tf(tf).close_time == t and _same_frame(v.tf(tf).frame, FeatureFrame(tf, resample(ca, tf)))
+    assert closes == {"4h": 4 * 6, "1d": 4}
+
+
 # --- lookback_days: lab / backtester warm-up -----------------------------------------------------------------------
 @pytest.fixture
 def long_alpha(monkeypatch):

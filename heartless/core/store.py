@@ -439,9 +439,13 @@ class Store:
                           (symbol, int(start), int(end)))
         return [(r["ts"], r["data"]) for r in rows]
 
-    def delete_market_context(self) -> None:
+    def delete_market_context(self, after: int | None = None) -> None:
+        """Every row, or only those of the hour closes after `after` (hours re-opened by appended source history)."""
         if self.has_market_context():
-            self.execute("DELETE FROM market_context")
+            if after is None:
+                self.execute("DELETE FROM market_context")
+            else:
+                self.execute("DELETE FROM market_context WHERE ts>?", (int(after),))
 
     def market_context_stats(self) -> dict:
         """First / last hour close and row counts of the stored context (market rows and all rows)."""

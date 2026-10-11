@@ -51,8 +51,8 @@ class Discovered(Alpha):
     param_specs = []
     regime_affinity = {Regime.TREND_UP: 1.0, Regime.TREND_DOWN: 1.0, Regime.RANGE: 1.0, Regime.VOLATILE: 0.8}
     enabled_by_default = False
-    # the miner's warm-up (discovery.WARMUP_MS, 22 days): the lab, the backtester and the live history give the frames
-    # the same depth the rules were mined on
+    # the miner's warm-up (discovery.WARMUP_MS, 22 days): the lab and backtester warm-up (lookback + 2 days) is never
+    # shorter than the history the rules were mined on (live, the 15m / 1h frames are fixed LIVE_WINDOW tails)
     lookback_days = 22.0
 
     def __init__(self) -> None:
