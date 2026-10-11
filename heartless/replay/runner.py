@@ -155,8 +155,11 @@ def _settings(cfg: ReplayConfig, work: Path, symbols: list[str]):
     from heartless.config import Settings
 
     always = [s for s in "BTCUSDT,ETHUSDT,SOLUSDT".split(",") if s in symbols]
+    # CONTEXT_DB is the replayed bot's live context store, pinned into the work dir like every other file it writes:
+    # taken from the environment (the lab's `CONTEXT_DB=data/longhist/context.db` habit), the bot appended its
+    # snapshots to that offline table and its retention prune, run at the virtual time, deleted every older row of it
     values = {**REPLAY_DEFAULTS, "ALWAYS_INCLUDE": ",".join(always) or symbols[0], **cfg.settings, **FORCED_SETTINGS,
-              "HEARTLESS_DATA_DIR": str(work), "LOG_LEVEL": cfg.log_level}
+              "HEARTLESS_DATA_DIR": str(work), "CONTEXT_DB": str(work / "context.db"), "LOG_LEVEL": cfg.log_level}
     s = Settings(_env_file=None, **values)
     s.data_dir.mkdir(parents=True, exist_ok=True)
     return s
@@ -452,7 +455,9 @@ class _Run:
             await orig_start(slot, restore)
             eng = app.engines.get(slot.name)
             if eng is not None and seed is not None:  # before its first decision: start() itself decides nothing
-                eng.bandit.rng.seed(f"{seed}:{slot.name}:{slot.params.version}")
+                # the slot name and its (virtual) start, never the version id: that carries wall time and random bits,
+                # so two replays of the same window used to diverge from a challenger's fourth trade on
+                eng.bandit.rng.seed(f"{seed}:{slot.name}:{int(slot.started)}")
 
         async def cycle(force: bool = False):
             t0, ts = time.perf_counter(), now_ms()
@@ -532,9 +537,12 @@ class _Run:
         ch = d.get("challenger") or {}
         self.decisions.append({"time": fmt_ts(d.get("at", now_ms())), "slot": d.get("slot"), "version": d.get("version"),
                                "source": d.get("source"), "path": d.get("path"), "verdict": d.get("verdict"),
-                               "rule": d.get("rule"), "challenger": ch, "champion_n": (d.get("champion") or {}).get("n"),
-                               "paired": d.get("paired"), "failed_alphas": d.get("failed_alphas"), "bar": d.get("bar"),
-                               "checks": d.get("checks")})
+                               "rule": d.get("rule"), "checkpoint": d.get("checkpoint"),
+                               "next_checkpoint": d.get("next_checkpoint"), "challenger": ch,
+                               "current_n": (d.get("current") or {}).get("n"),
+                               "champion_n": (d.get("champion") or {}).get("n"), "paired": d.get("paired"),
+                               "failed_alphas": d.get("failed_alphas"), "bar": d.get("bar"), "checks": d.get("checks"),
+                               "base": d.get("base"), "blockers": d.get("blockers")})
 
     def _make_counter(self, topic: str):
         async def handler(p: dict) -> None:
@@ -715,7 +723,8 @@ def format_report(s: dict) -> str:
     for r in learn.get("challenger_decisions", []):
         ch = r.get("challenger") or {}
         paired = f" paired t {r['paired']['t']:+.2f}" if r.get("paired") else ""
-        lines.append(f"  decision {r['time']} {r['slot']} {r['version']} [{r['source']}] {r['path']} -> {r['verdict']} "
+        cp = f" @{r['checkpoint']}d" if r.get("checkpoint") is not None else " (before the first checkpoint)"
+        lines.append(f"  decision {r['time']} {r['slot']} {r['version']} [{r['source']}] {r['path']}{cp} -> {r['verdict']} "
                      f"({r['rule']}): n={ch.get('n')} days={ch.get('days')} t_day {ch.get('t_day', 0):+.2f}{paired}, "
                      f"champion n={r.get('champion_n')}" + (f", failed-alpha bar {r['failed_alphas']}"
                                                             if r.get("failed_alphas") else ""))

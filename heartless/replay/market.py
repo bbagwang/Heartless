@@ -2,8 +2,8 @@
 
 * `ReplaySource` reads a Heartless store (read-only): 1m candles, funding settlements and 5m positioning metrics.
 * `ReplayRest` is a `BinanceRest` whose `request()` answers the public GET endpoints the orchestrator uses from that
-  store with Binance-shaped JSON (klines, exchangeInfo, 24h tickers, funding history, premium index, open-interest and
-  long/short series) and refuses everything else, so the app's own parsing code runs unchanged. Only data that exists
+  store with Binance-shaped JSON (klines, exchangeInfo, 24h tickers, funding history, premium index, funding info,
+  open-interest and long/short series) and refuses everything else, so the app's own parsing code runs unchanged. Only data that exists
   at the current virtual time is ever returned: closed candles, settled funding, metrics buckets that closed.
 * `ReplayMarketStream` is a `MarketStream` that, instead of a websocket, emits every stored 1m candle in virtual time:
   four price points inside the minute (open, first extreme, second extreme, close; bullish bars O-L-H-C, bearish
@@ -174,13 +174,34 @@ class ReplaySource:
         return [{"symbol": symbol, "fundingTime": int(t[i]), "fundingRate": _s(r[i]),
                  "markPrice": _s(m[i] or self.last_close(symbol, int(t[i])))} for i in idx]
 
+    def funding_schedule(self, symbol: str, ts: int) -> tuple[int, int]:
+        """(next settlement time after `ts`, settlement interval) as the exchange publishes them (premiumIndex
+        nextFundingTime, fundingInfo fundingIntervalHours), from the stored settlement times: the next stored one and
+        its spacing from the one before (e.g. SOLUSDT settled every 2-4 h during November 2022). Past the stored span,
+        or across a hole in it (a spacing over FUNDING_INTERVAL, the longest Binance uses), the settlements continue on
+        the last interval from the last settlement before `ts` (FUNDING_INTERVAL on the UTC grid without one)."""
+        t = self._funding.get(symbol, (np.zeros(0, dtype=np.int64),))[0]
+        i = int(np.searchsorted(t, ts, side="right"))  # first settlement strictly after ts
+        if 1 <= i < len(t) and int(t[i]) - int(t[i - 1]) <= FUNDING_INTERVAL:
+            return int(t[i]), int(t[i]) - int(t[i - 1])
+        if i == 0:
+            if len(t) >= 2 and int(t[1]) - int(t[0]) <= FUNDING_INTERVAL and int(t[0]) - ts <= int(t[1]) - int(t[0]):
+                return int(t[0]), int(t[1]) - int(t[0])
+            return (ts // FUNDING_INTERVAL + 1) * FUNDING_INTERVAL, FUNDING_INTERVAL
+        last = int(t[i - 1])
+        iv = int(t[i - 1]) - int(t[i - 2]) if i >= 2 else FUNDING_INTERVAL
+        iv = iv if 0 < iv <= FUNDING_INTERVAL else FUNDING_INTERVAL
+        return last + ((ts - last) // iv + 1) * iv, iv
+
     def funding_upcoming(self, symbol: str, ts: int) -> tuple[float, int]:
-        """(r, T) as the markPrice stream shows them at `ts`: T is the next settlement, r the rate for it.
+        """(r, T) as the markPrice stream shows them at `ts`: T is the next settlement (funding_schedule), r the rate
+        for it.
 
         Binance's r is a running estimate converging to the charged rate; the stored history only has the charged
-        values, so r is blended linearly from the last settled rate to the next charged one, reaching it in the last
-        minute of the window (the paper account settles with the last r it saw before T, as with the real stream)."""
-        nxt = (ts // FUNDING_INTERVAL + 1) * FUNDING_INTERVAL
+        values, so r is blended linearly over the settlement interval from the last settled rate to the next charged
+        one, reaching it in the last minute of the interval (the paper account settles with the last r it saw before T,
+        as with the real stream)."""
+        nxt, iv = self.funding_schedule(symbol, ts)
         t, r, _ = self._funding.get(symbol, (np.zeros(0, dtype=np.int64), np.zeros(0), np.zeros(0)))
         if len(t) == 0:
             return 0.0, nxt
@@ -188,7 +209,7 @@ class ReplaySource:
         prev = float(r[i - 1]) if i >= 1 else 0.0
         if i >= len(t) or abs(int(t[i]) - nxt) > MS_MINUTE:
             return prev, nxt  # next settlement not stored (end of history / gap): keep the last settled rate
-        w = min(1.0, (ts - (nxt - FUNDING_INTERVAL)) / (FUNDING_INTERVAL - MS_MINUTE))
+        w = min(1.0, max(0.0, (ts - (nxt - iv)) / max(iv - MS_MINUTE, MS_MINUTE)))
         return (1 - w) * prev + w * float(r[i]), nxt
 
     # --- positioning metrics -------------------------------------------------------------------------
@@ -234,6 +255,7 @@ class ReplayRest(BinanceRest):
             "/fapi/v1/klines": self._klines,
             "/fapi/v1/fundingRate": self._funding_rate,
             "/fapi/v1/premiumIndex": self._premium_index,
+            "/fapi/v1/fundingInfo": self._funding_info,
             "/fapi/v1/ticker/bookTicker": self._book_ticker,
             "/fapi/v1/openInterest": self._open_interest,
             "/futures/data/openInterestHist": lambda p: self._metrics(p, "oi"),
@@ -313,6 +335,19 @@ class ReplayRest(BinanceRest):
         if "symbol" in p:
             return self._premium_one(self._known(p), now)
         return [self._premium_one(s, now) for s in self._listed(now)]
+
+    def _funding_info(self, p: dict) -> list[dict]:
+        """Like Binance, only the symbols whose settlement interval is not the default 8 h are listed (the interval of
+        the settlement period at the current virtual time, consistent with premiumIndex and the markPrice stream)."""
+        now = now_ms()
+        out = []
+        for sym in self._listed(now):
+            _, iv = self.source.funding_schedule(sym, now)
+            if iv != FUNDING_INTERVAL:
+                out.append({"symbol": sym, "adjustedFundingRateCap": "0.02000000",
+                            "adjustedFundingRateFloor": "-0.02000000", "fundingIntervalHours": iv // MS_HOUR,
+                            "disclaimer": False})
+        return out
 
     def _book_one(self, sym: str, now: int) -> dict:
         px = self.source.last_close(sym, now)

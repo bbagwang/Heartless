@@ -182,7 +182,7 @@ def test_discovery_cycle_never_mines_the_sealed_period(tmp_path, monkeypatch):
     for t in (_ms(2024, 11, 1), _ms(2026, 3, 31)):
         app.store.save_candles("AAAUSDT", [Candle(t, 1, 1, 1, 1, 1, 1, 1, 1, t + 59_999)])
     seen = []
-    monkeypatch.setattr(R, "_discovery_worker", lambda db, syms, train, valid: seen.append((train, valid)) or
+    monkeypatch.setattr(R, "_discovery_worker", lambda db, syms, train, valid, *grids: seen.append((train, valid)) or
                         {"tested": 0, "t_bar": 0.0, "passed": [], "seconds": 0.0, "rows": {}})
 
     async def run():

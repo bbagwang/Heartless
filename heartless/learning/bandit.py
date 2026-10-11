@@ -53,7 +53,7 @@ class Arm:
 
 
 class AlphaBandit:
-    def __init__(self, alphas: list[str], seed: int | None = None, store=None, engine: str = "shared"):
+    def __init__(self, alphas: list[str], seed: int | str | None = None, store=None, engine: str = "shared"):
         self.alphas = list(alphas)
         self.arms: dict[tuple[str, str], Arm] = {}
         self.rng = random.Random(seed)
