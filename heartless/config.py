@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     # lab / discover build missing context years on demand (otherwise only stored rows are used)
     context_auto_build: bool = Field(default=True, alias="CONTEXT_AUTO_BUILD")
 
+    # --- C2-B: self-improvement and operations (docs/SELF_IMPROVEMENT.md, docs/REPLAY.md) ------------------------
+    # decision grids the daily discovery mines in ONE run, so its multiple-testing N counts the rules of all of them
+    discovery_grids: str = Field(default="15m,1h", alias="DISCOVERY_GRIDS")
+    # a candidate whose change (params diff) equals that of a challenger judged and retired within this many days is
+    # not installed again: every fresh trial of the same change is another look at the same noise
+    challenger_retry_days: int = Field(default=90, alias="CHALLENGER_RETRY_DAYS")
+
     @field_validator("telegram_owner_id", mode="before")
     @classmethod
     def _blank_owner_id_is_none(cls, v):

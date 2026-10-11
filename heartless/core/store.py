@@ -403,6 +403,22 @@ class Store:
                      (json.dumps(metrics, default=str), note if note is not None else rows[0]["note"],
                       role or rows[0]["role"], vid))
 
+    def params_versions_since(self, since: int, source: str | None = None) -> list[dict]:
+        """Parameter versions created after `since` (optionally of one source, e.g. "kill-switch"), newest first: the
+        champion changes a challenger's promotion must not undo (C2-B)."""
+        sql = "SELECT * FROM params_versions WHERE created>?"
+        params: list[Any] = [int(since)]
+        if source is not None:
+            sql += " AND source=?"
+            params.append(source)
+        out = []
+        for r in self.query(sql + " ORDER BY created DESC", params):
+            d = dict(r)
+            d["params"] = json.loads(d["params"])
+            d["metrics"] = json.loads(d["metrics"] or "{}")
+            out.append(d)
+        return out
+
     def save_fill_quality(self, row: dict) -> None:
         cols = ("engine", "ts", "symbol", "position_id", "kind", "side", "maker", "qty", "price", "ref", "notional",
                 "slip_bps", "fee", "model_fee")
@@ -450,6 +466,48 @@ class Store:
         r = self.query("SELECT MIN(ts) a, MAX(ts) b, COUNT(*) n FROM market_context WHERE symbol='*'")[0]
         total = self.query("SELECT COUNT(*) n FROM market_context")[0]["n"]
         return {"first": r["a"], "last": r["b"], "hours": r["n"], "rows": total}
+
+    # --- C2-B: the live context store (the running bot's hourly snapshots, appended and pruned) ---------------------
+    _MS_H = 3_600_000
+
+    @classmethod
+    def _merge_hour_spans(cls, spans) -> list[list[int]]:
+        """Sorted, merged [first, last] hour-close spans (adjacent hours join), like data/context.py _merge."""
+        out: list[list[int]] = []
+        for a, b in sorted([int(x), int(y)] for x, y in spans):
+            if out and a <= out[-1][1] + cls._MS_H:
+                out[-1][1] = max(out[-1][1], b)
+            else:
+                out.append([a, b])
+        return out
+
+    def add_market_context(self, rows: Iterable[tuple[str, int, bytes]], start: int, end: int, meta: dict,
+                           key: str = "context.meta") -> dict:
+        """Store snapshot rows of the hour closes [start, end] and record that span as built in the context meta under
+        `key` (the stored meta when it is a dict, else `meta`; its other fields are kept). Returns the meta written."""
+        rows = list(rows)
+        with self._lock:
+            if rows:
+                self.save_market_context(rows)
+            cur = self.get(key)
+            m = dict(cur) if isinstance(cur, dict) else dict(meta)
+            m["built"] = self._merge_hour_spans(list(m.get("built") or []) + [[int(start), int(end)]])
+            self.set(key, m)
+            return m
+
+    def prune_market_context(self, before_ts: int, key: str = "context.meta") -> int:
+        """Drop the context rows of hour closes before `before_ts` (the data retention) and clip the built spans of the
+        meta under `key` to what is left. Returns the number of rows deleted."""
+        if not self.has_market_context():
+            return 0
+        with self._lock:
+            n = int(self.execute("DELETE FROM market_context WHERE ts<?", (int(before_ts),)).rowcount or 0)
+            meta = self.get(key)
+            if isinstance(meta, dict) and meta.get("built"):
+                first = -(-(int(before_ts) + 1) // self._MS_H) * self._MS_H - 1  # first hour close >= before_ts
+                meta["built"] = [[max(int(a), first), int(b)] for a, b in meta["built"] if int(b) >= first]
+                self.set(key, meta)
+        return n
 
     def context_candle_bounds(self, symbol: str) -> tuple[int | None, int | None]:
         """(first, last) candle open_time of a symbol from the primary-key index (no row count, unlike candle_range)."""

@@ -199,8 +199,11 @@ def fmt_learning(st: dict) -> list[str]:
             continue
         ch, bar = d.get("challenger") or {}, d.get("bar") or {}
         path = "상대" if d.get("path") == "relative" else "절대"
-        extra = f", 차이 t {d['paired']['t']:+.2f}" if d.get("paired") else f", t_day {ch.get('t_day', 0):+.2f}/{bar.get('min_t_day', 0):g}"
-        out.append(f"  <code>{esc(c['name'])}</code> [{esc(c.get('source', ''))}] {path} 경로: "
+        extra = (f", 차이 t {d['paired']['t']:+.2f}/{bar.get('min_paired_t', 0):g}" if d.get("paired")
+                 else f", t_day {ch.get('t_day', 0):+.2f}/{bar.get('min_t_day', 0):g}")
+        cp, nxt = d.get("checkpoint"), d.get("next_checkpoint")
+        when = (f"{cp}일 판정점" if cp is not None else "첫 판정점 전") + (f", 다음 {nxt}일" if nxt else "")
+        out.append(f"  <code>{esc(c['name'])}</code> [{esc(c.get('source', ''))}] {path} 경로 ({when}): "
                    f"{ch.get('n', 0)}/{bar.get('min_trades', 0)}건, {ch.get('days', 0)}/{bar.get('min_days', 0)}일, "
                    f"평균 {ch.get('avg_r', 0):+.2f}R{extra} → {esc(d.get('verdict', ''))}")
     for k in st.get("kill_switch") or []:

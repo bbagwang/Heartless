@@ -1,5 +1,7 @@
 """P4 promotion / retirement on day-clustered statistics (heartless/learning/research.py judge_challenger and
-ResearchManager.evaluate_challengers). Synthetic trade records only."""
+ResearchManager.evaluate_challengers). Synthetic trade records only. C2-B: promotion is judged at the checkpoints of the
+group-sequential design (tests/test_c2b_promotion.py covers the schedule itself); these tests keep checking the P4
+conditions of each path at a checkpoint."""
 import asyncio
 
 import pytest
@@ -30,98 +32,106 @@ def _trades(days: list[list[float]], engine: str = "challenger-1", start: int = 
 
 GOOD_16 = ([[1.0, -0.4]] * 3 + [[-1.0, 0.5]]) * 4  # 32 trades, 16 days, mean +0.1625R, t_day ~2.6
 GOOD_32 = GOOD_16 * 2  # 64 trades, 32 days, t_day ~3.8
+GOOD_64 = GOOD_32 * 2  # 128 trades, 64 days, t_day ~5.3
+# C2-B: promotion is judged at the checkpoints only (research.PROMOTION_CHECKPOINTS, 14/30/60/90 days after the start;
+# FAILED_CHECKPOINTS 30/60/90 for a failed-alpha re-enable), on the record up to the checkpoint and with that
+# checkpoint's calibrated t threshold. The P4 conditions themselves are kept; these tests judge at the 60-day checkpoint
+# (not the last, so a record that misses the bar is held rather than retired at the end of its trial).
+AT60 = 60.05  # days after the start: just past the 60-day checkpoint
 
 
 def _judge(ch_days, champ_days=(), new_alphas=("discovered",), now_day=None):
     ch, champ = _trades(ch_days), _trades(list(champ_days), "paper")
-    now = T0 + (now_day if now_day is not None else max(len(ch_days), len(champ_days))) * MS_DAY
+    now = T0 + int((now_day if now_day is not None else max(len(ch_days), len(champ_days))) * MS_DAY)
     return judge_challenger(ch, champ, S, T0, now, list(new_alphas))
 
 
 # --- absolute path ------------------------------------------------------------------------------------------------
 def test_absolute_path_promotes_a_challenger_that_clears_the_bar():
-    rec = r_stats(_trades(GOOD_16))
-    assert rec["n"] == 32 and rec["days"] == 16 and rec["t_day"] >= 2.0 and rec["pf_r"] >= 1.15 and rec["max_dd_r"] <= 10
-    d = _judge(GOOD_16)  # the champion closed nothing: e.g. no alpha enabled
+    rec = r_stats(_trades(GOOD_64[:60]))
+    assert rec["n"] == 120 and rec["days"] == 60 and rec["t_day"] >= R.ABS_T_AT[60] and rec["pf_r"] >= 1.15
+    d = _judge(GOOD_64, now_day=AT60)  # the champion closed nothing: e.g. no alpha enabled
     assert d["path"] == "absolute" and d["verdict"] == "promote" and all(d["checks"].values())
-    assert d["bar"] == {"min_trades": 30, "min_days": 14, "min_avg_r": 0.0, "min_t_day": 1.5, "min_pf_r": 1.15,
-                        "max_dd_r": 10.0}
-    assert d["challenger"]["n"] == 32 and d["champion"]["n"] == 0 and d["failed_alphas"] == []
+    assert d["bar"] == {"min_trades": 30, "min_days": 14, "min_avg_r": 0.0, "min_t_day": R.ABS_T_AT[60], "min_pf_r": 1.15,
+                        "max_dd_r": 10.0, "checkpoint": 60, "checkpoints": [14, 30, 60, 90]}
+    assert d["challenger"]["n"] == 120 and d["champion"]["n"] == 0 and d["failed_alphas"] == []
+    assert d["checkpoint"] == 60 and d["next_checkpoint"] == 90
     text = R.describe_decision(d)
-    assert "절대 경로" in text and "n=32" in text and "t_day≥1.5" in text
+    assert "절대 경로" in text and "n=120" in text and f"t_day≥{R.ABS_T_AT[60]:g}" in text and "60일 판정점" in text
 
 
 def test_absolute_path_is_used_while_the_champion_trades_too_little():
-    d = _judge(GOOD_16, champ_days=[[0.5]] * 24)  # 24 champion trades < PROMOTION_MIN_TRADES
+    d = _judge(GOOD_64, champ_days=[[0.5]] * 24, now_day=AT60)  # 24 champion trades < PROMOTION_MIN_TRADES
     assert d["path"] == "absolute" and d["verdict"] == "promote"
 
 
 @pytest.mark.parametrize("days, failing", [
-    (GOOD_16[:14] + [[1.0]], "n >= 30"),  # 29 trades
-    ([[1.0, -0.4, 1.0, -0.4, -1.0, 0.5, 1.0, -0.4]] * 4 + [[1.0]] * 9, "days >= 14"),  # 41 trades on 13 days
-    ([[0.4, -0.3]] * 8 + [[-0.6, 0.5]] * 8, "t_day >= 1.5"),  # mean +0.0R... weak
-    ([[0.4] * 3] * 16 + [[-12.0]], "DD <= 10R"),  # one 12R loss
+    ([[1.0, -0.4, 1.0, -0.4, -1.0, 0.5, 1.0, -0.4]] * 4 + [[1.0]] * 9 + [[]] * 50, "days >= 14"),  # 41 trades, 13 days
+    ([[0.4, -0.3]] * 30 + [[-0.6, 0.5]] * 30, "t_day >= 2.37"),  # mean +0.0R... weak
+    (GOOD_16 * 3 + [[-6.0, -6.0, -6.0, -6.0]] + GOOD_16[:11], "DD <="),  # a 24R hole: over 10R x sqrt(122/30)
 ])
 def test_absolute_path_holds_when_any_condition_fails(days, failing):
-    d = _judge(days)
-    assert d["path"] == "absolute" and d["verdict"] == "hold"
-    assert not d["checks"][failing] if failing in d["checks"] else any(not v for v in d["checks"].values())
+    d = _judge(days, now_day=AT60)
+    assert d["path"] == "absolute" and d["verdict"] == "hold", d["checks"]
+    key = next(k for k in d["checks"] if k.startswith(failing))
+    assert d["checks"][key] is False
 
 
 def test_absolute_path_profit_factor_and_mean_gates():
-    low_pf = [[1.0, -0.95]] * 16  # PF 1.05 < 1.15 although positive every day
-    d = _judge(low_pf)
+    low_pf = [[1.0, -0.95]] * 60  # PF 1.05 < 1.15 although positive every day
+    d = _judge(low_pf, now_day=AT60)
     assert d["verdict"] == "hold" and d["checks"]["PF >= 1.15"] is False and d["checks"]["avgR > 0"] is True
-    negative = [[-0.2, -0.1]] * 16
-    d = _judge(negative)
+    negative = [[-0.2, -0.1]] * 16  # 32 trades, a third of the 2x trade minimum: not retired either
+    d = _judge(negative, now_day=16)
     assert d["checks"]["avgR > 0"] is False and d["verdict"] == "hold"
 
 
-def test_failed_out_of_sample_alpha_needs_30_days_and_t_2():
-    d = _judge(GOOD_16, new_alphas=["squeeze_breakout"])  # failed in the P1 judgement
-    assert d["failed_alphas"] == ["squeeze_breakout"] and d["bar"]["min_days"] == 30 and d["bar"]["min_t_day"] == 2.0
-    assert d["verdict"] == "hold" and d["checks"]["days >= 30"] is False
-    assert "OOS 탈락 알파 squeeze_breakout" in R.describe_decision(d)
-    d = _judge(GOOD_32, new_alphas=["squeeze_breakout", "discovered"])
+def test_failed_out_of_sample_alpha_needs_its_own_schedule_and_bar():
+    d = _judge(GOOD_16, new_alphas=["squeeze_breakout"])  # failed in the P1 judgement: nothing before day 30
+    assert d["failed_alphas"] == ["squeeze_breakout"] and d["bar"]["min_days"] == 30 and d["checkpoint"] is None
+    assert d["bar"]["min_t_day"] == R.FAILED_ABS_T_AT[30] and d["checkpoints"] == [30, 60, 90]
+    assert d["verdict"] == "hold" and "OOS 탈락 알파 squeeze_breakout" in R.describe_decision(d)
+    d = _judge(GOOD_64, new_alphas=["squeeze_breakout", "discovered"], now_day=AT60)
     assert d["verdict"] == "promote" and d["failed_alphas"] == ["squeeze_breakout"]
-    # 30 days but t_day between 1.5 and 2.0: enough for an untested alpha, not for a failed one
-    mid = [[0.5, -0.5], [1.5, 1.5], [-0.5, -1.0], [-0.5, 0.5], [0.5, -0.5], [1.5, 1.0], [-1.0, 1.0], [1.0, 1.0],
-           [1.0, -0.5], [0.5, -0.5], [1.5, 0.5], [-1.0, -0.5], [-1.0, -1.0], [1.0, 1.0], [-0.5, -1.0], [1.5, 1.0],
-           [1.5, -0.5], [0.5, -1.0], [1.0, -0.5], [0.5, 1.0], [1.0, 1.5], [1.0, 1.5], [-1.0, 1.0], [0.5, 1.0],
-           [-0.5, 1.0], [-1.0, 1.0], [-0.5, -1.0], [0.5, -1.0], [-0.5, -0.5], [0.5, 0.5], [0.5, -1.0]]
+    assert d["bar"]["min_t_day"] == R.FAILED_ABS_T_AT[60]
+    # t_day between the two 60-day thresholds: enough for an untested alpha, not for a failed one
+    mid = ([[0.5, -0.5], [1.5, 1.5], [-0.5, -1.0], [-0.5, 0.5], [0.5, -0.5], [1.5, 1.0], [-1.0, 1.0], [1.0, -1.0],
+            [1.0, -0.5], [0.5, -0.5], [1.5, 0.5], [-1.0, -0.5], [-1.0, -1.0], [1.0, 1.0], [-0.5, -1.0], [1.5, 1.0],
+            [1.5, -0.5], [0.5, -1.0], [1.0, -0.5], [0.5, 1.0], [1.0, 1.5], [1.0, 0.5], [-1.0, 1.0], [0.5, 1.0],
+            [-0.5, 1.0], [-1.0, 1.0], [-0.5, -1.0], [0.5, -1.0], [-0.5, -0.5], [0.5, 0.5]] * 2)
     rec = r_stats(_trades(mid))
-    assert rec["days"] == 31 and 1.5 <= rec["t_day"] < 2.0 and rec["pf_r"] >= 1.15, rec
-    assert _judge(mid, new_alphas=["discovered"])["verdict"] == "promote"
-    assert _judge(mid, new_alphas=["momentum_burst"])["verdict"] == "hold"
+    assert rec["days"] == 60 and R.ABS_T_AT[60] <= rec["t_day"] < R.FAILED_ABS_T_AT[60] and rec["pf_r"] >= 1.15, rec
+    assert _judge(mid, new_alphas=["discovered"], now_day=AT60)["verdict"] == "promote"
+    assert _judge(mid, new_alphas=["momentum_burst"], now_day=AT60)["verdict"] == "hold"
 
 
 # --- relative path ------------------------------------------------------------------------------------------------
-CHAMP = [[0.3, -0.3]] * 20  # 40 trades over 20 days, mean 0
+CHAMP = [[0.3, -0.3]] * 60  # 120 trades over 60 days, mean 0
 
 
 def test_relative_path_promotes_on_the_paired_daily_difference():
-    # +0.5R/day better on 14 days, 0.3R/day worse on 6: mean +0.26R per calendar day (the current day counts as a
-    # 0R day for both: the span runs from the challenger's start through today)
-    noisy = [[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6
-    d = _judge(noisy, CHAMP)
+    # +0.5R/day better on 42 days, 0.3R/day worse on 18: the paired t over the 60 calendar days of the checkpoint
+    noisy = ([[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6) * 3
+    d = _judge(noisy, CHAMP, now_day=AT60)
     assert d["path"] == "relative" and d["verdict"] == "promote", d["checks"]
-    assert d["paired"]["days"] == 21 and d["paired"]["t"] >= 1.0 and d["paired"]["mean"] == pytest.approx(5.2 / 21, abs=1e-4)
+    assert d["paired"]["days"] == 60 and d["paired"]["t"] >= R.REL_T_AT[60]
+    assert d["paired"]["mean"] == pytest.approx(15.6 / 60, abs=1e-4)
     assert d["challenger"]["avg_r"] > d["champion"]["avg_r"]
     assert "상대 경로" in R.describe_decision(d)
     # no dispersion at all (the same edge every single day) gives no t (like the lab's t_day): degenerate, held
-    flat = _trades([[0.8, -0.3]] * 20)
-    champ = _trades(CHAMP, "paper")
-    assert judge_challenger(flat, champ, S, T0, T0 + 19 * MS_DAY + 5 * MS_HOUR, [])["paired"]["t"] == 0.0
+    flat = _trades([[0.8, -0.3]] * 61)
+    champ = _trades(CHAMP + [[0.3, -0.3]], "paper")
+    assert judge_challenger(flat, champ, S, T0, T0 + int(AT60 * MS_DAY), [])["paired"]["t"] == 0.0
 
 
 def test_relative_path_holds_on_weak_difference_mean_or_drawdown():
-    # paired t below 1: better on 3 days out of 20, identical otherwise ... plus worse days
-    weak = [[0.3, -0.3]] * 14 + [[1.3, -0.3]] * 3 + [[-0.5, -0.3]] * 3
-    d = _judge(weak, CHAMP)
-    assert d["path"] == "relative" and d["paired"]["t"] < 1.0 and d["verdict"] == "hold"
+    # paired t below the bar: better on 9 days out of 60, identical otherwise ... plus worse days
+    weak = ([[0.3, -0.3]] * 14 + [[1.3, -0.3]] * 3 + [[-0.5, -0.3]] * 3) * 3
+    d = _judge(weak, CHAMP, now_day=AT60)
+    assert d["path"] == "relative" and d["paired"]["t"] < R.REL_T_AT[60] and d["verdict"] == "hold"
     # better daily but a deep losing streak: R drawdown over 1.2 x champion + 2R
-    streak = [[0.9, -0.3]] * 16 + [[-1.0, -1.0]] * 2 + [[0.9, -0.3]] * 2
-    d = _judge(streak, CHAMP)
+    streak = [[0.9, -0.3]] * 56 + [[-1.0, -1.0]] * 2 + [[0.9, -0.3]] * 2
+    d = _judge(streak, CHAMP, now_day=AT60)
     cap = 1.2 * d["champion"]["max_dd_r"] + 2.0
     assert d["challenger"]["max_dd_r"] > cap and d["verdict"] == "hold"
     assert d["checks"][f"DD <= {cap:.2f}R"] is False
@@ -129,27 +139,28 @@ def test_relative_path_holds_on_weak_difference_mean_or_drawdown():
 
 def test_relative_path_also_raises_the_bar_for_an_alpha_that_failed_out_of_sample():
     # once the champion trades, the relative path is the usual one: a challenger re-enabling an alpha that lost over
-    # three years out of sample must not get back in on paired t >= 1 over two weeks
-    noisy = [[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6  # paired t ~3 over 21 days: promoted for an untested alpha
-    assert _judge(noisy, CHAMP)["verdict"] == "promote"
-    d = _judge(noisy, CHAMP, new_alphas=["squeeze_breakout"])
+    # three years out of sample faces the failed-alpha schedule and thresholds there too
+    noisy = ([[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6) * 3
+    assert _judge(noisy, CHAMP, now_day=AT60)["verdict"] == "promote"
+    d = _judge(noisy[:16], CHAMP[:16], new_alphas=["squeeze_breakout"])  # day 16: before its first checkpoint
     assert d["path"] == "relative" and d["failed_alphas"] == ["squeeze_breakout"] and d["verdict"] == "hold"
-    assert d["bar"]["min_days"] == 30 and d["bar"]["min_paired_t"] == 2.0 and d["checks"]["days >= 30"] is False
-    assert "OOS 탈락 알파 squeeze_breakout" in R.describe_decision(d) and "차이 t≥2" in R.describe_decision(d)
-    champ40 = [[0.3, -0.3]] * 40
-    mid = [[1.5, -0.3], [-0.4, -0.3]] * 20  # 40 days, paired t ~1.6: enough for an untested alpha only
-    assert _judge(mid, champ40)["verdict"] == "promote"
-    d = _judge(mid, champ40, new_alphas=["squeeze_breakout"])
-    assert d["verdict"] == "hold" and 1.0 <= d["paired"]["t"] < 2.0 and d["checks"]["paired t >= 2"] is False
-    strong = ([[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6) * 2  # 40 days, paired t ~4.4
-    d = _judge(strong, champ40, new_alphas=["squeeze_breakout"])
-    assert d["verdict"] == "promote" and d["paired"]["t"] >= 2.0
+    assert d["bar"]["min_days"] == 30 and d["bar"]["min_paired_t"] == R.FAILED_REL_T_AT[30] and d["checkpoint"] is None
+    assert "OOS 탈락 알파 squeeze_breakout" in R.describe_decision(d)
+    assert f"차이 t≥{R.FAILED_REL_T_AT[30]:g}" in R.describe_decision(d)
+    mid = [[1.5, -0.3], [-0.3, -0.3]] * 30  # 60 days, paired t between the two 60-day thresholds
+    dm = _judge(mid, CHAMP, now_day=AT60)
+    assert R.REL_T_AT[60] <= dm["paired"]["t"] < R.FAILED_REL_T_AT[60] and dm["verdict"] == "promote"
+    d = _judge(mid, CHAMP, new_alphas=["squeeze_breakout"], now_day=AT60)
+    assert d["verdict"] == "hold" and d["checks"][f"paired t >= {R.FAILED_REL_T_AT[60]:g}"] is False
+    strong = ([[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6) * 3  # paired t well above both
+    d = _judge(strong, CHAMP, new_alphas=["squeeze_breakout"], now_day=AT60)
+    assert d["verdict"] == "promote" and d["paired"]["t"] >= R.FAILED_REL_T_AT[60]
 
 
 def test_relative_path_counts_calendar_days_without_trades_as_zero():
-    sparse = [[2.0]] + [[]] * 13 + [[2.0]] * 6 + [[0.5]] * 20  # few days, but they are the challenger's real record
-    d = _judge(sparse, CHAMP)
-    assert d["paired"]["days"] == 41  # every calendar day from the challenger's start through today
+    sparse = [[2.0]] + [[]] * 13 + [[2.0]] * 6 + [[0.5]] * 40  # few days, but they are the challenger's real record
+    d = _judge(sparse, CHAMP, now_day=AT60)
+    assert d["paired"]["days"] == 60  # every calendar day from the challenger's start through the checkpoint
 
 
 # --- retirement ---------------------------------------------------------------------------------------------------
@@ -172,7 +183,7 @@ def test_absolute_retirement_after_twice_the_minimum_trades_and_days():
 
 def test_relative_retirement_on_the_paired_difference():
     worse = [[-0.2, -0.3]] * 30  # 60 trades on 30 days, worse than the champion every day
-    champ = CHAMP + [[0.3, -0.3]] * 10
+    champ = CHAMP[:30]
     d = _judge(worse, champ)
     assert d["path"] == "relative" and d["verdict"] == "retire" and "paired t" in d["rule"]
     assert _judge(worse[:25], champ)["verdict"] == "hold"  # 50 trades but 25 < 28 days
@@ -223,14 +234,15 @@ def _slot(app, name, enable: list[str], start: int) -> ChallengerSlot:
 
 def test_manager_promotes_on_the_absolute_path_and_records_the_decision(tmp_path):
     app = _App(tmp_path)
-    start = now_ms() // MS_DAY * MS_DAY - 40 * MS_DAY
-    s1 = _slot(app, "challenger-1", ["squeeze_breakout"], start)  # failed OOS: 30-day bar
-    _store_trades(app, _trades(GOOD_32, "challenger-1", start))
+    start = now_ms() // MS_DAY * MS_DAY - 65 * MS_DAY
+    s1 = _slot(app, "challenger-1", ["squeeze_breakout"], start)  # failed OOS: the 30/60/90-day schedule
+    _store_trades(app, _trades(GOOD_64, "challenger-1", start))
     rm = ResearchManager(app)
-    assert rm.new_alphas(s1.params) == ["squeeze_breakout"] and rm.trial_days(s1) == 30
+    assert rm.new_alphas(s1.params) == ["squeeze_breakout"] and rm.trial_days(s1) == 90
     asyncio.run(rm.evaluate_challengers(force=True))
     (slot, d), = app.promoted
     assert slot is s1 and d["verdict"] == "promote" and d["path"] == "absolute" and d["failed_alphas"] == ["squeeze_breakout"]
+    assert d["checkpoint"] == 60 and d["bar"]["min_t_day"] == R.FAILED_ABS_T_AT[60]
     assert d["slot"] == "challenger-1" and d["version"] == "v1" and d["champion_version"] == app.params.version
     assert rm.last_decisions["challenger-1"] is d
 
@@ -238,13 +250,13 @@ def test_manager_promotes_on_the_absolute_path_and_records_the_decision(tmp_path
 def test_manager_only_counts_alphas_beyond_the_champion_and_retires_with_inputs(tmp_path):
     app = _App(tmp_path)
     app.params.enabled["squeeze_breakout"] = True  # the champion already runs it: not a re-enable
-    start = now_ms() // MS_DAY * MS_DAY - 40 * MS_DAY
+    start = now_ms() // MS_DAY * MS_DAY - 65 * MS_DAY
     s1 = _slot(app, "challenger-1", ["squeeze_breakout"], start)
     s2 = _slot(app, "challenger-2", ["discovered"], start)
-    _store_trades(app, _trades(GOOD_16, "challenger-1", start))  # 16 days: enough without the failed-alpha bar
+    _store_trades(app, _trades(GOOD_64, "challenger-1", start))  # the normal schedule: promoted at its 60-day checkpoint
     _store_trades(app, _trades([[-1.0, 0.3]] * 20 + [[1.0, -0.2]] * 10, "challenger-2", start))
     rm = ResearchManager(app)
-    assert rm.new_alphas(s1.params) == [] and rm.trial_days(s1) == 14
+    assert rm.new_alphas(s1.params) == [] and rm.slot_new_alphas(s1) == [] and rm.trial_days(s1) == 90
     asyncio.run(rm.evaluate_challengers(force=True))
     assert [s for s, _ in app.promoted] == [s1]
     assert app.retired == []  # one promotion per pass: the rest is judged against the new champion next time
@@ -265,7 +277,7 @@ def test_manager_compares_trades_opened_since_the_challenger_started(tmp_path):
     for t in early:
         t["entry_time"] = start - MS_HOUR
     _store_trades(app, early)  # 30 champion trades closed after the start, all opened before it
-    _store_trades(app, _trades([[0.2]] * 3, "paper", start + 12 * MS_DAY))  # 3 opened after the start
+    _store_trades(app, _trades([[0.2]] * 3, "paper", start + 10 * MS_DAY))  # 3 opened after the start
     rm = ResearchManager(app)
     asyncio.run(rm.evaluate_challengers(force=True))
     d = rm.last_decisions["challenger-1"]

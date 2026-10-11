@@ -3,9 +3,9 @@
 1. graduation_status() must see the whole 14-day equity window, not just the newest 5000 one-minute rows.
 2. A crashed research worker (BrokenProcessPool) must not permanently break the self-improvement loop.
 3. The promotion drawdown gate must be scale-free (challenger and champion have different equity bases).
-   (P4: promotion is judged on day-clustered statistics with PROMOTION_MIN_DAYS distinct exit days, so the records
-   below are spread over 20 days; the R-drawdown gate became "<= 1.2 x champion + 2R"; promote() receives the
-   decision dict of research.judge_challenger.)
+   (P4: promotion is judged on day-clustered statistics with PROMOTION_MIN_DAYS distinct exit days; the R-drawdown gate
+   became "<= 1.2 x champion + 2R"; promote() receives the decision dict of research.judge_challenger. C2-B: it is
+   judged at fixed checkpoints, so the records below span the first 60 days of a 61-day-old challenger.)
 """
 import asyncio
 from concurrent.futures.process import BrokenProcessPool
@@ -162,14 +162,16 @@ def test_broken_process_pool_is_discarded_and_recreated(tmp_path, monkeypatch):
 # --- 3. promotion drawdown gate is scale-free --------------------------------------------------------
 
 def _install(app: _StubApp, champ_rs: list[float], ch_rs: list[float], champ_risk: float, ch_risk: float) -> ChallengerSlot:
+    # C2-B: promotion is judged at the checkpoints; 61 days after the start the 60-day checkpoint (not the last one, so a
+    # record that misses the bar is held, not retired at the end of its trial) judges the trades of the first 60 days
     now = now_ms()
-    started = now - 21 * MS_DAY
+    started = now - 61 * MS_DAY
     app.store.delete_trades("paper")
     app.store.delete_trades("challenger-1")
-    for i, r in enumerate(champ_rs):  # 30 trades 16 h apart: 20 days, 1-2 exit days each
-        app.store.save_trade(_trade("paper", i, r, champ_risk, started + (i + 1) * 16 * 60 * MS_MIN))
+    for i, r in enumerate(champ_rs):  # 30 trades two days apart: 30 exit days within the first 60 days
+        app.store.save_trade(_trade("paper", i, r, champ_risk, started + (i * 48 + 24) * 60 * MS_MIN))
     for i, r in enumerate(ch_rs):
-        app.store.save_trade(_trade("challenger-1", i, r, ch_risk, started + (i + 1) * 16 * 60 * MS_MIN))
+        app.store.save_trade(_trade("challenger-1", i, r, ch_risk, started + (i * 48 + 24) * 60 * MS_MIN))
     slot = ChallengerSlot(name="challenger-1", params=StrategyParams.default(), started=started, source="trend_pullback")
     app.challengers = [slot]
     app.engines = {"paper": object(), "challenger-1": object()}
@@ -188,7 +190,7 @@ def test_promotion_drawdown_gate_is_scale_free(tmp_path):
     asyncio.run(rm.evaluate_challengers(force=True))
     assert [p[0] for p in app.promoted] == ["challenger-1"]
     d = app.promoted[0][1]
-    assert d["path"] == "relative" and d["paired"]["t"] >= 1.0 and all(d["checks"].values())
+    assert d["path"] == "relative" and d["paired"]["t"] >= research_mod.REL_T_AT[60] and all(d["checks"].values())
 
     # champion in drawdown / smaller than the challenger: the USDT comparison used to reject this (200 > 100 * 1.2)
     _install(app, champ_rs, ch_rs, champ_risk=100.0, ch_risk=200.0)
@@ -201,8 +203,8 @@ def test_promotion_drawdown_gate_is_scale_free(tmp_path):
 def test_promotion_rejects_worse_r_drawdown_hidden_by_smaller_equity_base(tmp_path):
     app, rm = _env(tmp_path)
     champ_rs = [1.2, -1.0] * 15  # R-drawdown 1.0
-    # better average but a 4R losing streak: R-drawdown 4.0 > 1.2 x champion + 2R = 3.2R
-    ch_rs = [2.0, -1.0] * 12 + [-1.0, -1.0, -1.0] + [2.0, 2.0, 2.0]
+    # better average but a 4R losing streak: R-drawdown 4.5 (from the peak) > 1.2 x champion + 2R = 3.2R
+    ch_rs = [2.5, -0.5] * 12 + [-1.0, -1.0, -1.0, -1.0] + [2.0, 2.0]
     st_ch = summarize([{"pnl": r, "r_multiple": r, "exit_time": i} for i, r in enumerate(ch_rs)])
     st_champ = summarize([{"pnl": r, "r_multiple": r, "exit_time": i} for i, r in enumerate(champ_rs)])
     assert st_ch["avg_r"] > st_champ["avg_r"] + 0.05
@@ -213,5 +215,5 @@ def test_promotion_rejects_worse_r_drawdown_hidden_by_smaller_equity_base(tmp_pa
     assert app.promoted == []
     assert app.retired == []  # not retired either: enough trades but not 2x promotion_min_trades
     d = rm.last_decisions["challenger-1"]
-    assert d["verdict"] == "hold" and d["challenger"]["max_dd_r"] == pytest.approx(4.0)
+    assert d["verdict"] == "hold" and d["challenger"]["max_dd_r"] == pytest.approx(4.5)
     assert [k for k, ok in d["checks"].items() if not ok] == ["DD <= 3.20R"]

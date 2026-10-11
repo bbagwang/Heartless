@@ -14,6 +14,7 @@ from synth import synth_candles
 from heartless.app import NO_ALPHA_TEXT, Heartless
 from heartless.config import Settings
 from heartless.core.models import Decision, EntryStyle, Regime, Side, Signal, Ticker, TradeRecord
+from heartless.learning import research as R
 from heartless.notify import formatter as F
 from heartless.notify.telegram import TelegramBot
 from heartless.replay.invariants import _RE_DAILY_TODAY, _RE_DAILY_WEEK
@@ -106,8 +107,11 @@ async def test_messages_state_that_nothing_trades_and_what_starts_trading():
     assert app.enabled_alphas() == []  # shipped defaults since the P1 judgement
     text = app.startup_summary()
     assert NO_ALPHA_TEXT in text and "활성 알파 없음" in text and "거래하지 않고 연구·발굴·챌린저 검증만 진행" in text
-    assert "거래 시작 조건" in text and "거래 30건 이상·청산일 14일 이상" in text and "t ≥ 1.5" in text
-    assert "PF ≥ 1.15" in text and "최대낙폭 ≤ 10R" in text and "30일·t ≥ 2" in text
+    assert "거래 시작 조건" in text and "거래 30건 이상·청산일 14일 이상" in text
+    # C2-B: judged only at the checkpoints, each with its calibrated threshold
+    assert "14·30·60·90일 판정점" in text and "t ≥ " + "/".join(f"{R.ABS_T_AT[c]:g}" for c in R.PROMOTION_CHECKPOINTS) in text
+    assert "PF ≥ 1.15" in text and "최대낙폭 ≤ 10R×√(n/30)" in text and "30·60·90일 판정점·청산일 30일" in text
+    assert "마지막 판정점까지 승격되지 않으면 종료" in text
     assert "OOS 판정: 9개 중 탈락 9, 통과 0" in text and "킬 스위치 켜짐" in text
     assert "리서치 사이클이 통과 알파를 켭니다" not in text  # the old, untrue claim
     st = app.status()
@@ -142,13 +146,13 @@ async def test_a_challenger_clearing_the_absolute_bar_is_promoted_and_trades():
     await _boot(app, candles)
     sent = _capture(app)
     params = app.params.clone(note="enable trend_pullback")
-    params.enabled["trend_pullback"] = True  # failed out of sample (P1): the 30-day / t >= 2 bar applies
+    params.enabled["trend_pullback"] = True  # failed out of sample (P1): the failed-alpha schedule (30/60/90 days)
     slot = await app.install_challenger(params, source="trend_pullback")
-    assert slot is not None and app.research.trial_days(slot) == 30
-    slot.started = now_ms() - 34 * MS_DAY
-    pattern = ([1.0, -0.4] * 3 + [-1.0, 0.5]) * 8  # 64 trades on 32 days, mean +0.16R, t_day ~3.8
+    assert slot is not None and app.research.trial_days(slot) == 90
+    slot.started = now_ms() - 64 * MS_DAY  # judged at its 60-day checkpoint
+    pattern = ([1.0, -0.4] * 3 + [-1.0, 0.5]) * 15  # 120 trades on 60 days, mean +0.16R, t_day ~5.2
     for i, r in enumerate(pattern):
-        app.store.save_trade(_rec(slot.name, i, "trend_pullback", r, slot.started + (i // 2 + 1) * MS_DAY + i % 2 * MS_HOUR,
+        app.store.save_trade(_rec(slot.name, i, "trend_pullback", r, slot.started + (i // 2) * MS_DAY + (1 + i % 2) * MS_HOUR,
                                   params.version))
     old = app.params.version
     await app.research.evaluate_challengers(force=True)
@@ -156,14 +160,14 @@ async def test_a_challenger_clearing_the_absolute_bar_is_promoted_and_trades():
     assert app.engines["paper"].params is app.params and slot.name not in app.engines
     assert app.enabled_alphas() == ["trend_pullback"]
     row = app.store.load_params_versions(role="champion", limit=1)[0]
-    assert row["id"] == app.params.version and "absolute path" in row["note"] and "n=64" in row["note"]
+    assert row["id"] == app.params.version and "absolute path" in row["note"] and "n=120" in row["note"]
     d = row["metrics"]["decisions"][0]
     assert d["verdict"] == "promote" and d["path"] == "absolute" and d["failed_alphas"] == ["trend_pullback"]
     retired = next(r for r in app.store.load_params_versions(limit=10) if r["id"] == params.version)
     assert retired["role"] == "retired" and retired["metrics"]["decisions"][0]["verdict"] == "promote"
     assert app.killswitch.epochs["trend_pullback"] >= now_ms() - 60_000  # a fresh live record starts now
     msg = next(m for m in sent if "파라미터 승격" in m)
-    assert "절대 경로" in msg and "n=64" in msg and "OOS 탈락 알파 trend_pullback" in msg
+    assert "절대 경로" in msg and "n=120" in msg and "OOS 탈락 알파 trend_pullback" in msg
     assert NO_ALPHA_TEXT not in app.startup_summary()
     await app.stop()
 

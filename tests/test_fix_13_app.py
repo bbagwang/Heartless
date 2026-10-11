@@ -350,9 +350,9 @@ async def test_env_mode_change_wins_but_unchanged_env_keeps_persisted_mode():
 
 # --- challenger eviction needs a fair trial ---------------------------------------------------------------------
 async def test_challenger_eviction_requires_a_fair_trial():
-    # P4: the trial period is the exit-day minimum the challenger needs to be promotable (PROMOTION_MIN_DAYS, 30 days
-    # for one that switches on an alpha that failed out of sample), no longer a flat 2 days; candidates identical to a
-    # running challenger are not installed, so the three candidates differ
+    # C2-B: the trial period is the challenger's whole checkpoint schedule (its last checkpoint, 90 days; P4 used the
+    # exit-day minimum, before that a flat 2 days); candidates identical to a running challenger are not installed, so
+    # the three candidates differ
     app, candles = _make_app()
     await _bootstrap(app, candles)
     p = app.params
@@ -366,7 +366,9 @@ async def test_challenger_eviction_requires_a_fair_trial():
     # both slots are fresh (no trades, age ~0): a third candidate must not evict either of them
     assert await app.install_challenger(variant("c3", 0.64), source="breakout") is None
     assert app.challengers == [s1, s2] and {s1.name, s2.name} <= set(app.engines)
-    assert app.challenger_trial_ms(s1) == app.s.promotion_min_days * 86_400_000
+    from heartless.learning import research as R
+
+    assert app.challenger_trial_ms(s1) == R.PROMOTION_CHECKPOINTS[-1] * 86_400_000
     # once a challenger has had its trial period it may be replaced; the younger one keeps its slot
     s1.started -= app.challenger_trial_ms(s1) + 1
     s3 = await app.install_challenger(variant("c3", 0.64), source="breakout")

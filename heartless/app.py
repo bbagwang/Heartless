@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from collections import deque
+from pathlib import Path
 from typing import Any, Callable
 
 from heartless.config import Settings
@@ -12,6 +14,7 @@ from heartless.core.bus import EventBus
 from heartless.core.models import Candle, PositionStatus, Regime, SymbolInfo, Ticker
 from heartless.core.store import Store
 from heartless.data.candles import CandleArrays
+from heartless.data import context as CTX
 from heartless.data.context import EMPTY as NO_MARKET_CONTEXT
 from heartless.data.context import WARMUP_HOURS as CONTEXT_WARMUP_HOURS
 from heartless.data.context import MarketContextTracker, hour_close, hour_of
@@ -60,6 +63,21 @@ CONTEXT_POLL_S = 0.05
 # stored 1m history every context symbol needs at start-up (the tracker's longest window plus the carry), backfilled
 # even when HISTORY_DAYS / DATA_RETENTION_DAYS are shorter (the retention prune keeps DATA_RETENTION_DAYS + 5 days)
 CONTEXT_HISTORY_DAYS = math.ceil(CONTEXT_WARMUP_HOURS / 24) + 1
+# funding settlements (C2-B): a symbol that Binance's fundingInfo does not list settles every 8 h; others every
+# fundingIntervalHours (4 h, sometimes 1-2 h when the rate hits its cap). The next settlement time itself comes from
+# premiumIndex nextFundingTime (and the markPrice stream for traded symbols).
+DEFAULT_FUNDING_INTERVAL_MS = 8 * MS_HOUR
+# a settlement that the funding history still did not show this long after it was due is not asked for again (its
+# interval changed under us); a new expectation (the next settlement) is asked for as usual
+FUNDING_MISS_GRACE_MS = 15 * MS_MINUTE
+
+
+def live_context_path(settings: Settings) -> Path:
+    """The store the bot appends its hourly market-context snapshots to and its research worker reads them from (C2-B):
+    CONTEXT_DB, else <data_dir>/context.db (the default C2-A gives CONTEXT_DB)."""
+    return Path(settings.context_db) if settings.context_db else Path(settings.data_dir) / "context.db"
+
+
 # truthful status line while the champion has no alpha switched on (startup message, /status, daily report)
 NO_ALPHA_TEXT = "⚠️ 활성 알파 없음(0개): 거래하지 않고 연구·발굴·챌린저 검증만 진행"
 
@@ -90,7 +108,18 @@ class Heartless:
         self.context_only: list[str] = []
         self._ctx_last_open: dict[str, int] = {}  # context-only symbol -> open time of its newest stored bar
         self._ctx_polled: set[str] = set()  # context-only symbols whose first (2-day) open-interest poll succeeded
-        self.context_stats: dict[str, Any] = {"snapshots": 0, "late": 0, "errors": 0, "last": None, "symbols": 0}
+        self.context_stats: dict[str, Any] = {"snapshots": 0, "late": 0, "errors": 0, "last": None, "symbols": 0,
+                                              "stored": 0, "filled": 0, "fill_errors": 0}
+        # C2-B: every published snapshot is appended to the live context store (CONTEXT_DB or <data_dir>/context.db),
+        # pruned with the data retention; hours of the research window it lacks are built from the stored candles in
+        # the background at start-up. The research worker's backtests read it (ResearchManager.worker_settings).
+        self.live_context_path = live_context_path(settings)
+        self._ctx_store: Store | None = None
+        self._ctx_fill_task: asyncio.Task | None = None
+        # C2-B: funding schedule per symbol (see DEFAULT_FUNDING_INTERVAL_MS)
+        self.funding_next: dict[str, int] = {}  # symbol -> next settlement time as the exchange last reported it
+        self.funding_interval: dict[str, int] = {}  # symbol -> settlement interval (ms) when not 8 h
+        self._funding_miss: dict[str, int] = {}  # symbol -> expected settlement the history did not show
         self.regimes: dict[str, tuple[Regime, dict]] = {}
         self.bandit = AlphaBandit(list(StrategyParams.default().alphas), store=self.store, engine="shared")
         self.research = ResearchManager(self)
@@ -212,14 +241,20 @@ class Heartless:
             log.error("alpha module %s failed to import and is unavailable: %s", mod, err)
         await self.rest.sync_time()
         await self._load_symbols()
+        await self._refresh_funding_schedule()
         await self.refresh_universe(initial=True)
         self.context_only = self._context_only_symbols()
         await self._backfill(self.universe + self.context_only)
         self._build_views(self.universe)
         await self._create_engines()
+        metrics_task = None
         if self.s.archive_backfill:
-            self.tasks.append(asyncio.create_task(self._backfill_metrics(list(self.universe)), name="metrics-backfill"))
+            metrics_task = asyncio.create_task(self._backfill_metrics(list(self.universe)), name="metrics-backfill")
+            self.tasks.append(metrics_task)
         self._warm_context()  # after the backfill (the store holds the history), before the first streamed bar
+        # hours of the research window the live context store lacks, built in the background (after the metrics
+        # backfill, so the open-interest features of those hours see the archive rows too)
+        self._ctx_fill_task = asyncio.create_task(self._fill_context_gaps(metrics_task), name="context-fill")
         self.market.set_symbols(self.universe, kline_only=self.context_only)
         self.tasks.append(asyncio.create_task(self.market.run(), name="market-stream"))
         self.tasks.append(asyncio.create_task(self._kline_worker(), name="kline-worker"))
@@ -252,10 +287,15 @@ class Heartless:
         active = self.enabled_alphas()
         bar = R.promotion_bar(self.s, "absolute")
         failed_days = max(R.FAILED_MIN_DAYS, self.s.promotion_min_days)
-        criteria = (f"챌린저가 실시간 페이퍼에서 절대 기준을 넘으면 승격되어 그 알파로 거래를 시작합니다: 거래 "
-                    f"{bar['min_trades']}건 이상·청산일 {bar['min_days']}일 이상, 평균R > 0, 일 단위 t ≥ {bar['min_t_day']:g}, "
-                    f"PF ≥ {bar['min_pf_r']:g}, 최대낙폭 ≤ {bar['max_dd_r']:g}R (OOS 탈락 알파를 켜는 챌린저는 "
-                    f"{failed_days}일·t ≥ {R.FAILED_MIN_T_DAY:g})")
+        sched = "·".join(str(c) for c in R.PROMOTION_CHECKPOINTS)
+        ts = "/".join(f"{R.ABS_T_AT[c]:g}" for c in R.PROMOTION_CHECKPOINTS)
+        fsched = "·".join(str(c) for c in R.FAILED_CHECKPOINTS)
+        fts = "/".join(f"{R.FAILED_ABS_T_AT[c]:g}" for c in R.FAILED_CHECKPOINTS)
+        criteria = (f"챌린저가 실시간 페이퍼에서 절대 기준을 넘으면 승격되어 그 알파로 거래를 시작합니다. 판정은 시작 후 "
+                    f"{sched}일 판정점에서만 합니다: 거래 {bar['min_trades']}건 이상·청산일 {bar['min_days']}일 이상, 평균R > 0, "
+                    f"일 단위 t ≥ {ts}, PF ≥ {bar['min_pf_r']:g}, 최대낙폭 ≤ {bar['max_dd_r']:g}R×√(n/{R.ABS_MIN_TRADES}) "
+                    f"(OOS 탈락 알파를 켜는 챌린저는 {fsched}일 판정점·청산일 {failed_days}일·t ≥ {fts}). "
+                    f"마지막 판정점까지 승격되지 않으면 종료")
         judged = [a for a in self.params.alphas if evidence.entry(a) is not None]
         counts = evidence.summary(judged)
         ev = (f"OOS 판정: {len(judged)}개 중 탈락 {counts['failed']}, 통과 {counts['passed']}"
@@ -314,6 +354,13 @@ class Heartless:
             except Exception:  # noqa: BLE001
                 pass
         await self.rest.close()
+        if self._ctx_fill_task is not None:
+            self._ctx_fill_task.cancel()
+        if self._ctx_store is not None and self._ctx_store is not self.store:
+            try:
+                self._ctx_store.close()
+            except Exception:  # noqa: BLE001
+                pass
         self.store.close()
 
     async def _load_symbols(self) -> None:
@@ -425,7 +472,7 @@ class Heartless:
                                 log.info("backfilled %s: %d bars", sym, len(rows))
                     f_lo, f_hi = self.store.funding_range(sym)
                     f_start = since if (f_hi is None or f_hi < since) else f_hi + 1
-                    if f_start < now - 8 * MS_HOUR:
+                    if f_start < now - self._funding_interval_ms(sym):
                         fr = await self.rest.funding_rate_history(sym, start=f_start, end=now)
                         self.store.save_funding(sym, [(int(r["fundingTime"]), float(r["fundingRate"]), float(r.get("markPrice", 0) or 0)) for r in fr])
                 except Exception as e:  # noqa: BLE001
@@ -628,8 +675,11 @@ class Heartless:
         self.paper_accounts[slot.name] = pa
         watch = self._watch_fills(pa, slot.name, since=slot.started)
         # challengers consult the shared meta model (fair comparison with the champion) but do not train it
+        # its Thompson-sampling RNG is seeded from the slot and its start (not the version id, which carries wall time
+        # and random bits): a replay of the same window then reproduces the challenger's trades exactly
         eng = TradingEngine(slot.name, pa, slot.params, self.s, self.symbols, self.store, self.bus,
-                            AlphaBandit(list(slot.params.alphas), store=None), notify=False, meta=self.meta, meta_learn=False)
+                            AlphaBandit(list(slot.params.alphas), seed=f"{slot.name}:{int(slot.started)}", store=None),
+                            notify=False, meta=self.meta, meta_learn=False)
         watch["engine"] = eng
         self._apply_persisted_pause(eng)
         if restore:
@@ -762,12 +812,21 @@ class Heartless:
         """Place a new challenger into a free slot, or replace the weakest one that has had its fair trial. A candidate
         identical to a running challenger (same alpha values, switches and ensemble) is not installed: the research
         cycle proposes the same re-enable every few hours, and a copy would restart a trial already under way."""
+        base = self.params
+        diff, base_values = R.params_diff(base, params)
         for c in self.challengers:
-            if c.params.alphas == params.alphas and c.params.enabled == params.enabled and \
-                    c.params.ensemble == params.ensemble:
+            same = c.params.alphas == params.alphas and c.params.enabled == params.enabled and \
+                c.params.ensemble == params.ensemble
+            if same or (any(diff.values()) and self.research.slot_diff(c) == diff):
                 log.info("challenger candidate from %s is identical to %s (%s); not installed", source, c.name,
                          c.params.version)
                 return None
+        tried = self._recently_tried(diff)
+        if tried is not None:
+            log.info("challenger candidate from %s repeats the change of %s, judged and retired %s (%s); not installed "
+                     "for CHALLENGER_RETRY_DAYS=%d", source, tried.get("version"), fmt_ts(tried.get("at", 0)),
+                     tried.get("rule"), self.s.challenger_retry_days)
+            return None
         names = [f"challenger-{i + 1}" for i in range(self.s.challengers)]
         used = {c.name: c for c in self.challengers}
         free = [n for n in names if n not in used]
@@ -797,11 +856,43 @@ class Heartless:
             victim = min(eligible, key=score)
             await self.retire_challenger(victim, reason="새 후보로 교체", silent=True)
             name = victim.name
-        slot = ChallengerSlot(name=name, params=params, started=now_ms(), source=source)
+        slot = ChallengerSlot(name=name, params=params, started=now_ms(), source=source, base=base.version,
+                              base_created=int(base.created or 0), diff=diff, base_values=base_values,
+                              base_params=base.to_dict())
         self.store.save_params_version(params.version, params.created, "challenger", source, params.note, params.to_dict(),
-                                       {"slot": name, "started": slot.started})
+                                       {"slot": name, "started": slot.started, "base": slot.base,
+                                        "base_created": slot.base_created, "diff": diff, "base_values": base_values,
+                                        "base_params": slot.base_params})
         await self._start_challenger(slot)
         return slot
+
+    # a challenger retirement that judged its change (not a replacement, not a conflict with a newer champion)
+    TRIED_KEY = "challenger.tried"
+
+    @staticmethod
+    def _diff_key(diff: dict) -> str:
+        return json.dumps(diff, sort_keys=True, default=str)
+
+    def _recently_tried(self, diff: dict) -> dict | None:
+        """The record of a challenger with the same change that was judged and retired within CHALLENGER_RETRY_DAYS
+        (None if there is none). A trial that ended without promotion, a retirement on the statistics or a kill-switch
+        trip all count; every fresh trial of the same change would be another chance for noise to clear the bar."""
+        if not any(diff.values()) or self.s.challenger_retry_days <= 0:
+            return None
+        key = self._diff_key(diff)
+        since = now_ms() - self.s.challenger_retry_days * MS_DAY
+        return next((r for r in reversed(self.store.get(self.TRIED_KEY, []) or [])
+                     if r.get("diff") == key and int(r.get("at", 0)) >= since), None)
+
+    def _remember_tried(self, slot: ChallengerSlot, decision: dict, reason: str) -> None:
+        diff = self.research.slot_diff(slot)
+        if not any(diff.values()):
+            return
+        since = now_ms() - max(1, self.s.challenger_retry_days) * MS_DAY
+        rows = [r for r in (self.store.get(self.TRIED_KEY, []) or []) if int(r.get("at", 0)) >= since]
+        rows.append({"diff": self._diff_key(diff), "at": now_ms(), "version": slot.params.version,
+                     "rule": decision.get("rule") or decision.get("kind") or reason.split("\n")[0][:80]})
+        self.store.set(self.TRIED_KEY, rows[-200:])
 
     async def retire_challenger(self, slot: ChallengerSlot, reason: str, silent: bool = False,
                                 decision: dict | None = None) -> None:
@@ -816,6 +907,8 @@ class Heartless:
             # the decision's inputs stay with the retired version (params_versions.metrics.decisions + its note)
             self.store.record_params_decision(slot.params.version, {**decision, "reason": reason}, role="retired",
                                               note=f"{slot.params.note} | {self._decision_note(decision)}")
+            if decision.get("verdict") != "promote" and not decision.get("blockers"):
+                self._remember_tried(slot, decision, reason)
         else:
             self.store.set_params_role(slot.params.version, "retired")
         if not silent:
@@ -825,6 +918,8 @@ class Heartless:
     @staticmethod
     def _decision_note(d: dict) -> str:
         """One-line English summary of a promotion / retirement / kill-switch decision for a version note."""
+        if d.get("blockers"):
+            return f"not promoted ({d.get('rule')})"
         if d.get("kind") == "kill_switch":
             return (f"kill switch {d.get('alpha')} ({d.get('rule')}): n={d.get('n', 0)} sum {d.get('sum_r', 0):+.2f}R "
                     f"CUSUM {d.get('cusum', 0):+.2f}sd (sd {d.get('scale', 1.0):.2f}R) last {d.get('window_n', 0)} "
@@ -836,20 +931,35 @@ class Heartless:
                 + f" champion n={(d.get('champion') or {}).get('n', 0)}")
 
     async def promote(self, slot: ChallengerSlot, decision: dict) -> None:
-        """Make a challenger the champion. `decision` is the verdict of research.judge_challenger: its inputs are
-        stored with the new champion version (note + metrics) and shown in the Telegram message."""
+        """Make a challenger's CHANGE part of the champion: its diff relative to its base is applied onto the current
+        champion, so champion changes since the base (another promotion, a kill-switch trip) are kept. `decision` is
+        the verdict of research.judge_challenger: its inputs are stored with the new champion version (note + metrics)
+        and shown in the Telegram message. A change that conflicts with the current champion is not applied (the
+        challenger is retired with the reason; evaluate_challengers normally catches this first)."""
         old = self.params
+        blockers = self.research.promotion_blockers(slot)
+        if blockers:
+            d = {**decision, "verdict": "retire", "blockers": blockers,
+                 "rule": "change conflicts with the current champion: " + "; ".join(blockers)}
+            await self.retire_challenger(slot, reason="승격 불가 (기준 챔피언 이후의 변경과 충돌): " + "; ".join(blockers),
+                                         decision=d)
+            return
+        diff = self.research.slot_diff(slot)
         path = decision.get("path", "?")
         ch = decision.get("challenger", {})
-        note = (f"promoted from {slot.name} ({slot.source}) via the {path} path: n={ch.get('n', 0)} days={ch.get('days', 0)} "
-                f"avgR {ch.get('avg_r', 0):+.3f} t_day {ch.get('t_day', 0):+.2f}"
+        rebased = bool(slot.base) and slot.base != old.version
+        note = (f"promoted from {slot.name} ({slot.source}) via the {path} path at the {decision.get('checkpoint')}-day "
+                f"checkpoint: n={ch.get('n', 0)} days={ch.get('days', 0)} avgR {ch.get('avg_r', 0):+.3f} "
+                f"t_day {ch.get('t_day', 0):+.2f}"
                 + (f" paired t {decision['paired']['t']:+.2f}" if "paired" in decision else "")
-                + f" champion n={(decision.get('champion') or {}).get('n', 0)} (was {old.version})")
-        new = slot.params.clone(version=short_id("v"), note=note)
+                + f" champion n={(decision.get('champion') or {}).get('n', 0)}; its change applied onto {old.version}"
+                + (f" (base {slot.base})" if rebased else "") + f" (was {old.version})")
+        new = R.apply_diff(old, diff, version=short_id("v"), note=note)
         now = now_ms()
         self.store.set_params_role(old.version, "retired")
         self.store.save_params_version(new.version, new.created, "champion", slot.source, new.note, new.to_dict(),
-                                       {"decisions": [decision], "challenger": slot.params.version})
+                                       {"decisions": [decision], "challenger": slot.params.version, "base": slot.base,
+                                        "diff": diff})
         self.params = new
         for name in ("live", "paper"):
             if name in self.engines:
@@ -858,12 +968,18 @@ class Heartless:
         await self.retire_challenger(slot, reason="챔피언으로 승격", silent=True, decision=decision)
         switched_on = [a for a, on in new.enabled.items() if on and not old.enabled.get(a, False)]
         switched_off = [a for a, on in old.enabled.items() if on and not new.enabled.get(a, False)]
-        log.warning("promotion: %s (%s) -> champion %s via the %s path; on: %s off: %s", slot.name, slot.params.version,
-                    new.version, path, ", ".join(switched_on) or "-", ", ".join(switched_off) or "-")
+        tuned = [a for a in (diff.get("alphas") or {}) if a not in switched_on]
+        log.warning("promotion: %s (%s) -> champion %s via the %s path; change applied onto %s (base %s); on: %s off: %s "
+                    "tuned: %s", slot.name, slot.params.version, new.version, path, old.version, slot.base or "-",
+                    ", ".join(switched_on) or "-", ", ".join(switched_off) or "-", ", ".join(tuned) or "-")
         msg = (f"🏆 파라미터 승격: {slot.name} → 챔피언 {new.version}\n"
                f"변경 알파: {slot.source}" + (f" · 켜짐 {', '.join(switched_on)}" if switched_on else "")
-               + (f" · 꺼짐 {', '.join(switched_off)}" if switched_off else "") + "\n" + R.describe_decision(decision))
+               + (f" · 꺼짐 {', '.join(switched_off)}" if switched_off else "")
+               + (f" · 파라미터 {', '.join(tuned)}" if tuned else "")
+               + (f"\n기준 챔피언 {slot.base} 이후 바뀐 챔피언 {old.version}에 변경분만 적용" if rebased else "")
+               + "\n" + R.describe_decision(decision))
         await self.emit("promotion", {"message": msg, "version": new.version, "path": path})
+        await self.research.check_conflicts()
 
     async def kill_alpha(self, alpha: str, decision: dict) -> None:
         """Kill switch on a champion engine: a new champion version with `alpha` switched off, effective at once for
@@ -890,6 +1006,7 @@ class Heartless:
         msg = (f"🛑 알파 킬 스위치: {alpha} 끔 → 챔피언 {new.version}\n{R.describe_kill(decision)}\n"
                f"다시 켜려면 챌린저 승격 경로를 거쳐야 합니다. 남은 활성 알파: {', '.join(left) if left else '없음'}")
         await self.emit("kill_switch", {"message": msg, "alpha": alpha, "version": new.version})
+        await self.research.check_conflicts()  # a challenger tuning the alpha can no longer be promoted
 
     # --- market data handlers ------------------------------------------------------------------
     async def _on_kline(self, data: dict) -> None:
@@ -920,6 +1037,8 @@ class Heartless:
             t.index = float(d.get("i", 0) or 0)
             t.funding_rate = float(d.get("r", 0) or 0)
             t.next_funding_time = int(d.get("T", 0) or 0)
+            if t.next_funding_time:
+                self.funding_next[sym] = t.next_funding_time
             t.ts = int(d.get("E", now_ms()))
             await self._tick(sym, t)
 
@@ -1041,7 +1160,8 @@ class Heartless:
                 old = next((v for ts, v in oi if ts <= now - 4 * MS_HOUR), oi[0][1])
                 if old:
                     oi_change = oi[-1][1] / old - 1
-        nft = t.next_funding_time or ((now // (8 * MS_HOUR)) + 1) * 8 * MS_HOUR
+        iv = self._funding_interval_ms(sym)
+        nft = t.next_funding_time or self.funding_next.get(sym) or ((now // iv) + 1) * iv
         return Context(symbol=sym, info=self.symbols[sym], ticker=t, regime=reg, regime_info=info, btc_regime=btc,
                        oi_change=oi_change, now=now, funding_rate=t.funding_rate,
                        minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), book_imbalance=imb, extras=extras,
@@ -1079,6 +1199,14 @@ class Heartless:
             return
         log.info("market context warmed: %d bars of %d symbols (%d context-only: %s)", fed,
                  len(self.context.symbols), len(self.context_only), ",".join(self.context_only) or "-")
+        # the hour the warm-up finalised is never published by a streamed bar (its decisions read it lazily): store it
+        # now, it is what every engine decides on until the next hour close
+        h = self.context.last_hour
+        if h is not None:
+            try:
+                self._persist_context(self.context.snapshot(CTX.hour_close(h)))
+            except Exception:  # noqa: BLE001
+                self._context_error("snapshot")
 
     def _context_error(self, what: str) -> None:
         self.context_stats["errors"] += 1
@@ -1136,6 +1264,7 @@ class Heartless:
 
     def _publish_context(self, T: int, late: bool = False) -> None:
         snap = self.context.snapshot(T)
+        self._persist_context(snap)
         st = self.context_stats
         st["snapshots"] += 1
         st["last"] = T
@@ -1164,6 +1293,106 @@ class Heartless:
         except Exception:  # noqa: BLE001
             self._context_error("view")
             return NO_MARKET_CONTEXT
+
+    # --- live market-context store (C2-B) ----------------------------------------------------------------------
+    def _ctx_db(self) -> Store:
+        """The live context store (opened on first use; the main store when CONTEXT_DB names the main database)."""
+        if self._ctx_store is None:
+            path = self.live_context_path
+            if path.resolve() == Path(self.s.db_path).resolve():
+                self._ctx_store = self.store
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._ctx_store = Store(path)
+        return self._ctx_store
+
+    def _ctx_meta(self, st: Store) -> dict:
+        """The store's context meta for this bot's universe; rows of another universe or feature version are stale
+        (another cross-section) and dropped, as the offline build does."""
+        meta = st.get("context.meta")
+        if not CTX.meta_ok(meta, self.context.symbols):
+            if st.has_market_context():
+                log.warning("live context store %s holds another context version or universe: rebuilt",
+                            self.live_context_path)
+                st.delete_market_context()
+            meta = CTX.meta_for(self.context.symbols)
+            st.set("context.meta", meta)
+        return meta
+
+    def _persist_context(self, snap) -> None:
+        """Append one published snapshot to the live context store (its hour close joins the built spans)."""
+        if snap is None:
+            return
+        try:
+            st = self._ctx_db()
+            meta = self._ctx_meta(st)
+            st.add_market_context(snap.rows(), snap.ts, snap.ts, meta)
+            self.context_stats["stored"] += 1
+        except Exception:  # noqa: BLE001 - persistence must never stop the snapshot from reaching the engines
+            self._context_error("persist")
+
+    def _context_gaps(self, lo: int, hi: int) -> list[tuple[int, int]]:
+        """Hour-close spans inside [lo, hi] the live context store has not built (per its meta)."""
+        built = sorted((int(a), int(b)) for a, b in (self._ctx_meta(self._ctx_db()).get("built") or []))
+        out: list[tuple[int, int]] = []
+        cur = lo
+        for a, b in built:
+            if b < cur:
+                continue
+            if a > hi:
+                break
+            if a > cur:
+                out.append((cur, min(hi, a - MS_HOUR)))
+            cur = max(cur, b + MS_HOUR)
+            if cur > hi:
+                break
+        if cur <= hi:
+            out.append((cur, hi))
+        return out
+
+    def _compute_context(self, a: int, b: int) -> list:
+        """Offline builder (data/context.py compute_unit) over the stored candles for the hour closes [a, b], on its own
+        connection (runs in a worker thread; the main store's lock stays free for the trading loop)."""
+        src = Store(self.s.db_path)
+        try:
+            return CTX.compute_unit(src, self.context.symbols, a, b)
+        finally:
+            src.close()
+
+    async def _fill_context_gaps(self, wait_for: asyncio.Task | None = None) -> int:
+        """Start-up, in the background: build the hour closes of the research window (RESEARCH_LOOKBACK_DAYS before now
+        up to the hour the warm-up finalised) that the live context store lacks, from the stored candles with the
+        offline builder. Returns the number of snapshots stored. A failure is logged and left for the next start."""
+        if wait_for is not None:
+            try:
+                await asyncio.shield(wait_for)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
+        h = self.context.last_hour
+        if h is None:
+            return 0
+        now = now_ms()
+        lo = CTX.hour_close(CTX.hour_of(now - self.s.research_lookback_days * MS_DAY))
+        hi = CTX.hour_close(h)
+        stored = 0
+        try:
+            for a, b in self._context_gaps(lo, hi):
+                snaps = await asyncio.to_thread(self._compute_context, a, b)
+                st = self._ctx_db()
+                meta = self._ctx_meta(st)
+                st.add_market_context([r for sn in snaps for r in sn.rows()], a, b, meta)
+                stored += len(snaps)
+                log.info("live context store: built %d hour(s) %s .. %s UTC from stored candles", len(snaps),
+                         fmt_ts(a, fmt="%m-%d %H:%M"), fmt_ts(b, fmt="%m-%d %H:%M"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            self.context_stats["fill_errors"] += 1
+            log.exception("live context store: building the missing hours failed")
+        self.context_stats["filled"] += stored
+        return stored
 
     async def _btc_shock_check(self, view: MarketView) -> None:
         m1 = view.tf("1m")
@@ -1200,7 +1429,7 @@ class Heartless:
                     asyncio.create_task(self._poll_metrics())
                 if now - self._last_funding_refresh >= FUNDING_REFRESH_MS:
                     self._last_funding_refresh = now
-                    asyncio.create_task(self._refresh_funding())
+                    asyncio.create_task(self._funding_tick())
                 if now - self._last_universe >= self.s.universe_refresh_minutes * MS_MINUTE:
                     await self.refresh_universe()
                 self._context_tick(now)
@@ -1231,6 +1460,10 @@ class Heartless:
         self.store.prune_metrics(cutoff)
         self.store.prune_equity(cutoff)
         self.store.prune_fill_quality(cutoff)
+        try:
+            self._ctx_db().prune_market_context(cutoff)
+        except Exception:  # noqa: BLE001
+            log.warning("live context store prune failed", exc_info=True)
 
     def _roll_day(self, now: int) -> None:
         """Start a new reporting day (the engines' daily counters) once `now` passed the local midnight. Runs before
@@ -1349,16 +1582,67 @@ class Heartless:
         now = now_ms()
         for sym in list(self.universe) + list(self.context_only):
             _, f_hi = self.store.funding_range(sym)
-            if f_hi is None or now < f_hi + 8 * MS_HOUR:
-                continue  # never backfilled (the backfill owns that) or no settlement due since the last stored one
+            if f_hi is None:
+                continue  # never backfilled (the backfill owns that)
+            due = self._funding_due(sym, f_hi, now)
+            if due is None:
+                continue  # no settlement due since the last stored one
             try:
                 fr = await self.rest.funding_rate_history(sym, start=f_hi + 1, end=now)
                 rows = [(int(r["fundingTime"]), float(r["fundingRate"]), float(r.get("markPrice", 0) or 0)) for r in fr]
                 self.store.save_funding(sym, rows)
                 for t, rate, _ in rows:
                     self.context.on_funding(sym, t, rate)
+                if not any(t >= due for t, _, _ in rows):
+                    self._funding_miss[sym] = due
             except Exception as e:  # noqa: BLE001
                 log.debug("funding refresh %s failed: %s", sym, e)
+
+    def _funding_interval_ms(self, sym: str) -> int:
+        return int(self.funding_interval.get(sym, DEFAULT_FUNDING_INTERVAL_MS))
+
+    def _funding_due(self, sym: str, f_hi: int, now: int) -> int | None:
+        """The settlement time after the last stored one (f_hi) that is due at `now`, or None. With the exchange's next
+        settlement time T known, the latest settlement at or before now is T (when it has passed) or T minus the
+        symbol's interval; without it, f_hi plus the interval. A 4-hourly symbol's settlements were otherwise fetched
+        only every 8 h, i.e. up to 4 h late for the market context (the offline build has them on time) and for the
+        funding-avoidance exit. An expectation the history did not show FUNDING_MISS_GRACE_MS after it was due is not
+        asked for again (an interval that changed under us)."""
+        iv = self._funding_interval_ms(sym)
+        nxt = self.funding_next.get(sym)
+        if nxt:
+            last = nxt if nxt <= now else nxt - iv
+        else:
+            last = f_hi + iv
+        if last <= f_hi or last > now:
+            return None
+        if self._funding_miss.get(sym) == last and now - last > FUNDING_MISS_GRACE_MS:
+            return None
+        return last
+
+    async def _funding_tick(self) -> None:
+        await self._refresh_funding_schedule()
+        await self._refresh_funding()
+
+    async def _refresh_funding_schedule(self) -> None:
+        """Every symbol's next settlement time (premiumIndex nextFundingTime, all symbols in one call) and settlement
+        interval (fundingInfo fundingIntervalHours; a symbol it does not list settles every 8 h). Failures keep the
+        previous schedule (the funding refresh then falls back to the 8-hour rule for symbols without one)."""
+        try:
+            rows = await self.rest.premium_index()
+            for r in rows if isinstance(rows, list) else [rows]:
+                t = int(r.get("nextFundingTime") or 0)
+                if r.get("symbol") and t > 0:
+                    self.funding_next[r["symbol"]] = t
+        except Exception as e:  # noqa: BLE001
+            log.debug("premium index refresh failed: %s", e)
+        try:
+            info = await self.rest.request("GET", "/fapi/v1/fundingInfo")
+            if isinstance(info, list):
+                self.funding_interval = {r["symbol"]: int(float(r["fundingIntervalHours"]) * MS_HOUR) for r in info
+                                         if r.get("symbol") and float(r.get("fundingIntervalHours") or 0) > 0}
+        except Exception as e:  # noqa: BLE001
+            log.debug("funding info refresh failed: %s", e)
 
     async def _poll_open_interest(self) -> None:
         for sym in list(self.universe):
@@ -1378,7 +1662,8 @@ class Heartless:
         st = self.context_stats
         ctx = (f"{st['symbols']}/{len(self.context.symbols)} symbols at {fmt_ts(st['last'], fmt='%m-%d %H:%M')} UTC, "
                f"{st['snapshots']} snapshots ({st['late']} after the grace, {st['errors']} errors), "
-               f"{len(self.context_only)} context-only streams")
+               f"{len(self.context_only)} context-only streams; stored {st['stored']} + built {st['filled']} hours "
+               f"in {self.live_context_path.name}")
         self.health = {"market_stream": self.market.connected, "stale_symbols": stale, "queue": self._kline_queue.qsize(),
                        "short_history": short, "backfill_pending": sorted(self._backfill_failed), "market_context": ctx,
                        "user_stream": self.live_account.user_stream.connected if self.live_account else None,
@@ -1541,7 +1826,10 @@ class Heartless:
         if d:
             row["decision"] = {"path": d.get("path"), "verdict": d.get("verdict"), "rule": d.get("rule"),
                                "at": d.get("at"), "challenger": d.get("challenger"), "bar": d.get("bar"),
-                               "paired": d.get("paired"), "checks": d.get("checks")}
+                               "paired": d.get("paired"), "checks": d.get("checks"), "checkpoint": d.get("checkpoint"),
+                               "next_checkpoint": d.get("next_checkpoint"), "current": d.get("current")}
+        row["base"] = c.base
+        row["diff"] = self.research.slot_diff(c)
         return row
 
     def pnl_report(self, period: str = "today") -> dict:

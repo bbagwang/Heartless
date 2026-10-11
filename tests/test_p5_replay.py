@@ -404,8 +404,12 @@ def test_learning_loop_runs_for_real_inside_a_replay(tmp_path, small_frames):
     assert len(learn["discovery_cycles"]) == 1 and learn["discovery_cycles"][0]["tested"] > 0
     assert learn["challenger_evaluations"]["by_path"].get("absolute", 0) >= 1 and len(learn["promotions"]) == 1
     (d,) = [x for x in learn["challenger_decisions"] if x["verdict"] == "promote"]
-    assert d["path"] == "absolute" and d["failed_alphas"] and d["bar"]["min_days"] == 30 and d["bar"]["min_t_day"] == 2.0
-    assert d["challenger"]["n"] >= 40 and d["challenger"]["days"] >= 30 and d["champion_n"] == 12
+    # C2-B: judged at its 30-day checkpoint (the failed-alpha schedule) on the trades of its first 30 days
+    from heartless.learning import research as R
+
+    assert d["path"] == "absolute" and d["failed_alphas"] and d["bar"]["min_days"] == 30
+    assert d["bar"]["checkpoint"] == 30 and d["bar"]["min_t_day"] == R.FAILED_ABS_T_AT[30]
+    assert d["challenger"]["n"] >= 35 and d["challenger"]["days"] >= 30 and d["champion_n"] == 12
     assert learn["champion_final"] == learn["promotions"][0]["version"] != "vchallenger"
     assert s["engines"]["paper"]["params_version"] == learn["champion_final"]  # the champion engine hot-swapped
     tg = s["telegram"]["by_type"]

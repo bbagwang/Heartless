@@ -406,7 +406,9 @@ class TelegramBot:
             return "활성 챌린저가 없습니다 (다음 리서치 사이클에서 생성)"
         lines = ["<b>챌린저</b>"]
         from heartless.execution.stats import r_stats, summarize
+        from heartless.learning import research as R
         from heartless.learning.research import describe_decision
+        from heartless.strategy import evidence
 
         champ = summarize(app.store.load_trades(engine="paper", since=min(c.started for c in app.challengers)))
         lines.append(f"챔피언(paper) n={champ['n']} avgR {champ['avg_r']:+.2f} net {champ['net']:+.1f}")
@@ -421,7 +423,8 @@ class TelegramBot:
                              f"{fmt_ts(d.get('at'), self.s.timezone, '%m-%d %H:%M')})\n  "
                              + F.esc(describe_decision(d)).replace("\n", "\n  "))
             else:
-                lines.append(f"  판정 대기 (매시간 평가, 슬롯 보호 {app.research.trial_days(c)}일)")
+                lines.append(f"  판정 대기 (승격은 판정점 {'·'.join(str(x) for x in R.checkpoints(evidence.failed(app.research.slot_new_alphas(c))))}일에만, "
+                             f"퇴출은 매시간 평가, 시험 {app.research.trial_days(c)}일)")
         return "\n".join(lines)
 
     def _params_text(self, alpha: str | None) -> str:

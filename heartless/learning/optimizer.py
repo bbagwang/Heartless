@@ -159,6 +159,9 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
             return {"error": f"research window overlaps sealed period(s) {clipped}", "alphas": {}}
         since, now = win
     seal.check_window(since, now, unseal)
+    # load_backtester's default market="auto" attaches the stored market context of the window (CONTEXT_DB: the bot's
+    # live context store, see ResearchManager.worker_settings), so alphas reading ctx.market are evaluated on what they
+    # see live
     bt = load_backtester(settings, store, symbols, since, until=now if clipped else None)
     if not bt.candles:
         return {"error": "not enough candles", "alphas": {}}
@@ -173,7 +176,9 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
     fold_windows = [(conf_start + i * step, conf_start + (i + 1) * step if i < k - 1 else now) for i in range(k)]
     out: dict = {"alphas": {}, "window": {"since": since, "split": split, "until": now, "folds": fold_windows,
                                           "sealed_clipped": clipped},
-                 "symbols": list(bt.candles.keys())}
+                 "symbols": list(bt.candles.keys()),
+                 "context": {"db": getattr(settings, "context_db", "") or "",
+                             "hours": len(bt.market) if getattr(bt, "market", None) is not None else 0}}
     for alpha in (alphas or list(ALPHA_SPECS)):
         if alpha not in base.alphas or not _has_own_params(alpha):
             continue  # e.g. the rule-driven "discovered" alpha is improved by the discovery engine, not here
