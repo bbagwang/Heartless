@@ -68,20 +68,26 @@ def test_result_files_and_ledgers_back_the_decision():
         if key != "valid":
             assert res["window"]["start_ms"] == S25 and res["window"]["end_ms"] == E25 - 1, key
             assert res["seal"]["unsealed"] == ["2025"] and res["summary"]["boundary"] == 0, key
-    # the 2025 runs re-ran a configuration the family had already counted: N did not grow
+    # the 2025 runs re-ran a configuration the family had already counted: N did not grow. The two exam runs are
+    # identified by the ledger lines their result files carry, not by their window: 2025 is ordinary history now, so
+    # later vol_breakout research may append more 2025 lines (and later trials of any kind) to the ledger
     fam = [e for e in trials.load() if e["family"] == "vol_breakout"]
-    runs = [e for e in fam if e["window"][0].startswith("2025-01-01")]
-    upto = [e for e in fam if e["utc"] <= max(e["utc"] for e in runs)]  # later research may add trials
+    utcs = {json.loads((ROOT / d["inputs"][k]["file"]).read_text())["trial"]["utc"]
+            for k in ("sealed2025", "sealed2025_stress")}
+    runs = [e for e in fam if e["config_hash"] == CONFIG and e["utc"] in utcs]
+    upto = [e for e in fam if e["utc"] <= max(e["utc"] for e in runs)]
     n_after = trials.summary(upto, "vol_breakout")["vol_breakout"]["n_tests"]
     n_before = trials.summary([e for e in upto if e not in runs], "vol_breakout")["vol_breakout"]["n_tests"]
-    assert len(runs) == 2 and {e["config_hash"] for e in runs} == {CONFIG}
+    assert len(runs) == 2 and all(e["window"] == ["2025-01-01 00:00", "2025-12-31 23:59"] for e in runs)
     assert n_after == n_before == d["configuration"]["family_n_after"] == 23
-    # every opening of the sealed period is in the seal ledger, then the line that spends the seal
+    # every opening of the sealed period is in the seal ledger, then the line that spends the seal (a later sealed
+    # period's lines may follow it; a spent 2025 records nothing more)
     rows = [json.loads(x) for x in (RESULTS / "seal_ledger.jsonl").read_text().splitlines()]
-    opens = [r for r in rows if r["period"] == "2025" and not r.get("event")]
-    assert [r["argv"][1] for r in opens] == ["lab", "lab", "backtest"]
-    assert all("--unseal" in r["argv"] for r in opens)
-    assert rows[-1]["event"] == "spent" and rows[-1]["period"] == "2025"
+    opens = [i for i, r in enumerate(rows) if r["period"] == "2025" and not r.get("event")]
+    spent = [i for i, r in enumerate(rows) if r["period"] == "2025" and r.get("event") == "spent"]
+    assert [rows[i]["argv"][1] for i in opens] == ["lab", "lab", "backtest"]
+    assert all("--unseal" in rows[i]["argv"] for i in opens)
+    assert len(spent) == 1 and spent[0] > max(opens)
     joint = json.loads((RESULTS / "p2_sealed2025_joint.json").read_text())
     assert joint["enabled"] == ["vol_breakout_dbox"] and joint["seal"]["unsealed"] == ["2025"]
     assert joint["window"]["start_ms"] == S25 and joint["window"]["end_ms"] == E25 - 1 and len(joint["symbols"]) == 20
