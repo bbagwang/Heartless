@@ -1,0 +1,1566 @@
+{
+ "family": "xs_rank",
+ "tool": "screen (hourly simulator of the engine's exits, scratch script; each configuration recorded in docs/results/p2_trials.jsonl with tool=screen)",
+ "window": "TRAIN 2022-01-13 .. 2024-12-31 (data/longhist, 20-symbol extended universe; market context from data/longhist/context.db rows of the TRAIN span only)",
+ "simulator": "xs_rank screening simulator (hourly resolution) mirroring the engine's trade management for a daily\ncross-sectional rank alpha. Every evaluated configuration is recorded in the P2 trial ledger\n(tool=\"screen\", family=\"xs_rank\").\n\nDecision: at the 00:00 UTC daily close (the 23:59 bar; ctx.market = the snapshot of that hour close, read from the\nstored market_context rows), a flat symbol goes long / short from its own cross-sectional rank:\n  mode \"mom\": rank >= 1 - q -> long, rank <= q -> short;  mode \"rev\": the opposite.\nEntry skipped while the upcoming funding (the 00:00 settlement, ctx.funding_rate at 23:59) is adverse by more than\nfund_max (the engine's funding-avoidance exit would close it at the next settlement unless 0.3R up).\n\nEngine rules mirrored (heartless/execution/engine.py, exchange/paper.py, learning/backtester.py; same as the ts_trend\nscreen): market entry at the next bar's open (+ half spread 0.25bp + slippage 1.5bp, taker 5bp); stop = close -/+\nsl_atr * daily ATR14 (Wilder, 1d bars of the symbol); R unit = |fill - stop| + fill * (2 taker + 3bp); stops fill at\nthe trigger (gap: open) less slippage; per hour close: time stop at hold_h hours minus one minute (close if r < 0.5 or\nheld 3x; otherwise breakeven + 1.5 daily-ATR chandelier trail on the last closed daily bar), funding-avoidance exit\nbefore a settlement when r < 0.3 and the upcoming rate is adverse by more than 3bp, funding charged every 8h on the\nnotional at the previous close; one position per symbol; the next decision is the first daily close at or after the\nexit; force-close at the window end (2024-12-31 23:59, never reads 2025). Lab warm-up: evaluation starts at\nmax(window start, first candle + lookback_days + 2 days).",
+ "gross_ret_avg_bp": "mean directional return per trade between the filled entry and exit prices (after half spread and slippage, before fees and funding), in bp",
+ "rounds": {
+  "1": "signal map pre-declared before any result: lookback {24, 72, 168} h x hold {24, 72} h x {momentum, reversal}, q = 0.2, stop 2 daily ATRs (24 h) / 3 (72 h), funding filter 3bp",
+  "2": "after round 1 (all cells <= 0, momentum > reversal in every pair): 168 h momentum / 72 h hold with one prior-motivated change each (q = 0.1; dispersion above its TRAIN median; 1.5-ATR stop-loss; skip BTC downtrends) and two volume-conditioned 24 h variants"
+ },
+ "n_configs": 18,
+ "commit": "852ba08413a68b1c0df4f96d52effa5deb4a782b",
+ "configs": [
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_24h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 24,
+    "sl_atr": 2.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 7845,
+    "win_rate": 48.0,
+    "avg_r": -0.0107,
+    "profit_factor": 0.912,
+    "t_day": -2.59,
+    "net": -84.0,
+    "months_positive": 9,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 2520,
+     "win_rate": 49.0,
+     "avg_r": -0.004,
+     "profit_factor": 0.964,
+     "t_day": -0.56,
+     "net": -10.1,
+     "months_positive": 4,
+     "months": 12
+    },
+    "2023": {
+     "n": 2695,
+     "win_rate": 46.9,
+     "avg_r": -0.012,
+     "profit_factor": 0.903,
+     "t_day": -1.78,
+     "net": -32.5,
+     "months_positive": 4,
+     "months": 12
+    },
+    "2024": {
+     "n": 2630,
+     "win_rate": 48.3,
+     "avg_r": -0.0158,
+     "profit_factor": 0.879,
+     "t_day": -2.09,
+     "net": -41.5,
+     "months_positive": 1,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 3866,
+    "win_rate": 46.5,
+    "avg_r": -0.0116,
+    "profit_factor": 0.913,
+    "t_day": -1.28,
+    "net": -44.9,
+    "months_positive": 14,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 3979,
+    "win_rate": 49.5,
+    "avg_r": -0.0098,
+    "profit_factor": 0.912,
+    "t_day": -1.34,
+    "net": -39.2,
+    "months_positive": 17,
+    "months": 36
+   },
+   "funding_r_avg": 0.0002,
+   "gross_ret_avg_bp": -4.6,
+   "exits": {
+    "time": 7305,
+    "time3x": 83,
+    "SL": 139,
+    "BE/trail": 137,
+    "funding": 173,
+    "end": 8
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_24h_rank",
+    "mode": "rev",
+    "q": 0.2,
+    "hold_h": 24,
+    "sl_atr": 2.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 8006,
+    "win_rate": 49.8,
+    "avg_r": -0.0135,
+    "profit_factor": 0.891,
+    "t_day": -3.52,
+    "net": -108.5,
+    "months_positive": 6,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 2580,
+     "win_rate": 48.8,
+     "avg_r": -0.0164,
+     "profit_factor": 0.861,
+     "t_day": -2.45,
+     "net": -42.2,
+     "months_positive": 1,
+     "months": 12
+    },
+    "2023": {
+     "n": 2725,
+     "win_rate": 50.4,
+     "avg_r": -0.0096,
+     "profit_factor": 0.923,
+     "t_day": -1.53,
+     "net": -26.1,
+     "months_positive": 3,
+     "months": 12
+    },
+    "2024": {
+     "n": 2701,
+     "win_rate": 50.1,
+     "avg_r": -0.0149,
+     "profit_factor": 0.887,
+     "t_day": -2.1,
+     "net": -40.2,
+     "months_positive": 2,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 4031,
+    "win_rate": 48.0,
+    "avg_r": -0.0136,
+    "profit_factor": 0.881,
+    "t_day": -1.81,
+    "net": -54.8,
+    "months_positive": 13,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 3975,
+    "win_rate": 51.5,
+    "avg_r": -0.0135,
+    "profit_factor": 0.9,
+    "t_day": -1.66,
+    "net": -53.7,
+    "months_positive": 17,
+    "months": 36
+   },
+   "funding_r_avg": 0.0004,
+   "gross_ret_avg_bp": -6.5,
+   "exits": {
+    "time": 7395,
+    "time3x": 87,
+    "funding": 159,
+    "SL": 189,
+    "BE/trail": 168,
+    "end": 8
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_24h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 4352,
+    "win_rate": 49.2,
+    "avg_r": -0.0024,
+    "profit_factor": 0.983,
+    "t_day": -0.34,
+    "net": -10.3,
+    "months_positive": 18,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 1402,
+     "win_rate": 49.7,
+     "avg_r": -0.0076,
+     "profit_factor": 0.942,
+     "t_day": -0.65,
+     "net": -10.6,
+     "months_positive": 8,
+     "months": 13
+    },
+    "2023": {
+     "n": 1480,
+     "win_rate": 48.0,
+     "avg_r": 0.0018,
+     "profit_factor": 1.013,
+     "t_day": 0.15,
+     "net": 2.7,
+     "months_positive": 7,
+     "months": 13
+    },
+    "2024": {
+     "n": 1470,
+     "win_rate": 49.9,
+     "avg_r": -0.0016,
+     "profit_factor": 0.989,
+     "t_day": -0.12,
+     "net": -2.4,
+     "months_positive": 5,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 2274,
+    "win_rate": 47.9,
+    "avg_r": 0.006,
+    "profit_factor": 1.043,
+    "t_day": 0.45,
+    "net": 13.6,
+    "months_positive": 16,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 2078,
+    "win_rate": 50.7,
+    "avg_r": -0.0115,
+    "profit_factor": 0.917,
+    "t_day": -0.99,
+    "net": -24.0,
+    "months_positive": 19,
+    "months": 36
+   },
+   "funding_r_avg": 0.0007,
+   "gross_ret_avg_bp": -0.1,
+   "exits": {
+    "time": 3761,
+    "BE/trail": 187,
+    "SL": 134,
+    "time3x": 21,
+    "end": 15,
+    "funding": 234
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_24h_rank",
+    "mode": "rev",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 4390,
+    "win_rate": 50.3,
+    "avg_r": -0.006,
+    "profit_factor": 0.956,
+    "t_day": -0.86,
+    "net": -26.3,
+    "months_positive": 9,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 1410,
+     "win_rate": 50.7,
+     "avg_r": -0.0008,
+     "profit_factor": 0.994,
+     "t_day": -0.07,
+     "net": -1.1,
+     "months_positive": 2,
+     "months": 13
+    },
+    "2023": {
+     "n": 1480,
+     "win_rate": 50.3,
+     "avg_r": 0.0001,
+     "profit_factor": 1.001,
+     "t_day": 0.01,
+     "net": 0.1,
+     "months_positive": 4,
+     "months": 13
+    },
+    "2024": {
+     "n": 1500,
+     "win_rate": 49.8,
+     "avg_r": -0.0169,
+     "profit_factor": 0.889,
+     "t_day": -1.42,
+     "net": -25.3,
+     "months_positive": 3,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 2079,
+    "win_rate": 49.0,
+    "avg_r": 0.0002,
+    "profit_factor": 1.002,
+    "t_day": 0.02,
+    "net": 0.5,
+    "months_positive": 13,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 2311,
+    "win_rate": 51.4,
+    "avg_r": -0.0116,
+    "profit_factor": 0.92,
+    "t_day": -0.98,
+    "net": -26.8,
+    "months_positive": 16,
+    "months": 36
+   },
+   "funding_r_avg": 0.0012,
+   "gross_ret_avg_bp": -5.3,
+   "exits": {
+    "time": 3784,
+    "BE/trail": 169,
+    "SL": 159,
+    "funding": 238,
+    "end": 15,
+    "time3x": 25
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_72h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 24,
+    "sl_atr": 2.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 7790,
+    "win_rate": 47.5,
+    "avg_r": -0.0086,
+    "profit_factor": 0.929,
+    "t_day": -2.08,
+    "net": -67.1,
+    "months_positive": 13,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 2513,
+     "win_rate": 49.5,
+     "avg_r": -0.0033,
+     "profit_factor": 0.971,
+     "t_day": -0.43,
+     "net": -8.3,
+     "months_positive": 6,
+     "months": 12
+    },
+    "2023": {
+     "n": 2666,
+     "win_rate": 45.3,
+     "avg_r": -0.0102,
+     "profit_factor": 0.918,
+     "t_day": -1.41,
+     "net": -27.1,
+     "months_positive": 3,
+     "months": 12
+    },
+    "2024": {
+     "n": 2611,
+     "win_rate": 47.9,
+     "avg_r": -0.0122,
+     "profit_factor": 0.903,
+     "t_day": -1.8,
+     "net": -31.7,
+     "months_positive": 4,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 3824,
+    "win_rate": 47.3,
+    "avg_r": -0.0056,
+    "profit_factor": 0.958,
+    "t_day": -0.62,
+    "net": -21.3,
+    "months_positive": 15,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 3966,
+    "win_rate": 47.7,
+    "avg_r": -0.0116,
+    "profit_factor": 0.894,
+    "t_day": -1.63,
+    "net": -45.8,
+    "months_positive": 16,
+    "months": 36
+   },
+   "funding_r_avg": 0.0002,
+   "gross_ret_avg_bp": 0.8,
+   "exits": {
+    "time": 7272,
+    "SL": 120,
+    "BE/trail": 142,
+    "time3x": 92,
+    "funding": 156,
+    "end": 8
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_72h_rank",
+    "mode": "rev",
+    "q": 0.2,
+    "hold_h": 24,
+    "sl_atr": 2.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 8062,
+    "win_rate": 49.5,
+    "avg_r": -0.0174,
+    "profit_factor": 0.863,
+    "t_day": -4.5,
+    "net": -140.4,
+    "months_positive": 4,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 2592,
+     "win_rate": 48.9,
+     "avg_r": -0.0164,
+     "profit_factor": 0.862,
+     "t_day": -2.56,
+     "net": -42.5,
+     "months_positive": 0,
+     "months": 12
+    },
+    "2023": {
+     "n": 2742,
+     "win_rate": 50.2,
+     "avg_r": -0.0139,
+     "profit_factor": 0.891,
+     "t_day": -2.08,
+     "net": -38.0,
+     "months_positive": 3,
+     "months": 12
+    },
+    "2024": {
+     "n": 2728,
+     "win_rate": 49.5,
+     "avg_r": -0.022,
+     "profit_factor": 0.838,
+     "t_day": -3.13,
+     "net": -59.9,
+     "months_positive": 1,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 4082,
+    "win_rate": 49.2,
+    "avg_r": -0.0115,
+    "profit_factor": 0.896,
+    "t_day": -1.52,
+    "net": -47.1,
+    "months_positive": 12,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 3980,
+    "win_rate": 49.9,
+    "avg_r": -0.0234,
+    "profit_factor": 0.838,
+    "t_day": -2.76,
+    "net": -93.3,
+    "months_positive": 15,
+    "months": 36
+   },
+   "funding_r_avg": 0.0004,
+   "gross_ret_avg_bp": -12.8,
+   "exits": {
+    "time": 7406,
+    "time3x": 77,
+    "funding": 154,
+    "BE/trail": 191,
+    "SL": 226,
+    "end": 8
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_72h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 3977,
+    "win_rate": 48.9,
+    "avg_r": -0.0034,
+    "profit_factor": 0.975,
+    "t_day": -0.5,
+    "net": -13.5,
+    "months_positive": 13,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 1264,
+     "win_rate": 50.9,
+     "avg_r": 0.0079,
+     "profit_factor": 1.067,
+     "t_day": 0.71,
+     "net": 10.0,
+     "months_positive": 7,
+     "months": 13
+    },
+    "2023": {
+     "n": 1381,
+     "win_rate": 47.0,
+     "avg_r": -0.013,
+     "profit_factor": 0.912,
+     "t_day": -1.06,
+     "net": -18.0,
+     "months_positive": 3,
+     "months": 13
+    },
+    "2024": {
+     "n": 1332,
+     "win_rate": 48.9,
+     "avg_r": -0.0041,
+     "profit_factor": 0.971,
+     "t_day": -0.36,
+     "net": -5.5,
+     "months_positive": 4,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 1911,
+    "win_rate": 47.6,
+    "avg_r": 0.0115,
+    "profit_factor": 1.082,
+    "t_day": 0.84,
+    "net": 22.0,
+    "months_positive": 17,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 2066,
+    "win_rate": 50.1,
+    "avg_r": -0.0171,
+    "profit_factor": 0.87,
+    "t_day": -1.59,
+    "net": -35.4,
+    "months_positive": 14,
+    "months": 36
+   },
+   "funding_r_avg": 0.0008,
+   "gross_ret_avg_bp": 8.3,
+   "exits": {
+    "time": 3437,
+    "SL": 105,
+    "BE/trail": 153,
+    "time3x": 18,
+    "funding": 251,
+    "end": 13
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_72h_rank",
+    "mode": "rev",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 4029,
+    "win_rate": 50.1,
+    "avg_r": -0.0056,
+    "profit_factor": 0.959,
+    "t_day": -0.82,
+    "net": -22.6,
+    "months_positive": 15,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 1295,
+     "win_rate": 50.7,
+     "avg_r": -0.0132,
+     "profit_factor": 0.896,
+     "t_day": -1.22,
+     "net": -17.1,
+     "months_positive": 4,
+     "months": 13
+    },
+    "2023": {
+     "n": 1355,
+     "win_rate": 49.8,
+     "avg_r": 0.0048,
+     "profit_factor": 1.035,
+     "t_day": 0.4,
+     "net": 6.5,
+     "months_positive": 9,
+     "months": 13
+    },
+    "2024": {
+     "n": 1379,
+     "win_rate": 49.7,
+     "avg_r": -0.0087,
+     "profit_factor": 0.941,
+     "t_day": -0.68,
+     "net": -12.1,
+     "months_positive": 4,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 2044,
+    "win_rate": 49.4,
+    "avg_r": 0.0123,
+    "profit_factor": 1.104,
+    "t_day": 1.07,
+    "net": 25.1,
+    "months_positive": 18,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 1985,
+    "win_rate": 50.7,
+    "avg_r": -0.0241,
+    "profit_factor": 0.848,
+    "t_day": -1.96,
+    "net": -47.8,
+    "months_positive": 17,
+    "months": 36
+   },
+   "funding_r_avg": 0.0008,
+   "gross_ret_avg_bp": -6.8,
+   "exits": {
+    "time": 3439,
+    "BE/trail": 151,
+    "SL": 140,
+    "funding": 257,
+    "time3x": 29,
+    "end": 13
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_168h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 24,
+    "sl_atr": 2.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 7777,
+    "win_rate": 47.6,
+    "avg_r": -0.0072,
+    "profit_factor": 0.94,
+    "t_day": -1.67,
+    "net": -56.1,
+    "months_positive": 12,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 2484,
+     "win_rate": 49.6,
+     "avg_r": 0.0014,
+     "profit_factor": 1.013,
+     "t_day": 0.17,
+     "net": 3.5,
+     "months_positive": 8,
+     "months": 12
+    },
+    "2023": {
+     "n": 2688,
+     "win_rate": 45.1,
+     "avg_r": -0.0121,
+     "profit_factor": 0.901,
+     "t_day": -1.65,
+     "net": -32.5,
+     "months_positive": 2,
+     "months": 12
+    },
+    "2024": {
+     "n": 2605,
+     "win_rate": 48.3,
+     "avg_r": -0.0104,
+     "profit_factor": 0.919,
+     "t_day": -1.5,
+     "net": -27.1,
+     "months_positive": 2,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 3808,
+    "win_rate": 47.2,
+    "avg_r": -0.0036,
+    "profit_factor": 0.973,
+    "t_day": -0.4,
+    "net": -13.8,
+    "months_positive": 13,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 3969,
+    "win_rate": 48.0,
+    "avg_r": -0.0106,
+    "profit_factor": 0.9,
+    "t_day": -1.49,
+    "net": -42.3,
+    "months_positive": 16,
+    "months": 36
+   },
+   "funding_r_avg": 0.0003,
+   "gross_ret_avg_bp": 5.6,
+   "exits": {
+    "time": 7269,
+    "SL": 126,
+    "BE/trail": 113,
+    "time3x": 97,
+    "funding": 164,
+    "end": 8
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_168h_rank",
+    "mode": "rev",
+    "q": 0.2,
+    "hold_h": 24,
+    "sl_atr": 2.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 8090,
+    "win_rate": 49.5,
+    "avg_r": -0.0187,
+    "profit_factor": 0.852,
+    "t_day": -4.99,
+    "net": -151.3,
+    "months_positive": 3,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 2600,
+     "win_rate": 48.6,
+     "avg_r": -0.0178,
+     "profit_factor": 0.851,
+     "t_day": -2.81,
+     "net": -46.2,
+     "months_positive": 1,
+     "months": 12
+    },
+    "2023": {
+     "n": 2757,
+     "win_rate": 50.4,
+     "avg_r": -0.0169,
+     "profit_factor": 0.864,
+     "t_day": -2.6,
+     "net": -46.5,
+     "months_positive": 2,
+     "months": 12
+    },
+    "2024": {
+     "n": 2733,
+     "win_rate": 49.6,
+     "avg_r": -0.0214,
+     "profit_factor": 0.84,
+     "t_day": -3.23,
+     "net": -58.6,
+     "months_positive": 0,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 4088,
+    "win_rate": 48.9,
+    "avg_r": -0.0152,
+    "profit_factor": 0.861,
+    "t_day": -2.04,
+    "net": -62.0,
+    "months_positive": 12,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 4002,
+    "win_rate": 50.2,
+    "avg_r": -0.0223,
+    "profit_factor": 0.844,
+    "t_day": -2.69,
+    "net": -89.3,
+    "months_positive": 16,
+    "months": 36
+   },
+   "funding_r_avg": 0.0003,
+   "gross_ret_avg_bp": -17.1,
+   "exits": {
+    "time": 7434,
+    "time3x": 72,
+    "funding": 162,
+    "BE/trail": 197,
+    "SL": 217,
+    "end": 8
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_168h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 3668,
+    "win_rate": 48.4,
+    "avg_r": -0.0031,
+    "profit_factor": 0.977,
+    "t_day": -0.45,
+    "net": -11.4,
+    "months_positive": 20,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 1181,
+     "win_rate": 51.3,
+     "avg_r": 0.0101,
+     "profit_factor": 1.084,
+     "t_day": 0.84,
+     "net": 11.9,
+     "months_positive": 10,
+     "months": 13
+    },
+    "2023": {
+     "n": 1263,
+     "win_rate": 46.2,
+     "avg_r": -0.0131,
+     "profit_factor": 0.907,
+     "t_day": -1.24,
+     "net": -16.5,
+     "months_positive": 6,
+     "months": 13
+    },
+    "2024": {
+     "n": 1224,
+     "win_rate": 47.8,
+     "avg_r": -0.0055,
+     "profit_factor": 0.963,
+     "t_day": -0.41,
+     "net": -6.8,
+     "months_positive": 5,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 1781,
+    "win_rate": 46.5,
+    "avg_r": 0.0082,
+    "profit_factor": 1.056,
+    "t_day": 0.57,
+    "net": 14.7,
+    "months_positive": 15,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 1887,
+    "win_rate": 50.1,
+    "avg_r": -0.0138,
+    "profit_factor": 0.891,
+    "t_day": -1.3,
+    "net": -26.1,
+    "months_positive": 19,
+    "months": 36
+   },
+   "funding_r_avg": 0.0009,
+   "gross_ret_avg_bp": 11.6,
+   "exits": {
+    "time": 3168,
+    "SL": 96,
+    "BE/trail": 152,
+    "time3x": 15,
+    "end": 12,
+    "funding": 225
+   }
+  },
+  {
+   "round": "1",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_168h_rank",
+    "mode": "rev",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 3756,
+    "win_rate": 50.7,
+    "avg_r": -0.0118,
+    "profit_factor": 0.916,
+    "t_day": -1.71,
+    "net": -44.4,
+    "months_positive": 11,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 1207,
+     "win_rate": 50.0,
+     "avg_r": -0.0159,
+     "profit_factor": 0.877,
+     "t_day": -1.47,
+     "net": -19.2,
+     "months_positive": 3,
+     "months": 13
+    },
+    "2023": {
+     "n": 1269,
+     "win_rate": 50.6,
+     "avg_r": -0.0078,
+     "profit_factor": 0.943,
+     "t_day": -0.65,
+     "net": -9.9,
+     "months_positive": 3,
+     "months": 13
+    },
+    "2024": {
+     "n": 1280,
+     "win_rate": 51.4,
+     "avg_r": -0.0119,
+     "profit_factor": 0.922,
+     "t_day": -0.93,
+     "net": -15.3,
+     "months_positive": 5,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 1896,
+    "win_rate": 49.4,
+    "avg_r": -0.0006,
+    "profit_factor": 0.995,
+    "t_day": -0.06,
+    "net": -1.2,
+    "months_positive": 14,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 1860,
+    "win_rate": 52.0,
+    "avg_r": -0.0232,
+    "profit_factor": 0.855,
+    "t_day": -1.83,
+    "net": -43.1,
+    "months_positive": 15,
+    "months": 36
+   },
+   "funding_r_avg": 0.0007,
+   "gross_ret_avg_bp": -21.9,
+   "exits": {
+    "time": 3183,
+    "BE/trail": 142,
+    "funding": 242,
+    "time3x": 24,
+    "SL": 153,
+    "end": 12
+   }
+  },
+  {
+   "round": "2",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_168h_rank",
+    "mode": "mom",
+    "q": 0.1,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 1989,
+    "win_rate": 48.6,
+    "avg_r": -0.0032,
+    "profit_factor": 0.976,
+    "t_day": -0.37,
+    "net": -6.4,
+    "months_positive": 17,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 639,
+     "win_rate": 52.1,
+     "avg_r": 0.0098,
+     "profit_factor": 1.082,
+     "t_day": 0.67,
+     "net": 6.2,
+     "months_positive": 6,
+     "months": 12
+    },
+    "2023": {
+     "n": 683,
+     "win_rate": 47.1,
+     "avg_r": -0.0029,
+     "profit_factor": 0.978,
+     "t_day": -0.2,
+     "net": -2.0,
+     "months_positive": 6,
+     "months": 13
+    },
+    "2024": {
+     "n": 667,
+     "win_rate": 46.8,
+     "avg_r": -0.0159,
+     "profit_factor": 0.896,
+     "t_day": -1.0,
+     "net": -10.6,
+     "months_positive": 5,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 943,
+    "win_rate": 47.4,
+    "avg_r": 0.0075,
+    "profit_factor": 1.05,
+    "t_day": 0.42,
+    "net": 7.0,
+    "months_positive": 16,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 1046,
+    "win_rate": 49.7,
+    "avg_r": -0.0128,
+    "profit_factor": 0.897,
+    "t_day": -1.08,
+    "net": -13.4,
+    "months_positive": 18,
+    "months": 36
+   },
+   "funding_r_avg": 0.0012,
+   "gross_ret_avg_bp": 13.2,
+   "exits": {
+    "time": 1721,
+    "SL": 50,
+    "BE/trail": 79,
+    "funding": 126,
+    "end": 6,
+    "time3x": 7
+   }
+  },
+  {
+   "round": "2",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_168h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003,
+    "cond": "disp>0.0217"
+   },
+   "all": {
+    "n": 2268,
+    "win_rate": 48.5,
+    "avg_r": -0.0007,
+    "profit_factor": 0.995,
+    "t_day": -0.07,
+    "net": -1.7,
+    "months_positive": 14,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 795,
+     "win_rate": 52.1,
+     "avg_r": 0.0059,
+     "profit_factor": 1.043,
+     "t_day": 0.33,
+     "net": 4.7,
+     "months_positive": 7,
+     "months": 12
+    },
+    "2023": {
+     "n": 585,
+     "win_rate": 45.3,
+     "avg_r": -0.0162,
+     "profit_factor": 0.896,
+     "t_day": -0.94,
+     "net": -9.5,
+     "months_positive": 2,
+     "months": 13
+    },
+    "2024": {
+     "n": 888,
+     "win_rate": 47.5,
+     "avg_r": 0.0035,
+     "profit_factor": 1.024,
+     "t_day": 0.22,
+     "net": 3.1,
+     "months_positive": 5,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 1104,
+    "win_rate": 47.7,
+    "avg_r": 0.0247,
+    "profit_factor": 1.165,
+    "t_day": 1.21,
+    "net": 27.3,
+    "months_positive": 20,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 1164,
+    "win_rate": 49.3,
+    "avg_r": -0.0249,
+    "profit_factor": 0.826,
+    "t_day": -1.66,
+    "net": -29.0,
+    "months_positive": 15,
+    "months": 36
+   },
+   "funding_r_avg": 0.0012,
+   "gross_ret_avg_bp": 23.5,
+   "exits": {
+    "time": 1910,
+    "SL": 81,
+    "BE/trail": 107,
+    "funding": 162,
+    "time3x": 8
+   }
+  },
+  {
+   "round": "2",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_168h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 1.5,
+    "fund_max": 0.0003
+   },
+   "all": {
+    "n": 3478,
+    "win_rate": 47.4,
+    "avg_r": -0.0053,
+    "profit_factor": 0.98,
+    "t_day": -0.34,
+    "net": -18.5,
+    "months_positive": 18,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 1102,
+     "win_rate": 50.5,
+     "avg_r": 0.0233,
+     "profit_factor": 1.099,
+     "t_day": 0.83,
+     "net": 25.7,
+     "months_positive": 9,
+     "months": 13
+    },
+    "2023": {
+     "n": 1217,
+     "win_rate": 44.7,
+     "avg_r": -0.0371,
+     "profit_factor": 0.867,
+     "t_day": -1.5,
+     "net": -45.2,
+     "months_positive": 3,
+     "months": 13
+    },
+    "2024": {
+     "n": 1159,
+     "win_rate": 47.4,
+     "avg_r": 0.0008,
+     "profit_factor": 1.003,
+     "t_day": 0.03,
+     "net": 1.0,
+     "months_positive": 7,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 1709,
+    "win_rate": 45.9,
+    "avg_r": 0.0132,
+    "profit_factor": 1.046,
+    "t_day": 0.46,
+    "net": 22.5,
+    "months_positive": 17,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 1769,
+    "win_rate": 48.9,
+    "avg_r": -0.0232,
+    "profit_factor": 0.908,
+    "t_day": -1.0,
+    "net": -41.0,
+    "months_positive": 17,
+    "months": 36
+   },
+   "funding_r_avg": 0.0011,
+   "gross_ret_avg_bp": 10.3,
+   "exits": {
+    "SL": 562,
+    "time": 2331,
+    "time3x": 76,
+    "BE/trail": 337,
+    "end": 12,
+    "funding": 160
+   }
+  },
+  {
+   "round": "2",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_168h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003,
+    "cond": "btc_not_down"
+   },
+   "all": {
+    "n": 2897,
+    "win_rate": 48.9,
+    "avg_r": 0.0014,
+    "profit_factor": 1.01,
+    "t_day": 0.17,
+    "net": 4.0,
+    "months_positive": 18,
+    "months": 35
+   },
+   "by_year": {
+    "2022": {
+     "n": 870,
+     "win_rate": 51.6,
+     "avg_r": 0.0159,
+     "profit_factor": 1.134,
+     "t_day": 1.08,
+     "net": 13.8,
+     "months_positive": 9,
+     "months": 12
+    },
+    "2023": {
+     "n": 1029,
+     "win_rate": 47.1,
+     "avg_r": -0.0055,
+     "profit_factor": 0.961,
+     "t_day": -0.45,
+     "net": -5.7,
+     "months_positive": 5,
+     "months": 12
+    },
+    "2024": {
+     "n": 998,
+     "win_rate": 48.3,
+     "avg_r": -0.0042,
+     "profit_factor": 0.973,
+     "t_day": -0.29,
+     "net": -4.2,
+     "months_positive": 5,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 1389,
+    "win_rate": 47.4,
+    "avg_r": 0.0207,
+    "profit_factor": 1.144,
+    "t_day": 1.28,
+    "net": 28.8,
+    "months_positive": 17,
+    "months": 35
+   },
+   "SHORT": {
+    "n": 1508,
+    "win_rate": 50.2,
+    "avg_r": -0.0164,
+    "profit_factor": 0.878,
+    "t_day": -1.31,
+    "net": -24.8,
+    "months_positive": 17,
+    "months": 35
+   },
+   "funding_r_avg": 0.0009,
+   "gross_ret_avg_bp": 18.0,
+   "exits": {
+    "time": 2493,
+    "SL": 73,
+    "BE/trail": 128,
+    "end": 8,
+    "funding": 185,
+    "time3x": 10
+   }
+  },
+  {
+   "round": "2",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_24h_rank",
+    "mode": "mom",
+    "q": 0.2,
+    "hold_h": 72,
+    "sl_atr": 3.0,
+    "fund_max": 0.0003,
+    "cond": "volrank>0.5"
+   },
+   "all": {
+    "n": 2408,
+    "win_rate": 49.2,
+    "avg_r": 0.0047,
+    "profit_factor": 1.034,
+    "t_day": 0.46,
+    "net": 11.4,
+    "months_positive": 16,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 758,
+     "win_rate": 49.3,
+     "avg_r": 0.0021,
+     "profit_factor": 1.016,
+     "t_day": 0.13,
+     "net": 1.6,
+     "months_positive": 6,
+     "months": 13
+    },
+    "2023": {
+     "n": 819,
+     "win_rate": 49.6,
+     "avg_r": 0.0146,
+     "profit_factor": 1.108,
+     "t_day": 0.85,
+     "net": 12.0,
+     "months_positive": 8,
+     "months": 13
+    },
+    "2024": {
+     "n": 831,
+     "win_rate": 48.7,
+     "avg_r": -0.0026,
+     "profit_factor": 0.982,
+     "t_day": -0.14,
+     "net": -2.2,
+     "months_positive": 4,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 1428,
+    "win_rate": 46.8,
+    "avg_r": 0.0084,
+    "profit_factor": 1.058,
+    "t_day": 0.52,
+    "net": 12.0,
+    "months_positive": 14,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 980,
+    "win_rate": 52.8,
+    "avg_r": -0.0007,
+    "profit_factor": 0.995,
+    "t_day": -0.05,
+    "net": -0.7,
+    "months_positive": 21,
+    "months": 36
+   },
+   "funding_r_avg": 0.0003,
+   "gross_ret_avg_bp": 12.5,
+   "exits": {
+    "time": 2080,
+    "BE/trail": 117,
+    "SL": 72,
+    "time3x": 10,
+    "end": 6,
+    "funding": 123
+   }
+  },
+  {
+   "round": "2",
+   "config": {
+    "screen": "xs_rank_v1",
+    "universe": "extended",
+    "decide_h": 0,
+    "signal": "ret_24h_rank",
+    "mode": "rev",
+    "q": 0.2,
+    "hold_h": 24,
+    "sl_atr": 2.0,
+    "fund_max": 0.0003,
+    "cond": "volrank<0.5"
+   },
+   "all": {
+    "n": 3558,
+    "win_rate": 49.9,
+    "avg_r": -0.0131,
+    "profit_factor": 0.888,
+    "t_day": -2.3,
+    "net": -46.7,
+    "months_positive": 12,
+    "months": 36
+   },
+   "by_year": {
+    "2022": {
+     "n": 1135,
+     "win_rate": 50.2,
+     "avg_r": -0.0036,
+     "profit_factor": 0.967,
+     "t_day": -0.38,
+     "net": -4.0,
+     "months_positive": 5,
+     "months": 12
+    },
+    "2023": {
+     "n": 1204,
+     "win_rate": 50.9,
+     "avg_r": -0.0124,
+     "profit_factor": 0.897,
+     "t_day": -1.29,
+     "net": -14.9,
+     "months_positive": 4,
+     "months": 12
+    },
+    "2024": {
+     "n": 1219,
+     "win_rate": 48.6,
+     "avg_r": -0.0228,
+     "profit_factor": 0.818,
+     "t_day": -2.17,
+     "net": -27.8,
+     "months_positive": 3,
+     "months": 12
+    }
+   },
+   "LONG": {
+    "n": 2003,
+    "win_rate": 49.2,
+    "avg_r": -0.0178,
+    "profit_factor": 0.846,
+    "t_day": -2.01,
+    "net": -35.7,
+    "months_positive": 12,
+    "months": 36
+   },
+   "SHORT": {
+    "n": 1555,
+    "win_rate": 50.9,
+    "avg_r": -0.0071,
+    "profit_factor": 0.941,
+    "t_day": -0.7,
+    "net": -11.1,
+    "months_positive": 17,
+    "months": 36
+   },
+   "funding_r_avg": 0.0003,
+   "gross_ret_avg_bp": -3.1,
+   "exits": {
+    "time": 3334,
+    "time3x": 32,
+    "BE/trail": 55,
+    "funding": 71,
+    "SL": 61,
+    "end": 5
+   }
+  }
+ ]
+}
