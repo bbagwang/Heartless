@@ -405,15 +405,16 @@ class TelegramBot:
         if not app.challengers:
             return "활성 챌린저가 없습니다 (다음 리서치 사이클에서 생성)"
         lines = ["<b>챌린저</b>"]
-        from heartless.execution.stats import summarize
+        from heartless.execution.stats import r_stats, summarize
         from heartless.learning.research import describe_decision
 
         champ = summarize(app.store.load_trades(engine="paper", since=min(c.started for c in app.challengers)))
         lines.append(f"챔피언(paper) n={champ['n']} avgR {champ['avg_r']:+.2f} net {champ['net']:+.1f}")
         for c in app.challengers:
-            st = summarize(app.store.load_trades(engine=c.name, since=c.started))
+            trades = app.store.load_trades(engine=c.name, since=c.started)
+            st, rs = summarize(trades), r_stats(trades)  # PF in R, like the promotion rules
             lines.append(f"<code>{F.esc(c.name)}</code> [{F.esc(c.source)}] {F.esc(c.params.version)} · 시작 {fmt_ts(c.started, self.s.timezone, '%m-%d %H:%M')}\n"
-                         f"  n={st['n']} avgR {st['avg_r']:+.2f} PF {min(st['profit_factor'], 99):.2f} net {st['net']:+.1f}")
+                         f"  n={st['n']} (청산일 {rs['days']}일) avgR {st['avg_r']:+.2f} PF(R) {min(rs['pf_r'], 99):.2f} net {st['net']:+.1f}")
             d = app.research.last_decisions.get(c.name)
             if d:
                 lines.append(f"  판정 {F.esc(d.get('verdict'))} ({F.esc(d.get('rule'))}, "
