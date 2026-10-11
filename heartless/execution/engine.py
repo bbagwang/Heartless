@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -32,6 +33,8 @@ log = logging.getLogger(__name__)
 CLOSE_RETRY_MS = 10_000
 # order states after which executedQty can no longer change
 TERMINAL_ORDER_STATES = ("FILLED", "CANCELED", "EXPIRED", "REJECTED")
+# entry decisions kept per symbol for the owner's /why and the dashboard (memory only, newest last)
+DECISION_LOG_PER_SYMBOL = 5
 
 
 @dataclass
@@ -82,6 +85,9 @@ class TradingEngine:
         self.entries_enabled = True
         self.tag = "".join(ch for ch in name.upper() if ch.isalnum())[:4]
         self._last_exit_ts: dict[str, int] = {}  # symbol -> clock() of the last finalize/cancel (reconcile freshness)
+        # symbol -> the latest entry decisions that had at least one signal (what was considered, the outcome and why):
+        # the answer to "why did / didn't it trade". Only persisted engines keep it; backtests pay nothing
+        self.decision_log: dict[str, deque] | None = {} if self.persist else None
 
     # --- lifecycle -----------------------------------------------------------------------------
     async def start(self) -> None:
@@ -143,13 +149,46 @@ class TradingEngine:
             return
         decision = self.ensemble.decide(view, ctx)
         if decision is None:
+            if self.decision_log is not None and self.ensemble.last_signals.get(ctx.symbol):
+                self._log_decision(ctx, None, "ensemble", self._ensemble_pass_reason(ctx.symbol))
             return
         equity = await self.equity()
         allowed, why = self.risk.can_open(decision, self.open_positions(), now, equity)
         if not allowed:
             self.stats.skipped[why.split(":")[0]] = self.stats.skipped.get(why.split(":")[0], 0) + 1
+            if self.decision_log is not None:
+                self._log_decision(ctx, decision, "risk", why)
             return
+        before, skipped = self.positions.get(ctx.symbol), dict(self.stats.skipped)
         await self._open(decision, view, ctx, equity)
+        if self.decision_log is not None:
+            pos = self.positions.get(ctx.symbol)
+            if pos is not None and pos is not before and pos.status is not PositionStatus.CANCELLED:
+                self._log_decision(ctx, decision, "opened", pos.entry_style)
+            else:  # _open counts each skip it makes in stats.skipped: the counter that moved names the reason
+                moved = [k for k, v in self.stats.skipped.items() if v != skipped.get(k, 0)]
+                self._log_decision(ctx, decision, "execution", moved[0] if moved else "entry not placed")
+
+    def _ensemble_pass_reason(self, symbol: str) -> str:
+        """Why Ensemble.decide passed on the symbol's signals without recomputing its scores (the bandit weight is a
+        Thompson draw: drawing again would move the RNG stream). One side only can fail just the entry threshold;
+        signals on both sides may also have vetoed each other."""
+        sides = {s.side for s in self.ensemble.last_signals.get(symbol) or []}
+        return "threshold" if len(sides) <= 1 else "conflict or threshold"
+
+    def _log_decision(self, ctx: Context, decision: Decision | None, stage: str, why: str) -> None:
+        """Append a compact record of one entry decision (stage: 'ensemble' | 'risk' | 'execution' rejected it, or
+        'opened'). Plain values only: it is read by Telegram, the web JSON and tests."""
+        sigs = self.ensemble.last_signals.get(ctx.symbol) or []
+        rec = {"ts": self.clock(), "engine": self.name, "symbol": ctx.symbol,
+               "regime": getattr(ctx.regime, "value", ctx.regime),
+               "stage": stage, "why": why, "threshold": self.params.ensemble.get("entry_threshold"),
+               "signals": [{"alpha": s.alpha, "side": s.side.value, "confidence": round(float(s.confidence), 3),
+                            "reason": str(s.reason)[:200]} for s in sigs[:6]]}
+        if decision is not None:
+            rec["decision"] = {"side": decision.side.value, "alphas": list(decision.alphas),
+                               "score": round(float(decision.score), 3), "expected_r": round(float(decision.expected_r), 2)}
+        self.decision_log.setdefault(ctx.symbol, deque(maxlen=DECISION_LOG_PER_SYMBOL)).append(rec)
 
     async def on_equity_tick(self) -> None:
         """Periodic: refresh equity, risk anchors, persist equity curve."""
