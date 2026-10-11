@@ -10,7 +10,8 @@ import numpy as np
 from heartless.config import Settings
 from heartless.core.models import Candle, Regime, SymbolInfo, Ticker
 from heartless.data.candles import CandleArrays
-from heartless.data.extras import MetricsSeries
+from heartless.data.context import EMPTY, ContextTable
+from heartless.data.extras import AVAILABLE_AFTER_MS, MetricsSeries
 from heartless.data.features import MarketView
 from heartless.exchange.base import OrderResult
 from heartless.exchange.paper import PaperAccount, PaperOrder
@@ -86,13 +87,18 @@ class BarPaperAccount(PaperAccount):
 
 class Backtester:
     def __init__(self, settings: Settings, symbols: dict[str, SymbolInfo], candles: dict[str, CandleArrays],
-                 funding: dict[str, list[tuple[int, float]]] | None = None, metrics: dict | None = None):
+                 funding: dict[str, list[tuple[int, float]]] | None = None, metrics: dict | None = None,
+                 market: ContextTable | None = None):
         self.s = settings
         self.symbols = symbols
         self.candles = {s: c for s, c in candles.items() if c.n > 300}
         self.funding = funding or {}
         self.metrics = metrics or {}  # symbol -> MetricsSeries (open interest / long-short ratios)
+        # stored market context rows (data/context.py) -> Context.market; None: alphas see an empty mapping
+        self.market = market
         self._extras_cache: dict[str, tuple[int, dict]] = {}
+        self._extras_bounds: dict[str, tuple[int, int, int]] = {}  # symbol -> (usable row, valid from, valid until)
+        self._fund_cache: dict[str, tuple] = {}  # symbol -> cached settlement neighbourhood (_upcoming_funding_rate)
         self.views: dict[str, MarketView] = {}
         self.now = 0
         self._timeline: np.ndarray | None = None
@@ -119,11 +125,21 @@ class Backtester:
         return MetaLabeler(min_samples=getattr(self.s, "meta_min_samples", 120))  # starts empty: walk-forward
 
     def _extras(self, sym: str, t: int) -> dict:
-        """Positioning snapshot at t, recomputed only when a new 5-minute metrics row becomes usable."""
+        """Positioning snapshot at t, recomputed only when a new 5-minute metrics row becomes usable.
+
+        The usable row index (ms._idx(t)) only changes when t passes the next row's availability time, so the bar
+        loop keeps that interval per symbol instead of searching the metrics series on every bar."""
         ms = self.metrics.get(sym)
         if ms is None or len(ms) == 0:
             return {}
-        idx = ms._idx(t)
+        b = self._extras_bounds.get(sym)
+        if b is not None and b[1] <= t < b[2]:
+            idx = b[0]
+        else:
+            idx = ms._idx(t)
+            lo = int(ms.ts[idx]) + AVAILABLE_AFTER_MS if idx >= 0 else -(2**62)
+            hi = int(ms.ts[idx + 1]) + AVAILABLE_AFTER_MS if idx + 1 < len(ms) else 2**62
+            self._extras_bounds[sym] = (idx, lo, hi)
         cached = self._extras_cache.get(sym)
         if cached is not None and cached[0] == idx and idx >= 0:
             snap = cached[1]
@@ -157,13 +173,23 @@ class Backtester:
         rows = self.funding.get(sym)
         if not rows:
             return 0.0
-        idx = int(np.searchsorted(self._fund_idx[sym], t, side="right"))  # first row strictly after t
-        prev = rows[idx - 1][1] if idx >= 1 else 0.0
-        next_due = (t // FUNDING_INTERVAL + 1) * FUNDING_INTERVAL
-        if idx >= len(rows) or rows[idx][0] >= next_due + FUNDING_INTERVAL // 2:
+        bucket = t // FUNDING_INTERVAL
+        c = self._fund_cache.get(sym)
+        if c is None or not (c[0] == bucket and c[1] <= t < c[2]):
+            # the neighbourhood (previous settled rate, next row) is constant between two stored settlements and the
+            # due time within one 8h bucket, so it is looked up once per change instead of on every bar
+            idx = int(np.searchsorted(self._fund_idx[sym], t, side="right"))  # first row strictly after t
+            prev = rows[idx - 1][1] if idx >= 1 else 0.0
+            next_due = (bucket + 1) * FUNDING_INTERVAL
+            nxt = None if (idx >= len(rows) or rows[idx][0] >= next_due + FUNDING_INTERVAL // 2) else rows[idx][1]
+            lo = rows[idx - 1][0] if idx >= 1 else -(2**62)
+            hi = rows[idx][0] if idx < len(rows) else 2**62
+            c = self._fund_cache[sym] = (bucket, lo, hi, prev, nxt)
+        prev, nxt = c[3], c[4]
+        if nxt is None:
             return prev
         w = (t % FUNDING_INTERVAL) / FUNDING_INTERVAL
-        return (1 - w) * prev + w * rows[idx][1]
+        return (1 - w) * prev + w * nxt
 
     def run(self, params: StrategyParams, start: int | None = None, end: int | None = None, only_alpha: str | None = None,
             initial_balance: float = 10_000.0, bandit: AlphaBandit | None = None) -> BacktestResult:
@@ -232,7 +258,7 @@ class Backtester:
                               btc_regime=btc_regime if sym != "BTCUSDT" else None,
                               oi_change=oi4 if oi4 is not None and oi4 == oi4 else None, now=t,
                               funding_rate=tk.funding_rate, minutes_to_funding=((bucket + 1) * FUNDING_INTERVAL - t) / MS_MINUTE,
-                              extras=extras)
+                              extras=extras, market=self.market.view(sym, t) if self.market is not None else EMPTY)
                 pos = engine.positions.get(sym)
                 if pos is not None:
                     pos.extra["last_mark"] = c.close
@@ -269,14 +295,18 @@ class Backtester:
 
 
 def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], since: int, until: int | None = None,
-                    symbol_list: list[str] | None = None, warmup_ms: int = 0, lookahead: bool = True) -> Backtester:
+                    symbol_list: list[str] | None = None, warmup_ms: int = 0, lookahead: bool = True,
+                    market: ContextTable | str | None = "auto") -> Backtester:
     """Build a Backtester from candles stored in the DB.
 
     Window use (an evaluation over [since, until], e.g. `heartless backtest --start/--end`): `warmup_ms` also loads
     that much history before `since` so indicators are warm when the run starts at `since` (pass it as `arun(start=)`);
     `lookahead=False` reads nothing stamped after `until` - not even the next settlement's funding rate, which the
     default loads one interval past `until` - so a window that ends at a sealed period never touches it. With the
-    defaults (no warm-up, look-ahead on) the behaviour is unchanged."""
+    defaults (no warm-up, look-ahead on) the behaviour is unchanged.
+
+    `market="auto"` attaches the stored market context of the window when a current table exists (CONTEXT_DB or the
+    main database; nothing is built here), None runs without it, or pass a ContextTable."""
     syms = symbol_list or store.candle_symbols()
     lo = since - max(0, int(warmup_ms))
     candles: dict[str, CandleArrays] = {}
@@ -299,4 +329,24 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
             mrows = store.load_metrics(s, lo - 2 * 86_400_000, until)
             if mrows:
                 metrics[s] = MetricsSeries.from_rows(mrows)
-    return Backtester(settings, symbols, candles, funding, metrics)
+    if isinstance(market, str):
+        market = stored_context(settings, store, list(candles), lo, until if until is not None else 2**62)
+    return Backtester(settings, symbols, candles, funding, metrics, market)
+
+
+def stored_context(settings: Settings, store, symbols: list[str], start: int, end: int) -> ContextTable | None:
+    """Stored context rows for a window from CONTEXT_DB (when set and present) or the main store, else None."""
+    from pathlib import Path
+
+    path = getattr(settings, "context_db", "") or ""
+    if not path:
+        return ContextTable.load(store, symbols, start, end) if hasattr(store, "has_market_context") else None
+    if not Path(path).exists():
+        return None
+    from heartless.core.store import Store
+
+    ctx_store = Store(path)
+    try:
+        return ContextTable.load(ctx_store, symbols, start, end)
+    finally:
+        ctx_store.close()

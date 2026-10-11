@@ -1,20 +1,28 @@
 """Alpha discovery: mine rule-based alphas from a library of scale-free features, with honest statistics.
 
 Pipeline
-1. `build_dataset()` aligns, for every decision bar (15m or 1h close) of every symbol, a vector of scale-free features
-   (oscillators, distances in ATR units, volatility ranks, flow, positioning from 5-minute metrics, time of day) and
-   the realised outcome of a fixed exit template (stop k*ATR, target r*stop, timeout) simulated on 1-minute bars
-   with the production cost model (entry at the next bar's open, taker fees, slippage, pessimistic stop-first fills).
+1. `build_dataset()` aligns, for every decision time of every symbol, a vector of scale-free features (oscillators,
+   distances in ATR units, volatility ranks, flow, positioning from 5-minute metrics, time of day and, optionally,
+   the market context of data/context.py: cross-sectional ranks / z-scores of returns, volume share, funding and OI
+   change, and market-wide BTC returns, trend, breadth, dispersion) and the realised outcome of fixed exit templates
+   simulated on 1-minute bars with the production cost model (entry at the next bar's open, taker fees, slippage,
+   pessimistic stop-first fills). Decision grids: every 15m or 1h close, or 00:00 UTC once a day ("1d"). Templates:
+   stop k*ATR / target r*stop / timeout, or a pure time exit (8h / 24h / 72h) behind a wide 4 ATR catastrophic stop.
+   Long windows are built as independent (symbol, calendar year) jobs, so memory is bounded by one symbol-year.
 2. `search()` explores conjunctions of 1-3 threshold conditions (quantile cut points learned on TRAIN only) by
-   beam search, ranks rules by the t-statistic of their R-multiples after removing overlapping trades, and keeps a
-   diverse set (low entry overlap).
-3. `validate()` re-measures the survivors on a later, untouched window. Because thousands of rules were tried, a
-   rule must clear a multiple-testing-aware bar on TRAIN (t >= max(3, sqrt(2 ln N))) *and* hold up on VALID.
+   beam search, long and short, over every template, ranks rules by the day-clustered t-statistic of their R minus
+   the same-month same-direction baseline (market drift earns nothing) after removing overlapping trades, and keeps
+   a diverse set (low entry overlap).
+3. `validate()` re-measures the survivors on a later, untouched window. A rule must clear the multiple-testing bar
+   t >= max(3, sqrt(2 ln N)) on TRAIN, N being the number of rules actually evaluated by the run (all grids,
+   templates, sides and depths together, plus any prior trials of the family), *and* hold up on VALID.
 
 The very same feature code evaluates a rule online (`rule_features_at()`), so a discovered rule behaves identically in
 the live bot, in the lab and in this miner. Survivors are shipped as data inside StrategyParams
 (alphas["discovered"]["rules"]) and traded by the `discovered` alpha; the champion/challenger loop decides whether a
-rule set ever reaches real money.
+rule set ever reaches real money. The defaults (15m/1h grid, stop/target templates, no market context) are what the
+live discovery cycle and the `discovered` alpha understand; the other grids, the time-exit templates and the context
+features are research options (`heartless discover --grid 1h,1d --templates all --context`).
 """
 from __future__ import annotations
 
@@ -22,16 +30,26 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import numpy as np
 
+from heartless.data.context import MARKET_FEATURES, SYMBOL_FEATURES
 from heartless.data.extras import AVAILABLE_AFTER_MS, MetricsSeries
 
-DECISION_TFS = ("15m", "1h")
+DECISION_TFS = ("15m", "1h")  # feature frames
 TF_MS = {"15m": 900_000, "1h": 3_600_000}
-# exit templates: (stop in ATR of the decision timeframe, target in R, timeout in minutes)
-TEMPLATES: tuple[tuple[float, float, int], ...] = ((1.0, 1.5, 240), (1.5, 2.0, 480), (2.0, 3.0, 720))
+GRIDS = ("15m", "1h", "1d")  # decision grids: every 15m / 1h close, or the 1h close at 00:00 UTC
+GRID_ATR_TF = {"15m": "15m", "1h": "1h", "1d": "1h"}  # ATR that sizes a grid's stops
+DAY_MS = 86_400_000
+# exit templates: (stop in ATR of the grid's timeframe, target in R or None for a pure time exit, timeout in minutes)
+TEMPLATES: tuple[tuple[float, float | None, int], ...] = (
+    (1.0, 1.5, 240), (1.5, 2.0, 480), (2.0, 3.0, 720),  # stop / target / timeout
+    (4.0, None, 480), (4.0, None, 1440), (4.0, None, 4320))  # time exit after 8h / 24h / 72h, catastrophic 4 ATR stop
+TEMPLATE_SETS = {"classic": (0, 1, 2), "time": (3, 4, 5), "all": (0, 1, 2, 3, 4, 5)}
 QUANTILES = (0.05, 0.1, 0.2, 0.3, 0.7, 0.8, 0.9, 0.95)
+WARMUP_MS = 22 * DAY_MS  # >= the live 1h feature window (520 bars), so mined and live indicator values agree
+SIM_BUDGET = 4_000_000  # elements per (entries x minutes) block of the exit simulation
 
 _FRAME_FEATURES = ("rsi14", "rsi7", "adx", "atr_rank", "bb_width_rank", "vol_z", "taker_ratio3", "cvd20", "hurst", "chop",
                    "body_ratio", "upper_wick", "lower_wick", "st_dir")
@@ -51,7 +69,10 @@ def feature_names() -> list[str]:
     return names
 
 
-FEATURES = feature_names()
+FEATURES = feature_names()  # the library the `discovered` alpha evaluates online
+# market context features ("c." the symbol's own cross-sectional features, "m." market-wide), appended for --context
+CONTEXT_FEATURES = [f"c.{n}" for n in SYMBOL_FEATURES] + [f"m.{n}" for n in MARKET_FEATURES]
+FEATURES_X = FEATURES + CONTEXT_FEATURES
 
 
 # --- feature computation (shared by mining and online evaluation) --------------------------------------------------
@@ -207,11 +228,13 @@ class CostModel:
 
 
 def simulate_template(o1: np.ndarray, h1: np.ndarray, l1: np.ndarray, c1: np.ndarray, entry_idx: np.ndarray,
-                      atr: np.ndarray, side: int, sl_atr: float, tp_r: float, hold_min: int, cost: CostModel,
-                      chunk: int = 4000) -> tuple[np.ndarray, np.ndarray]:
+                      atr: np.ndarray, side: int, sl_atr: float, tp_r: float | None, hold_min: int, cost: CostModel,
+                      chunk: int | None = None) -> tuple[np.ndarray, np.ndarray]:
     """R multiple and exit 1m-index for entries at the open of 1m bar `entry_idx` (vectorised, pessimistic).
 
-    R is net of fees/slippage and expressed against the engine's risk unit (stop distance + round-trip costs)."""
+    R is net of fees/slippage and expressed against the engine's risk unit (stop distance + round-trip costs).
+    `tp_r=None` has no target: the trade leaves at the stop or at the close of its last minute. Entries are simulated
+    in blocks of at most SIM_BUDGET (entries x minutes) cells, so a 72h template does not allocate gigabytes."""
     n = len(entry_idx)
     r_out = np.full(n, np.nan)
     exit_out = np.full(n, -1, dtype=np.int64)
@@ -219,6 +242,7 @@ def simulate_template(o1: np.ndarray, h1: np.ndarray, l1: np.ndarray, c1: np.nda
     slip = (cost.slippage_bps + cost.half_spread_bps) / 1e4
     ok_all = (entry_idx >= 0) & (entry_idx < N1) & np.isfinite(atr) & (atr > 0)
     steps = np.arange(hold_min)
+    chunk = chunk or max(1, min(4000, SIM_BUDGET // max(hold_min, 1)))
     for s in range(0, n, chunk):
         sel = np.arange(s, min(n, s + chunk))
         sel = sel[ok_all[sel]]
@@ -228,21 +252,23 @@ def simulate_template(o1: np.ndarray, h1: np.ndarray, l1: np.ndarray, c1: np.nda
         entry = o1[e] * (1 + side * slip)
         dist = sl_atr * atr[sel]
         stop = entry - side * dist
-        tp = entry + side * tp_r * dist
         J = e[:, None] + steps[None, :]
         inside = J < N1
         Jc = np.minimum(J, N1 - 1)
-        lo = l1[Jc]
-        hi = h1[Jc]
-        if side > 0:
-            hit_s = (lo <= stop[:, None]) & inside
-            hit_t = (hi >= tp[:, None]) & inside
-        else:
-            hit_s = (hi >= stop[:, None]) & inside
-            hit_t = (lo <= tp[:, None]) & inside
         BIG = hold_min + 10
+        if side > 0:
+            hit_s = (l1[Jc] <= stop[:, None]) & inside
+        else:
+            hit_s = (h1[Jc] >= stop[:, None]) & inside
         fs = np.where(hit_s.any(axis=1), hit_s.argmax(axis=1), BIG)
-        ft = np.where(hit_t.any(axis=1), hit_t.argmax(axis=1), BIG)
+        if tp_r:
+            tp = entry + side * tp_r * dist
+            hit_t = ((h1[Jc] >= tp[:, None]) if side > 0 else (l1[Jc] <= tp[:, None])) & inside
+            ft = np.where(hit_t.any(axis=1), hit_t.argmax(axis=1), BIG)
+        else:
+            tp = entry
+            ft = np.full(len(sel), BIG)
+        del J, inside, Jc, hit_s
         last = np.minimum(hold_min - 1, (N1 - 1) - e)
         stop_first = fs <= ft  # same bar -> stop first (pessimistic)
         exit_px = np.where(fs < BIG, stop * (1 - side * cost.slippage_bps / 1e4), np.nan)
@@ -258,35 +284,72 @@ def simulate_template(o1: np.ndarray, h1: np.ndarray, l1: np.ndarray, c1: np.nda
 
 
 # --- dataset -----------------------------------------------------------------------------------------------------------
+def grid_times(frames: dict, grid: str, start: int, end: int) -> np.ndarray:
+    """Decision times of a grid inside [start, end]: frame close times, or the 1h close at 00:00 UTC for "1d"."""
+    fr = frames["1h" if grid == "1d" else grid]
+    ct = fr.close_time
+    t = ct[(ct >= start) & (ct <= end)].astype(np.int64)
+    if grid == "1d":
+        t = t[(t + 1) % DAY_MS == 0]
+    return t
+
+
+def _months(times: np.ndarray) -> np.ndarray:
+    if not len(times):
+        return np.zeros(0, dtype=np.int64)
+    m = times.astype("datetime64[ms]").astype("datetime64[M]").astype(np.int64)  # months since 1970-01
+    return (1970 + m // 12) * 100 + m % 12 + 1
+
+
 @dataclass
 class SymbolData:
     symbol: str
-    times: np.ndarray  # decision times (tf close times) for each decision tf
-    tf: str
+    times: np.ndarray  # decision times
+    tf: str  # decision grid
     X: np.ndarray  # (n, n_features)
     month: np.ndarray  # yyyymm int
     R: dict  # (template_idx, side) -> R array
-    EXIT: dict  # (template_idx, side) -> exit 1m index
-    entry_idx: np.ndarray
+    EXIT: dict  # (template_idx, side) -> open time of the exit minute (-1: no trade)
+    entry_t: np.ndarray  # open time of the entry minute (-1: no clean entry)
+    names: list = field(default_factory=lambda: list(FEATURES))
 
 
 @dataclass
 class Dataset:
     tf: str
     symbols: list[str]
-    X: np.ndarray
+    X: np.ndarray  # column-major (fast per-feature masks)
     times: np.ndarray
     sym_id: np.ndarray
     month: np.ndarray
     R: dict
     EXIT: dict
-    entry_idx: np.ndarray
+    entry_t: np.ndarray
     names: list[str] = field(default_factory=lambda: list(FEATURES))
+    templates: tuple = (0, 1, 2)
     _excess: dict = field(default_factory=dict)
+    _valid: dict = field(default_factory=dict)
+    _sorted: bool | None = None
 
     @property
     def day(self) -> np.ndarray:
-        return self.times // 86_400_000
+        return self.times // DAY_MS
+
+    @property
+    def presorted(self) -> bool:
+        """Whether the tradable rows are ordered by (symbol, entry), as merge() produces them."""
+        if self._sorted is None:
+            ok = self.entry_t >= 0
+            s, e = self.sym_id[ok], self.entry_t[ok]
+            ds_, de = np.diff(s), np.diff(e)
+            self._sorted = bool(np.all((ds_ > 0) | ((ds_ == 0) & (de > 0))))
+        return self._sorted
+
+    def valid(self, key: tuple) -> np.ndarray:
+        """Rows with a simulated trade for (template, side)."""
+        if key not in self._valid:
+            self._valid[key] = np.isfinite(self.R[key]) & (self.entry_t >= 0)
+        return self._valid[key]
 
     def excess(self, key: tuple) -> np.ndarray:
         """R minus the unconditional mean R of the same (template, side) in the same calendar month, pooled over
@@ -294,29 +357,32 @@ class Dataset:
         if key not in self._excess:
             R = self.R[key]
             ex = np.full(len(R), np.nan)
+            ok = self.valid(key)
             for mo in np.unique(self.month):
-                m = (self.month == mo) & np.isfinite(R) & (self.entry_idx >= 0)
+                m = (self.month == mo) & ok
                 if m.any():
                     ex[m] = R[m] - R[m].mean()
             self._excess[key] = ex
         return self._excess[key]
 
     def subset(self, mask: np.ndarray) -> "Dataset":
-        return Dataset(self.tf, self.symbols, self.X[mask], self.times[mask], self.sym_id[mask], self.month[mask],
-                       {k: v[mask] for k, v in self.R.items()}, {k: v[mask] for k, v in self.EXIT.items()},
-                       self.entry_idx[mask], self.names)
+        return Dataset(self.tf, self.symbols, np.asfortranarray(self.X[mask]), self.times[mask], self.sym_id[mask],
+                       self.month[mask], {k: v[mask] for k, v in self.R.items()},
+                       {k: v[mask] for k, v in self.EXIT.items()}, self.entry_t[mask], self.names, self.templates)
 
 
 def build_symbol(view, base_1m, ms: MetricsSeries | None, tf: str, start: int, end: int,
-                 cost: CostModel | None = None) -> SymbolData:
-    """Decision rows for one symbol from a MarketView rebuilt with live=False over the full history."""
+                 cost: CostModel | None = None, templates=(0, 1, 2), market=None) -> SymbolData:
+    """Decision rows for one symbol from a MarketView-like object rebuilt with live=False over the history.
+    `market` (a data.context.ContextTable) adds the context features; the names list follows."""
     cost = cost or CostModel()
-    fr = view.frames[tf]
-    ct = fr.close_time
-    sel = (ct >= start) & (ct <= end)
-    times = ct[sel].astype(np.int64)
+    times = grid_times(view.frames, tf, start, end)
     feats = features_at(view.frames, ms, times)
-    X = np.column_stack([feats[n] for n in FEATURES]) if len(times) else np.zeros((0, len(FEATURES)))
+    names = list(FEATURES)
+    if market is not None:
+        feats.update(market.columns(view.symbol, times))
+        names = list(FEATURES_X)
+    X = np.column_stack([feats[n] for n in names]) if len(times) else np.zeros((0, len(names)))
     o1, h1, l1, c1 = (base_1m.view(k) for k in ("open", "high", "low", "close"))
     ot1 = base_1m.view("open_time")
     entry_idx = np.searchsorted(ot1, times + 1, side="left").astype(np.int64)
@@ -324,30 +390,52 @@ def build_symbol(view, base_1m, ms: MetricsSeries | None, tf: str, start: int, e
     good = entry_idx >= 0
     good[good] &= ot1[entry_idx[good]] == times[good] + 1  # the very next minute must exist (no gap)
     entry_idx[~good] = -1
-    atr = feats[f"_{tf}.atr"]
+    entry_t = np.where(entry_idx >= 0, ot1[np.maximum(entry_idx, 0)] if len(ot1) else -1, -1).astype(np.int64)
+    atr = feats[f"_{GRID_ATR_TF[tf]}.atr"]
     R, EXIT = {}, {}
-    for ti, (sl, tp, hold) in enumerate(TEMPLATES):
+    for ti in templates:
+        sl, tp, hold = TEMPLATES[ti]
         for side in (1, -1):
             r, ex = simulate_template(o1, h1, l1, c1, entry_idx, atr, side, sl, tp, hold, cost)
             R[(ti, side)] = r
-            EXIT[(ti, side)] = ex
-    month = np.array([int(np.datetime64(int(t), "ms").astype("datetime64[M]").astype(str).replace("-", "")) for t in times],
-                     dtype=np.int64) if len(times) else np.zeros(0, dtype=np.int64)
-    return SymbolData(view.symbol, times, tf, X, month, R, EXIT, entry_idx)
+            EXIT[(ti, side)] = np.where(ex >= 0, ot1[np.maximum(ex, 0)] if len(ot1) else -1, -1).astype(np.int64)
+    return SymbolData(view.symbol, times, tf, X, _months(times), R, EXIT, entry_t, names)
 
 
-def merge(parts: list[SymbolData]) -> Dataset:
-    tf = parts[0].tf
-    syms = [p.symbol for p in parts]
-    X = np.vstack([p.X for p in parts])
-    times = np.concatenate([p.times for p in parts])
-    sym_id = np.concatenate([np.full(len(p.times), i, dtype=np.int64) for i, p in enumerate(parts)])
-    month = np.concatenate([p.month for p in parts])
-    keys = parts[0].R.keys()
-    R = {k: np.concatenate([p.R[k] for p in parts]) for k in keys}
-    EXIT = {k: np.concatenate([p.EXIT[k] for p in parts]) for k in keys}
-    entry = np.concatenate([p.entry_idx for p in parts])
-    return Dataset(tf, syms, X, times, sym_id, month, R, EXIT, entry)
+def merge(parts: list) -> Dataset:
+    """Concatenate (symbol, chunk) parts into one column-major dataset, releasing each part once copied (peak memory
+    is the dataset plus one part). Parts of the same symbol share a symbol id."""
+    parts = [p for p in parts if p is not None and len(p.times)]
+    if not parts:
+        raise RuntimeError("no data to build a discovery dataset")
+    tf, names = parts[0].tf, parts[0].names
+    syms = list(dict.fromkeys(p.symbol for p in parts))
+    sid = {s: i for i, s in enumerate(syms)}
+    n = sum(len(p.times) for p in parts)
+    keys = list(parts[0].R.keys())
+    X = np.empty((n, len(names)), order="F")
+    times = np.empty(n, dtype=np.int64)
+    sym_id = np.empty(n, dtype=np.int64)
+    month = np.empty(n, dtype=np.int64)
+    entry = np.empty(n, dtype=np.int64)
+    R = {k: np.empty(n) for k in keys}
+    EXIT = {k: np.empty(n, dtype=np.int64) for k in keys}
+    pos = 0
+    for i in range(len(parts)):
+        p = parts[i]
+        m = len(p.times)
+        X[pos:pos + m] = p.X
+        times[pos:pos + m] = p.times
+        sym_id[pos:pos + m] = sid[p.symbol]
+        month[pos:pos + m] = p.month
+        entry[pos:pos + m] = p.entry_t
+        for k in keys:
+            R[k][pos:pos + m] = p.R[k]
+            EXIT[k][pos:pos + m] = p.EXIT[k]
+        pos += m
+        parts[i] = None
+    tmpls = tuple(sorted({k[0] for k in keys}))
+    return Dataset(tf, syms, X, times, sym_id, month, R, EXIT, entry, list(names), tmpls)
 
 
 # --- rules -------------------------------------------------------------------------------------------------------------
@@ -378,31 +466,52 @@ class Rule:
         return d
 
 
-def rule_from_dict(d: dict, names: list[str] = FEATURES) -> Rule:
+def template_index(sl_atr: float, tp_r, hold_min: int) -> int:
+    for i, (sl, tp, hold) in enumerate(TEMPLATES):
+        same_tp = (tp is None and not tp_r) or (tp is not None and tp_r is not None and abs(tp - float(tp_r)) < 1e-9)
+        if abs(sl - float(sl_atr)) < 1e-9 and same_tp and hold == int(hold_min):
+            return i
+    return 0
+
+
+def rule_from_dict(d: dict, names: list[str] = FEATURES_X) -> Rule:
     idx = {n: i for i, n in enumerate(names)}
-    tmpl = next((i for i, t in enumerate(TEMPLATES) if abs(t[0] - d["sl_atr"]) < 1e-9 and abs(t[1] - d["tp_r"]) < 1e-9
-                 and t[2] == int(d["hold_min"])), 0)
     conds = tuple((idx[c[0]], c[1], float(c[2])) for c in d["conds"])
-    return Rule(1 if d["side"] == "LONG" else -1, tmpl, conds, d.get("tf", "15m"))
+    return Rule(1 if d["side"] == "LONG" else -1, template_index(d["sl_atr"], d.get("tp_r"), d["hold_min"]), conds,
+                d.get("tf", "15m"))
 
 
-def take_non_overlapping(rows: np.ndarray, exit_idx: np.ndarray, entry_idx: np.ndarray, sym_id: np.ndarray) -> np.ndarray:
-    """Greedy first-come selection per symbol: a rule holds at most one position per symbol at a time."""
+def take_non_overlapping(rows: np.ndarray, exit_t: np.ndarray, entry_t: np.ndarray, sym_id: np.ndarray,
+                         presorted: bool = False) -> np.ndarray:
+    """Greedy first-come selection per symbol: a rule holds at most one position per symbol at a time (the next entry
+    must start after the previous exit). Entries and exits are times (or any increasing index); `presorted` says the
+    rows are already ordered by (symbol, entry).
+
+    The greedy chain p -> next(p) is followed with pointer doubling (log2(trades) vectorised steps) instead of one
+    Python step per trade: the k-th kept trade is next^k(first)."""
     if len(rows) == 0:
         return rows
-    keep = []
-    order = np.lexsort((entry_idx[rows], sym_id[rows]))
-    rows = rows[order]
-    syms = sym_id[rows]
-    for s in np.unique(syms):
-        r = rows[syms == s]
-        ent = entry_idx[r]
-        pos = 0
-        while pos < len(r):
-            keep.append(r[pos])
-            nxt_entry = exit_idx[r[pos]] + 1
-            pos = int(np.searchsorted(ent, nxt_entry, side="left"), ) if nxt_entry > ent[pos] else pos + 1
-    return np.array(sorted(keep), dtype=np.int64)
+    r = rows if presorted else rows[np.lexsort((entry_t[rows], sym_id[rows]))]
+    s = np.asarray(sym_id[r], dtype=np.int64)
+    ent = np.asarray(entry_t[r], dtype=np.int64)
+    ex = np.asarray(exit_t[r], dtype=np.int64)
+    span = int(max(ent.max(), ex.max())) + 1
+    base = s - s.min()
+    key = base * span + ent  # sorted: symbol blocks, entries ascending inside
+    n = len(r)
+    # first position whose entry is after this exit; past the block it lands on the next symbol's first entry
+    jump = np.append(np.searchsorted(key, base * span + ex, side="right"), n)  # node n: past the end (absorbing)
+    chain = np.zeros(1, dtype=np.int64)  # next^k(0) for k < 2^i
+    parts = [chain]
+    while True:
+        step = jump[chain]
+        step = step[step < n]
+        if not len(step):
+            break
+        parts.append(step)
+        chain = np.concatenate((chain, step))
+        jump = jump[jump]
+    return np.sort(r[np.concatenate(parts)])
 
 
 def _clustered_t(values: np.ndarray, clusters: np.ndarray) -> tuple[float, int]:
@@ -427,36 +536,34 @@ def _clustered_t(values: np.ndarray, clusters: np.ndarray) -> tuple[float, int]:
 
 def rule_stats(ds: Dataset, rule: Rule, min_trades: int = 1) -> dict:
     key = (rule.tmpl, rule.side)
-    m = rule.mask(ds.X)
-    R = ds.R[key]
-    m &= np.isfinite(R) & (ds.entry_idx >= 0)
-    rows = np.flatnonzero(m)
-    rows = take_non_overlapping(rows, ds.EXIT[key], ds.entry_idx, ds.sym_id)
+    m = rule.mask(ds.X) & ds.valid(key)
+    rows = take_non_overlapping(np.flatnonzero(m), ds.EXIT[key], ds.entry_t, ds.sym_id, ds.presorted)
     n = len(rows)
     if n < max(min_trades, 2):
         return {"n": n, "avg_r": 0.0, "t": -99.0, "t_ex": -99.0, "avg_ex": 0.0, "pf": 0.0}
-    r = R[rows]
+    r = ds.R[key][rows]
     ex = ds.excess(key)[rows]
-    days = ds.day[rows]
+    days = ds.times[rows] // DAY_MS
     t_raw, ndays = _clustered_t(r, days)
     t_ex, _ = _clustered_t(ex, days)
     gw, gl = float(r[r > 0].sum()), float(-r[r <= 0].sum())
     syms = ds.sym_id[rows]
-    sym_pos = sum(1 for s_ in np.unique(syms) if ex[syms == s_].mean() > 0)
-    months = ds.month[rows]
-    mpos = mtot = 0
-    for mo in np.unique(months):
-        rr = ex[months == mo]
-        if len(rr) >= 3:
-            mtot += 1
-            mpos += rr.mean() > 0
+    s_sum = np.bincount(syms, weights=ex)
+    s_cnt = np.bincount(syms)
+    has = s_cnt > 0
+    sym_pos = int((s_sum[has] > 0).sum())
+    _, mo_inv = np.unique(ds.month[rows], return_inverse=True)
+    m_sum = np.bincount(mo_inv, weights=ex)
+    m_cnt = np.bincount(mo_inv)
+    full = m_cnt >= 3
+    mpos, mtot = int((m_sum[full] > 0).sum()), int(full.sum())
     # stability: thirds of the window in time, measured on excess R
-    order = np.argsort(ds.times[rows])
-    thirds = [ex[order][i::1][int(len(order) * a / 3):int(len(order) * (a + 1) / 3)] for i, a in ((0, 0), (0, 1), (0, 2))]
+    eo = ex[np.argsort(ds.times[rows], kind="stable")]
+    thirds = [eo[int(len(eo) * a / 3):int(len(eo) * (a + 1) / 3)] for a in range(3)]
     thirds_pos = sum(1 for t_ in thirds if len(t_) and t_.mean() > 0)
     return {"n": n, "days": int(ndays), "avg_r": float(r.mean()), "avg_ex": float(ex.mean()), "t": t_raw, "t_ex": t_ex,
-            "pf": gw / gl if gl > 0 else 99.0, "win": float((r > 0).mean()), "sym_pos": int(sym_pos),
-            "syms": int(len(np.unique(syms))), "months_pos": int(mpos), "months": int(mtot), "thirds_pos": int(thirds_pos)}
+            "pf": gw / gl if gl > 0 else 99.0, "win": float((r > 0).mean()), "sym_pos": sym_pos,
+            "syms": int(has.sum()), "months_pos": mpos, "months": mtot, "thirds_pos": int(thirds_pos)}
 
 
 # --- search ------------------------------------------------------------------------------------------------------------
@@ -498,7 +605,8 @@ def _score(st: dict, cfg: SearchConfig) -> float:
 
 
 def search(ds: Dataset, cfg: SearchConfig | None = None, progress=None) -> tuple[list[tuple[Rule, dict]], int]:
-    """Beam search over rule conjunctions on `ds` (TRAIN). Returns (ranked diverse rules with stats, rules tested)."""
+    """Beam search over rule conjunctions on `ds` (TRAIN). Returns (ranked diverse rules with stats, rules evaluated):
+    every distinct rule whose statistics were computed counts, whatever its trade count, side or template."""
     cfg = cfg or SearchConfig()
     cand_conds = thresholds(ds)
     tested = 0
@@ -506,7 +614,7 @@ def search(ds: Dataset, cfg: SearchConfig | None = None, progress=None) -> tuple
     beam: list[tuple[float, Rule, dict]] = []
     # depth 1: every single condition x side x template
     for side in (1, -1):
-        for ti in range(len(TEMPLATES)):
+        for ti in ds.templates:
             for c in cand_conds:
                 rule = Rule(side, ti, (c,), ds.tf)
                 st = rule_stats(ds, rule, cfg.min_trades)
@@ -517,7 +625,7 @@ def search(ds: Dataset, cfg: SearchConfig | None = None, progress=None) -> tuple
     pool = list(beam[: cfg.beam * 4])
     frontier = beam[: cfg.beam]
     if progress:
-        progress(f"depth 1: {tested} rules, best t={frontier[0][2]['t']:.2f}" if frontier else "depth 1: none")
+        progress(f"{ds.tf} depth 1: {tested} rules" if frontier else f"{ds.tf} depth 1: none")
     for depth in range(2, cfg.depth + 1):
         nxt = []
         for _, rule, _ in frontier:
@@ -537,14 +645,16 @@ def search(ds: Dataset, cfg: SearchConfig | None = None, progress=None) -> tuple
         frontier = nxt[: cfg.beam]
         pool += nxt[: cfg.beam * 2]
         if progress:
-            progress(f"depth {depth}: {tested} rules tested, best t={frontier[0][2]['t']:.2f}" if frontier else f"depth {depth}: none")
+            progress(f"{ds.tf} depth {depth}: {tested} rules evaluated")
     pool.sort(key=lambda x: -x[0])
-    kept: list[tuple[Rule, dict, set]] = []
+    kept: list[tuple[Rule, dict, np.ndarray]] = []
     for sc, rule, st in pool:
         if sc <= 0 or len(kept) >= cfg.max_rules:
             continue
-        rows = set(np.flatnonzero(rule.mask(ds.X) & np.isfinite(ds.R[(rule.tmpl, rule.side)])).tolist())
-        if any(len(rows & k[2]) / max(1, len(rows | k[2])) > cfg.max_overlap for k in kept):
+        rows = rule.mask(ds.X) & ds.valid((rule.tmpl, rule.side))
+        n_rows = int(rows.sum())
+        if any(np.count_nonzero(rows & k[2]) / max(1, n_rows + int(k[2].sum()) - np.count_nonzero(rows & k[2]))
+               > cfg.max_overlap for k in kept):
             continue
         kept.append((rule, st, rows))
     return [(r, s) for r, s, _ in kept], tested
@@ -585,6 +695,7 @@ class _LightView:
 
 
 def _build_job(job: dict) -> SymbolData | None:
+    """One (symbol, chunk) of a dataset in a worker process: memory is bounded by one chunk of 1m history."""
     import logging
 
     logging.disable(logging.WARNING)
@@ -596,63 +707,202 @@ def _build_job(job: dict) -> SymbolData | None:
     seal.check_window(job["start"], job["end"], job.get("unseal", ()))
     store = Store(job["db_path"])
     sym, tf = job["symbol"], job["tf"]
-    warm = 14 * 86_400_000
-    # exits of the last decisions are simulated up to 13h past the window, but never inside a sealed period
-    fwd = seal.readable_until(job["end"], job["end"] + 13 * 3_600_000, job.get("unseal", ()))
-    rows = store.load_candles(sym, start=job["start"] - warm, end=fwd)
-    mrows = store.load_metrics(sym, job["start"] - 4 * 86_400_000, job["end"]) if hasattr(store, "load_metrics") else []
+    templates = tuple(job.get("templates", (0, 1, 2)))
+    hold = max(TEMPLATES[t][2] for t in templates)
+    # exits of the last decisions are simulated past the chunk, but never inside a sealed period
+    fwd = seal.readable_until(job["end"], job["end"] + hold * 60_000 + 3_600_000, job.get("unseal", ()))
+    rows = store.load_candles(sym, start=job["start"] - job.get("warmup_ms", WARMUP_MS), end=fwd)
+    mrows = store.load_metrics(sym, job["start"] - 4 * DAY_MS, job["end"]) if hasattr(store, "load_metrics") else []
     store.close()
     if len(rows) < 5000:
         return None
     ca = CandleArrays("1m", capacity=len(rows) + 16)
     ca.extend(rows)
+    del rows
     frames = {t: FeatureFrame(t, resample(ca, t)) for t in DECISION_TFS}
     ms = MetricsSeries.from_rows(mrows) if mrows else None
+    market = None
+    if job.get("context_db"):
+        from heartless.data.context import MS_H, ContextTable
+
+        cst = Store(job["context_db"])
+        market = ContextTable.load(cst, [sym], job["start"] - MS_H, job["end"])
+        cst.close()
+        if market is None:  # asked for context features but the table is gone: keep the column layout (all NaN)
+            market = ContextTable({}, {})
     cost = CostModel(**job.get("cost", {}))
-    return build_symbol(_LightView(sym, frames), ca, ms, tf, job["start"], job["end"], cost)
+    return build_symbol(_LightView(sym, frames), ca, ms, tf, job["start"], job["end"], cost, templates, market)
+
+
+def year_chunks(start: int, end: int) -> list[tuple[int, int]]:
+    """Calendar-year pieces of [start, end]: the dataset build unit."""
+    out = []
+    y = datetime.fromtimestamp(start / 1000, tz=timezone.utc).year
+    a = int(start)
+    while a <= end:
+        nxt = int(datetime(y + 1, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        out.append((a, min(int(end), nxt - 1)))
+        a, y = nxt, y + 1
+    return out
+
+
+GRID_STEP = {"15m": 900_000, "1h": 3_600_000, "1d": DAY_MS}
+
+
+def grid_bound(grid: str, a: int, b: int) -> int:
+    """Upper bound of a grid's decision times in [a, b] (closes fall at k * step - 1)."""
+    step = GRID_STEP[grid]
+    return max(0, (b + 1) // step - (-(-(a + 1) // step)) + 1)
+
+
+class _Assembler:
+    """Fills (symbol, chunk) parts into preallocated column-major arrays as they arrive (each part sits at the offset
+    of its job, sized by grid_bound) and compacts the gaps at the end, so the build never holds all parts and the
+    merged copy at once: peak memory is the dataset plus the parts in flight."""
+
+    def __init__(self, jobs: list[dict], names: list[str], keys: list[tuple]):
+        self.jobs, self.names, self.keys = jobs, names, keys
+        self.bounds = [grid_bound(j["tf"], j["start"], j["end"]) for j in jobs]
+        self.offsets = np.concatenate(([0], np.cumsum(self.bounds))).astype(np.int64)
+        n = int(self.offsets[-1])
+        self.X = np.empty((n, len(names)), order="F")
+        self.times = np.zeros(n, dtype=np.int64)
+        self.month = np.zeros(n, dtype=np.int64)
+        self.entry = np.full(n, -1, dtype=np.int64)
+        self.R = {k: np.empty(n) for k in keys}
+        self.EXIT = {k: np.empty(n, dtype=np.int64) for k in keys}
+        self.counts = [0] * len(jobs)
+
+    def put(self, i: int, part: SymbolData | None) -> None:
+        if part is None or not len(part.times):
+            return
+        m, a = len(part.times), int(self.offsets[i])
+        if m > self.bounds[i] or part.names != self.names:
+            raise RuntimeError(f"unexpected dataset part for {part.symbol}: {m} rows (bound {self.bounds[i]})")
+        self.X[a:a + m] = part.X
+        self.times[a:a + m] = part.times
+        self.month[a:a + m] = part.month
+        self.entry[a:a + m] = part.entry_t
+        for k in self.keys:
+            self.R[k][a:a + m] = part.R[k]
+            self.EXIT[k][a:a + m] = part.EXIT[k]
+        self.counts[i] = m
+
+    def dataset(self, tf: str, templates: tuple) -> Dataset:
+        syms = list(dict.fromkeys(j["symbol"] for j, c in zip(self.jobs, self.counts) if c))
+        if not syms:
+            raise RuntimeError("no data to build a discovery dataset")
+        sid = {s: i for i, s in enumerate(syms)}
+        sym_id = np.zeros(len(self.times), dtype=np.int64)
+        dst = 0
+        for i, (job, m) in enumerate(zip(self.jobs, self.counts)):
+            if not m:
+                continue
+            a = int(self.offsets[i])
+            if a != dst:  # close the gap left by a shorter part (numpy handles the overlapping move)
+                self.X[dst:dst + m] = self.X[a:a + m]
+                for arr in (self.times, self.month, self.entry, *self.R.values(), *self.EXIT.values()):
+                    arr[dst:dst + m] = arr[a:a + m]
+            sym_id[dst:dst + m] = sid[job["symbol"]]
+            dst += m
+        return Dataset(tf, syms, self.X[:dst], self.times[:dst].copy(), sym_id[:dst].copy(), self.month[:dst].copy(),
+                       {k: v[:dst].copy() for k, v in self.R.items()}, {k: v[:dst].copy() for k, v in self.EXIT.items()},
+                       self.entry[:dst].copy(), list(self.names), templates)
 
 
 def build_dataset(db_path: str, symbols: list[str], start: int, end: int, tf: str = "15m", workers: int = 2,
-                  cost: dict | None = None, unseal=()) -> Dataset:
-    """Decision rows of [start, end] for every symbol. Raises SealedError for a window touching a sealed period."""
+                  cost: dict | None = None, unseal=(), templates="classic", context_db: str | None = None) -> Dataset:
+    """Decision rows of [start, end] for every symbol, built as (symbol, calendar year) jobs. Raises SealedError for
+    a window touching a sealed period. `context_db` adds the market-context features (FEATURES_X)."""
     import multiprocessing
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     from heartless.learning import seal
 
+    if tf not in GRIDS:
+        raise ValueError(f"unknown decision grid {tf!r} (one of {', '.join(GRIDS)})")
     seal.check_window(int(start), int(end), unseal)
     unseal = seal.opened(int(start), int(end), unseal)  # exit simulation may only read into a period this window opens
-    jobs = [{"db_path": db_path, "symbol": s, "start": int(start), "end": int(end), "tf": tf, "cost": cost or {},
-             "unseal": sorted(unseal or ())} for s in symbols]
+    tmpls = TEMPLATE_SETS[templates] if isinstance(templates, str) else tuple(templates)
+    jobs = [{"db_path": db_path, "symbol": s, "start": a, "end": b, "tf": tf, "cost": cost or {},
+             "unseal": sorted(unseal or ()), "templates": tmpls, "context_db": context_db}
+            for s in symbols for a, b in year_chunks(int(start), int(end))]
+    asm = _Assembler(jobs, list(FEATURES_X if context_db else FEATURES), [(t, sd) for t in tmpls for sd in (1, -1)])
     if workers <= 1:
-        parts = [_build_job(j) for j in jobs]
+        for i, j in enumerate(jobs):
+            asm.put(i, _build_job(j))
     else:
-        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
-            parts = list(pool.map(_build_job, jobs))
-    parts = [p for p in parts if p is not None and len(p.times)]
-    if not parts:
-        raise RuntimeError("no data to build a discovery dataset")
-    return merge(parts)
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+                                 max_tasks_per_child=1 if len(jobs) > len(symbols) else None) as pool:
+            futs = {pool.submit(_build_job, j): i for i, j in enumerate(jobs)}
+            # as_completed drops its own reference to a yielded future and the dict entry is popped, so each part is
+            # freed once it has been copied in
+            for fut in as_completed(futs):
+                asm.put(futs.pop(fut), fut.result())
+                del fut
+    return asm.dataset(tf, tmpls)
+
+
+def parse_grids(tf) -> list[str]:
+    out = [g.strip() for g in (tf.split(",") if isinstance(tf, str) else tf) if g.strip()]
+    bad = [g for g in out if g not in GRIDS]
+    if bad or not out:
+        raise ValueError(f"unknown decision grid(s) {bad or tf!r} (choose from {', '.join(GRIDS)})")
+    return list(dict.fromkeys(out))
 
 
 def mine(db_path: str, symbols: list[str], train: tuple[int, int], valid: tuple[int, int], tf: str = "15m",
-         cfg: SearchConfig | None = None, workers: int = 2, progress=None, unseal=()) -> dict:
-    """Full discovery run: build TRAIN/VALID datasets, beam-search on TRAIN, validate on VALID.
+         cfg: SearchConfig | None = None, workers: int = 2, progress=None, unseal=(), templates="classic",
+         context: dict | None = None, n_prior: int = 0) -> dict:
+    """Full discovery run: build TRAIN/VALID datasets per grid, beam-search on TRAIN, validate on VALID.
 
-    Both windows pass the seal check before any data is read (SealedError unless the period is in `unseal`)."""
+    `tf` is one grid or a comma list ("1h,1d"); the multiple-testing bar uses every rule evaluated over all grids
+    plus `n_prior` earlier trials of the family. `context` = {"db", "universe", "build"} adds the market-context
+    features (built on demand). Both windows pass the seal check before any data is read (SealedError unless the
+    period is in `unseal`)."""
     import time as _t
 
     from heartless.learning import seal
 
     seal.check_window(int(train[0]), int(train[1]), unseal)
     seal.check_window(int(valid[0]), int(valid[1]), unseal)
+    grids = parse_grids(tf)
     t0 = _t.time()
-    ds_tr = build_dataset(db_path, symbols, train[0], train[1], tf, workers, unseal=unseal)
-    ds_va = build_dataset(db_path, symbols, valid[0], valid[1], tf, workers, unseal=unseal)
-    if progress:
-        progress(f"datasets: train {len(ds_tr.times)} rows, valid {len(ds_va.times)} rows ({_t.time() - t0:.0f}s)")
-    rules, tested = search(ds_tr, cfg, progress)
-    results = validate(rules, ds_va, tested)
-    return {"tf": tf, "tested": tested, "t_bar": multiple_testing_t(tested), "results": results,
-            "passed": [r["rule"] for r in results if r["passed"]], "seconds": _t.time() - t0,
-            "rows": {"train": int(len(ds_tr.times)), "valid": int(len(ds_va.times))}}
+    ctx_db = None
+    if context:
+        from heartless.data import context as C
+
+        # each window plus the hour close before it (decisions before its first hour close read that snapshot); two
+        # separate builds, so the gap between TRAIN and VALID (the sealed year) is never computed
+        ctx_db = (C.prepare(db_path, context, train[0] - C.MS_H, train[1])
+                  and C.prepare(db_path, context, valid[0] - C.MS_H, valid[1]))
+        if ctx_db is None:
+            raise RuntimeError("market context requested but not available (run `heartless context build`)")
+    tested, results, rules_all, rows = 0, [], [], {}
+    sets = {}
+    for g in grids:
+        ds_tr = build_dataset(db_path, symbols, train[0], train[1], g, workers, unseal=unseal, templates=templates,
+                              context_db=ctx_db)
+        ds_va = build_dataset(db_path, symbols, valid[0], valid[1], g, workers, unseal=unseal, templates=templates,
+                              context_db=ctx_db)
+        rows[g] = {"train": int(len(ds_tr.times)), "valid": int(len(ds_va.times))}
+        if progress:
+            progress(f"{g} datasets: train {rows[g]['train']} rows, valid {rows[g]['valid']} rows ({_t.time() - t0:.0f}s)")
+        rules, n = search(ds_tr, cfg, progress)
+        tested += n
+        sets[g] = (rules, ds_va)
+        del ds_tr
+    n_tests = tested + max(0, int(n_prior))
+    for g in grids:
+        rules, ds_va = sets[g]
+        results += validate(rules, ds_va, n_tests)
+        rules_all += rules
+    if len(grids) > 1:  # one grid keeps the search ranking; several are merged by TRAIN excess t
+        results.sort(key=lambda r: -r["rule"]["stats"]["train"].get("t_ex", -99.0))
+    best = max(rules_all, key=lambda rs: rs[1].get("t_ex", -99.0))[1] if rules_all else None
+    flat_rows = rows[grids[0]] if len(grids) == 1 else {"train": sum(r["train"] for r in rows.values()),
+                                                         "valid": sum(r["valid"] for r in rows.values()), **rows}
+    return {"tf": ",".join(grids), "tested": tested, "n_tests": n_tests, "t_bar": multiple_testing_t(n_tests),
+            "results": results, "passed": [r["rule"] for r in results if r["passed"]], "seconds": _t.time() - t0,
+            "rows": flat_rows, "templates": templates if isinstance(templates, str) else list(templates),
+            "context": bool(context), "best_train": best}

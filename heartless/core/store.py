@@ -417,3 +417,64 @@ class Store:
 
     def prune_fill_quality(self, before_ts: int) -> None:
         self.execute("DELETE FROM fill_quality WHERE ts<?", (before_ts,))
+
+    # --- market context (P2a, heartless/data/context.py) --------------------------------------------------------------
+    # Created on first write instead of in SCHEMA, so opening a research database only to read it never changes its
+    # schema. One row per (symbol, hour close); symbol "*" holds the market-wide features. `data` is a float64 array in
+    # the feature order recorded under the kv key "context.meta".
+    _CONTEXT_DDL = ("CREATE TABLE IF NOT EXISTS market_context (symbol TEXT NOT NULL, ts INTEGER NOT NULL, "
+                    "data BLOB NOT NULL, PRIMARY KEY (symbol, ts)) WITHOUT ROWID")
+
+    def has_market_context(self) -> bool:
+        return bool(self.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_context'"))
+
+    def save_market_context(self, rows: Iterable[tuple[str, int, bytes]]) -> None:
+        self.execute(self._CONTEXT_DDL)
+        self.executemany("INSERT OR REPLACE INTO market_context(symbol,ts,data) VALUES(?,?,?)", rows)
+
+    def load_market_context(self, symbol: str, start: int, end: int) -> list[tuple[int, bytes]]:
+        if not self.has_market_context():
+            return []
+        rows = self.query("SELECT ts, data FROM market_context WHERE symbol=? AND ts>=? AND ts<=? ORDER BY ts",
+                          (symbol, int(start), int(end)))
+        return [(r["ts"], r["data"]) for r in rows]
+
+    def delete_market_context(self) -> None:
+        if self.has_market_context():
+            self.execute("DELETE FROM market_context")
+
+    def market_context_stats(self) -> dict:
+        """First / last hour close and row counts of the stored context (market rows and all rows)."""
+        if not self.has_market_context():
+            return {"first": None, "last": None, "hours": 0, "rows": 0}
+        r = self.query("SELECT MIN(ts) a, MAX(ts) b, COUNT(*) n FROM market_context WHERE symbol='*'")[0]
+        total = self.query("SELECT COUNT(*) n FROM market_context")[0]["n"]
+        return {"first": r["a"], "last": r["b"], "hours": r["n"], "rows": total}
+
+    def context_candle_bounds(self, symbol: str) -> tuple[int | None, int | None]:
+        """(first, last) candle open_time of a symbol from the primary-key index (no row count, unlike candle_range)."""
+        lo = self.query("SELECT open_time t FROM candles WHERE symbol=? ORDER BY open_time ASC LIMIT 1", (symbol,))
+        hi = self.query("SELECT open_time t FROM candles WHERE symbol=? ORDER BY open_time DESC LIMIT 1", (symbol,))
+        return (lo[0]["t"] if lo else None), (hi[0]["t"] if hi else None)
+
+    def context_candle_columns(self, symbol: str, start: int, end: int, chunk: int = 200_000):
+        """open_time, high, low, close, quote_volume of 1m candles with open_time in [start, end] as numpy arrays.
+
+        Read in chunks into arrays (no Candle objects): the context build scans years of 1m history for 20 symbols."""
+        import numpy as np
+
+        parts = []
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.row_factory = None
+            cur.execute("SELECT open_time, high, low, close, quote_volume FROM candles WHERE symbol=? AND open_time>=? "
+                        "AND open_time<=? ORDER BY open_time", (symbol, int(start), int(end)))
+            while True:
+                rows = cur.fetchmany(chunk)
+                if not rows:
+                    break
+                parts.append(np.array(rows, dtype=float))
+            cur.close()
+        arr = np.concatenate(parts) if parts else np.zeros((0, 5))
+        arr[:, 4] = np.nan_to_num(arr[:, 4], nan=0.0)
+        return arr[:, 0].astype(np.int64), arr[:, 1].copy(), arr[:, 2].copy(), arr[:, 3].copy(), arr[:, 4].copy()

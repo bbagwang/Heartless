@@ -2,17 +2,32 @@
 
 Every function returns arrays aligned with the input; warm-up values are NaN.
 Nothing here looks at future bars, so the same code is safe for backtests and live trading.
+
+The recursive filters (EMA, Wilder, Supertrend, session VWAP) iterate over Python floats from `tolist()` instead of
+numpy scalars: the same IEEE-754 double operations in the same order, so the outputs are bit-identical, about 4x
+faster (the live bot recomputes the 1m frame on every bar; tests/test_p2a_indicators.py pins the equality).
 """
 from __future__ import annotations
+
+import math
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
 NAN = np.nan
+# Sliding-window reductions run over blocks of this many windows, so the (windows x n) temporaries of a multi-year
+# 1m frame stay small (a year of hurst_proxy windows used to allocate ~1.3 GB at once). Every row is reduced by the
+# same numpy call on the same memory layout, so the result does not depend on the block size.
+BLOCK = 32_768
 
 
 def _nan(n: int) -> np.ndarray:
     return np.full(n, NAN, dtype=float)
+
+
+def _blocks(total: int):
+    for a in range(0, total, BLOCK):
+        yield a, min(total, a + BLOCK)
 
 
 def ema(x: np.ndarray, n: int) -> np.ndarray:
@@ -24,14 +39,14 @@ def ema(x: np.ndarray, n: int) -> np.ndarray:
     # seed with SMA of first n values
     seed = np.nanmean(x[:n])
     out[n - 1] = seed
-    prev = seed
-    for i in range(n, len(x)):
-        v = x[i]
-        if np.isnan(v):
-            out[i] = prev
-            continue
-        prev = prev + alpha * (v - prev)
-        out[i] = prev
+    if len(x) > n:
+        vals = x[n:].tolist()
+        prev = float(seed)
+        for i, v in enumerate(vals):
+            if v == v:  # a NaN input carries the previous value forward
+                prev = prev + alpha * (v - prev)
+            vals[i] = prev
+        out[n:] = vals
     return out
 
 
@@ -51,7 +66,9 @@ def rolling_std(x: np.ndarray, n: int) -> np.ndarray:
     if len(x) < n or n <= 1:
         return out
     w = sliding_window_view(x, n)
-    out[n - 1:] = w.std(axis=1, ddof=0)
+    res = out[n - 1:]
+    for a, b in _blocks(len(w)):
+        res[a:b] = w[a:b].std(axis=1, ddof=0)
     return out
 
 
@@ -101,14 +118,16 @@ def wilder(x: np.ndarray, n: int) -> np.ndarray:
         return out
     first = np.nanmean(x[:n])
     out[n - 1] = first
-    prev = first
     a = 1.0 / n
-    for i in range(n, len(x)):
-        v = x[i]
-        if np.isnan(v):
-            v = 0.0
-        prev = prev + a * (v - prev)
-        out[i] = prev
+    if len(x) > n:
+        vals = x[n:].tolist()
+        prev = float(first)
+        for i, v in enumerate(vals):
+            if v != v:  # NaN counts as 0
+                v = 0.0
+            prev = prev + a * (v - prev)
+            vals[i] = prev
+        out[n:] = vals
     return out
 
 
@@ -197,20 +216,25 @@ def supertrend(h, l, c, n: int = 10, mult: float = 3.0):
     ub = hl2 + mult * a
     lb = hl2 - mult * a
     size = len(c)
-    line = _nan(size)
-    direction = np.zeros(size, dtype=int)
-    fub = ub.copy()
-    flb = lb.copy()
+    line = [NAN] * size
+    direction = [0] * size
+    ubl, lbl, cl = ub.tolist(), lb.tolist(), c.tolist()
+    fub, flb = list(ubl), list(lbl)
     start = int(np.argmax(~np.isnan(a))) if (~np.isnan(a)).any() else size
     for i in range(start + 1, size):
-        fub[i] = ub[i] if (ub[i] < fub[i - 1] or c[i - 1] > fub[i - 1]) else fub[i - 1]
-        flb[i] = lb[i] if (lb[i] > flb[i - 1] or c[i - 1] < flb[i - 1]) else flb[i - 1]
+        pu, pl, pc = fub[i - 1], flb[i - 1], cl[i - 1]
+        u = ubl[i] if (ubl[i] < pu or pc > pu) else pu
+        lo = lbl[i] if (lbl[i] > pl or pc < pl) else pl
+        fub[i], flb[i] = u, lo
         prev_dir = direction[i - 1] if direction[i - 1] != 0 else 1
         if prev_dir == 1:
-            direction[i] = -1 if c[i] < flb[i] else 1
+            d = -1 if cl[i] < lo else 1
         else:
-            direction[i] = 1 if c[i] > fub[i] else -1
-        line[i] = flb[i] if direction[i] == 1 else fub[i]
+            d = 1 if cl[i] > u else -1
+        direction[i] = d
+        line[i] = lo if d == 1 else u
+    line = np.array(line, dtype=float)
+    direction = np.array(direction, dtype=int)
     return line, direction
 
 
@@ -249,8 +273,10 @@ def percentile_rank(x: np.ndarray, n: int = 200) -> np.ndarray:
     if len(x) < n:
         return out
     w = sliding_window_view(x, n)
-    cur = w[:, -1][:, None]
-    out[n - 1:] = (w <= cur).mean(axis=1)
+    res = out[n - 1:]
+    for a, b in _blocks(len(w)):
+        wb = w[a:b]
+        res[a:b] = (wb <= wb[:, -1][:, None]).mean(axis=1)
     return out
 
 
@@ -258,25 +284,27 @@ def session_vwap(open_time: np.ndarray, h, l, c, v, session_ms: int = 86_400_000
     """VWAP anchored to the UTC session start plus +/-1 and +/-2 std bands."""
     tp = (np.asarray(h, float) + np.asarray(l, float) + np.asarray(c, float)) / 3
     v = np.asarray(v, float)
-    sess = (np.asarray(open_time) // session_ms)
-    n = len(tp)
-    vwap = _nan(n)
-    sd = _nan(n)
+    sess = (np.asarray(open_time) // session_ms).tolist()
+    tpl, vl = tp.tolist(), v.tolist()
+    n = len(tpl)
+    vwap = [NAN] * n
+    sd = [NAN] * n
     cum_pv = cum_v = cum_pv2 = 0.0
     cur = None
     for i in range(n):
         if sess[i] != cur:
             cur = sess[i]
             cum_pv = cum_v = cum_pv2 = 0.0
-        cum_pv += tp[i] * v[i]
-        cum_pv2 += tp[i] * tp[i] * v[i]
-        cum_v += v[i]
+        t, vi = tpl[i], vl[i]
+        cum_pv += t * vi
+        cum_pv2 += t * t * vi
+        cum_v += vi
         if cum_v > 0:
             m = cum_pv / cum_v
             vwap[i] = m
             var = max(cum_pv2 / cum_v - m * m, 0.0)
-            sd[i] = np.sqrt(var)
-    return vwap, sd
+            sd[i] = math.sqrt(var)
+    return np.array(vwap, dtype=float), np.array(sd, dtype=float)
 
 
 def cvd_proxy(volume: np.ndarray, taker_buy: np.ndarray, n: int = 20) -> np.ndarray:
@@ -301,8 +329,11 @@ def linreg_slope(x: np.ndarray, n: int = 20) -> np.ndarray:
     w = sliding_window_view(x, n)
     t = np.arange(n) - (n - 1) / 2
     denom = (t ** 2).sum()
-    slope = (w * t).sum(axis=1) / denom
-    level = w.mean(axis=1)
+    slope = np.empty(len(w))
+    level = np.empty(len(w))
+    for a, b in _blocks(len(w)):
+        slope[a:b] = (w[a:b] * t).sum(axis=1) / denom
+        level[a:b] = w[a:b].mean(axis=1)
     ok = level != 0
     res = np.full(len(slope), NAN)
     res[ok] = slope[ok] / level[ok]
@@ -320,8 +351,6 @@ def hurst_proxy(c: np.ndarray, n: int = 100) -> np.ndarray:
     lr = np.diff(np.log(np.maximum(c, 1e-12)), prepend=np.nan)
     lr[0] = 0.0
     w1 = sliding_window_view(lr, n)
-    mu = w1.mean(axis=1)
-    var1 = w1.var(axis=1, ddof=1)
     # q-bar aggregated returns; keep only the n-q+1 overlapping sums that lie fully inside each window
     agg = rolling_sum(lr, q)
     agg[np.isnan(agg)] = 0.0
@@ -330,7 +359,12 @@ def hurst_proxy(c: np.ndarray, n: int = 100) -> np.ndarray:
     # q-sums is biased low (E[log VR] ~ -0.07 for i.i.d. returns at n=100), which pushed the whole estimate
     # below 0.5 on driftless noise; demeaning by q*mu and dividing by m centres the null at ~0.5.
     m = q * (n - q + 1) * (1.0 - q / n)
-    varq = ((wq - q * mu[:, None]) ** 2).sum(axis=1) / m
+    var1 = np.empty(len(w1))
+    varq = np.empty(len(w1))
+    for a, b in _blocks(len(w1)):
+        mu = w1[a:b].mean(axis=1)
+        var1[a:b] = w1[a:b].var(axis=1, ddof=1)
+        varq[a:b] = ((wq[a:b] - q * mu[:, None]) ** 2).sum(axis=1) / m
     vr = np.divide(varq, var1, out=np.ones(len(var1)), where=var1 > 0)
     h = 0.5 + 0.5 * np.tanh(np.log(np.maximum(vr, 1e-9)))  # map VR=1 -> 0.5
     out[n - 1:] = h
