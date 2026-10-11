@@ -735,7 +735,7 @@ class MarketContextTracker:
             oi.insert(k, _num(get("oi")))
             oiv.insert(k, _num(get("oi_value")))
 
-    def warm(self, store, now: int, symbols=None) -> int:
+    def warm(self, store, now: int, symbols=None, chunk_hours: int = 24) -> int:
         """Feed the stored history needed for exact snapshots from the next hour close on (1m candles, funding and
         metrics of the last WARMUP_HOURS before `now`) and finalise up to the last hour close <= now. Returns the
         number of candles fed.
@@ -744,25 +744,43 @@ class MarketContextTracker:
         already missed the live 08:00 settlement and the 08:00..08:29 bars, and without them the next snapshots
         would carry the previous funding rate for 8 h and a partial hour in the 24h volume and the 24h/168h highs
         and lows. The tracker only reads what is due at each hour close, so this adds no look-ahead, and the live
-        feed may repeat those rows (a repeated bar or row replaces itself)."""
+        feed may repeat those rows (a repeated bar or row replaces itself).
+
+        The candles are read `chunk_hours` at a time and the hours they complete are finalised before the next
+        chunk (the funding and metrics rows go in first; each hour reads only what is due at its close, so the
+        result is the same). Feeding the whole window before finalising held one per-minute aggregate per symbol
+        and hour at once (16k for 20 symbols), and the hourly rows allocated in between them kept that memory, about
+        90 MB, in the process for good (measured by the Wave C integration replay)."""
         h_end = hour_of(now)
         lo = (h_end - WARMUP_HOURS) * MS_H
-        fed = 0
-        for s in (symbols or self.symbols):
-            if s not in self._col:
-                continue
-            for c in store.load_candles(s, start=lo, end=int(now) - MS_MIN + 1):  # every bar closed by now
-                self.on_bar(s, c)
-                fed += 1
+        syms = [s for s in (symbols or self.symbols) if s in self._col]
+        for s in syms:
             for t, r in store.load_funding(s, lo - MS_H, int(now)):
                 self.on_funding(s, t, r)
             if hasattr(store, "load_metrics"):
                 for row in store.load_metrics(s, lo - OI_LOOKBACK_MS - 2 * MS_H, int(now)):
                     self.on_metrics(s, row)
+        fed = 0
+        last = int(now) - MS_MIN + 1  # every bar closed by now
+        a = lo
+        while a <= last:
+            b = min(a + max(1, int(chunk_hours)) * MS_H - 1, last)
+            for s in syms:
+                for c in store.load_candles(s, start=a, end=b):
+                    self.on_bar(s, c)
+                    fed += 1
+            if b < last and hour_of(b) < h_end:  # b is an hour close: every bar of that hour is in
+                self._finalise(hour_of(b))
+            a = b + 1
         self._finalise(h_end)
         return fed
 
     # --- outputs ---------------------------------------------------------------------------------------------
+    @property
+    def last_hour(self) -> int | None:
+        """The last finalised hour index (None before warm-up): its snapshot is fixed and its bars are ignored."""
+        return self._hour
+
     def ready(self, T: int) -> bool:
         """Whether every symbol that had a bar in the hour before T's hour has delivered its bar closing at T."""
         h = hour_of(T)

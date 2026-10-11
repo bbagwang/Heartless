@@ -16,7 +16,9 @@ Callback = Callable[[dict], Awaitable[None] | None]
 
 
 class MarketStream:
-    """Combined market stream: 1m klines + bookTicker per symbol, mark price for all symbols."""
+    """Combined market stream: 1m klines + bookTicker per traded symbol, mark price for all symbols, and 1m klines only
+    for the `kline_only` symbols (the market-context universe members that are not traded: data/context.py needs
+    their bars, nothing else)."""
 
     def __init__(self, ws_base: str, on_kline: Callback, on_book: Callback, on_mark: Callback):
         self.ws_base = ws_base
@@ -24,15 +26,20 @@ class MarketStream:
         self.on_book = on_book
         self.on_mark = on_mark
         self.symbols: list[str] = []
+        self.kline_only: list[str] = []
         self._restart = asyncio.Event()
         self._stop = False
         self.last_msg_ts = 0.0
         self.connected = False
 
-    def set_symbols(self, symbols: list[str]) -> None:
+    def set_symbols(self, symbols: list[str], kline_only: list[str] | None = None) -> None:
+        """Traded symbols, plus symbols subscribed to 1m klines only (None keeps the current kline-only list)."""
         new = sorted(set(s.upper() for s in symbols))
-        if new != self.symbols:
+        extra = self.kline_only if kline_only is None else sorted(set(s.upper() for s in kline_only))
+        extra = [s for s in extra if s not in new]
+        if new != self.symbols or extra != self.kline_only:
             self.symbols = new
+            self.kline_only = extra
             self._restart.set()
 
     def _url(self) -> str:
@@ -41,6 +48,7 @@ class MarketStream:
             ls = s.lower()
             streams.append(f"{ls}@kline_1m")
             streams.append(f"{ls}@bookTicker")
+        streams += [f"{s.lower()}@kline_1m" for s in self.kline_only]
         return f"{self.ws_base}/stream?streams={'/'.join(streams)}"
 
     async def stop(self) -> None:

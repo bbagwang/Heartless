@@ -12,6 +12,9 @@ from heartless.core.bus import EventBus
 from heartless.core.models import Candle, PositionStatus, Regime, SymbolInfo, Ticker
 from heartless.core.store import Store
 from heartless.data.candles import CandleArrays
+from heartless.data.context import EMPTY as NO_MARKET_CONTEXT
+from heartless.data.context import WARMUP_HOURS as CONTEXT_WARMUP_HOURS
+from heartless.data.context import MarketContextTracker, hour_close, hour_of
 from heartless.data.extras import MetricsSeries
 from heartless.data.features import LIVE_WINDOW, MarketView
 from heartless.data.universe import select_universe
@@ -31,7 +34,7 @@ from heartless.strategy.base import Context
 from heartless.strategy.params import StrategyParams
 from heartless.strategy.regime import detect_regime
 from heartless.util.ids import short_id, token_hex
-from heartless.util.timeutil import MS_DAY, MS_HOUR, MS_MINUTE, local_day_start, next_local_time, now_ms
+from heartless.util.timeutil import MS_DAY, MS_HOUR, MS_MINUTE, fmt_ts, local_day_start, next_local_time, now_ms
 
 log = logging.getLogger(__name__)
 
@@ -45,8 +48,18 @@ LIVE_HISTORY_DAYS = math.ceil(LIVE_WINDOW["1h"] / 24) + 2
 # symbol hovering around UNIVERSE_MIN_QUOTE_VOLUME was otherwise added and removed at hourly refreshes (a 2-day replay
 # of July 2026 flipped AVAXUSDT 6 times), each time reloading its history, rebuilding its views and messaging the owner.
 UNIVERSE_KEEP_FRACTION = 0.8
-# how often the scheduler stores the funding settlements published since the last stored one
-FUNDING_REFRESH_MS = MS_HOUR
+# how often the scheduler stores the funding settlements published since the last stored one. It only asks REST for a
+# symbol once a settlement is due, so the short period costs nothing between settlements; it bounds how late a new
+# settlement reaches the market context (the snapshot at the next hour close must see it, as the offline build does)
+FUNDING_REFRESH_MS = 10 * MS_MINUTE
+# market context (data/context.py): how long past an hour close the snapshot waits for the context symbols' bars
+# closing at it (live klines arrive within a second or two) before it is published without the stragglers, and how
+# often that wait looks again
+CONTEXT_GRACE_MS = 10_000
+CONTEXT_POLL_S = 0.05
+# stored 1m history every context symbol needs at start-up (the tracker's longest window plus the carry), backfilled
+# even when HISTORY_DAYS / DATA_RETENTION_DAYS are shorter (the retention prune keeps DATA_RETENTION_DAYS + 5 days)
+CONTEXT_HISTORY_DAYS = math.ceil(CONTEXT_WARMUP_HOURS / 24) + 1
 # truthful status line while the champion has no alpha switched on (startup message, /status, daily report)
 NO_ALPHA_TEXT = "⚠️ 활성 알파 없음(0개): 거래하지 않고 연구·발굴·챌린저 검증만 진행"
 
@@ -69,6 +82,15 @@ class Heartless:
         self.book_qty: dict[str, tuple[float, float]] = {}
         self.oi_hist: dict[str, deque] = {}
         self.metrics_series: dict[str, MetricsSeries] = {}  # 5m positioning data per symbol
+        # live market context (P2a, data/context.py): the hourly cross-sectional snapshot over CONTEXT_UNIVERSE that
+        # every engine receives as Context.market, computed exactly like the offline market_context table. Members of
+        # that universe the bot does not trade ("context-only") are streamed and stored as 1m bars only: no feature
+        # frames, no engines, one REST series (open interest) in the metrics poll.
+        self.context = MarketContextTracker(settings.context_universe_list)
+        self.context_only: list[str] = []
+        self._ctx_last_open: dict[str, int] = {}  # context-only symbol -> open time of its newest stored bar
+        self._ctx_polled: set[str] = set()  # context-only symbols whose first (2-day) open-interest poll succeeded
+        self.context_stats: dict[str, Any] = {"snapshots": 0, "late": 0, "errors": 0, "last": None, "symbols": 0}
         self.regimes: dict[str, tuple[Regime, dict]] = {}
         self.bandit = AlphaBandit(list(StrategyParams.default().alphas), store=self.store, engine="shared")
         self.research = ResearchManager(self)
@@ -191,12 +213,14 @@ class Heartless:
         await self.rest.sync_time()
         await self._load_symbols()
         await self.refresh_universe(initial=True)
-        await self._backfill(self.universe)
+        self.context_only = self._context_only_symbols()
+        await self._backfill(self.universe + self.context_only)
         self._build_views(self.universe)
         await self._create_engines()
         if self.s.archive_backfill:
             self.tasks.append(asyncio.create_task(self._backfill_metrics(list(self.universe)), name="metrics-backfill"))
-        self.market.set_symbols(self.universe)
+        self._warm_context()  # after the backfill (the store holds the history), before the first streamed bar
+        self.market.set_symbols(self.universe, kline_only=self.context_only)
         self.tasks.append(asyncio.create_task(self.market.run(), name="market-stream"))
         self.tasks.append(asyncio.create_task(self._kline_worker(), name="kline-worker"))
         self.tasks.append(asyncio.create_task(self._scheduler(), name="scheduler"))
@@ -330,7 +354,8 @@ class Heartless:
             for s in removed:
                 self.views.pop(s, None)
                 self.candles.pop(s, None)
-            self.market.set_symbols(self.universe)
+            self._set_context_only(self._context_only_symbols())
+            self.market.set_symbols(self.universe, kline_only=self.context_only)
             await self.emit("universe", {"message": f"유니버스 갱신: +{','.join(added) or '-'} / -{','.join(removed) or '-'}",
                                          "added": added, "removed": removed, "universe": self.universe})
 
@@ -359,11 +384,12 @@ class Heartless:
         now = now_ms()
         # keep the longer research history in the store (cheap via the archive); live views use history_days
         keep_days = max(self.s.history_days, self.s.data_retention_days if self.s.archive_backfill else self.s.history_days)
-        since = now - keep_days * MS_DAY
         sem = asyncio.Semaphore(3)
         failed: set[str] = set()
 
         async def one(sym: str) -> None:
+            # a market-context symbol needs the tracker's whole warm-up window stored, traded or not
+            since = now - max(keep_days, CONTEXT_HISTORY_DAYS if sym in self.context.symbols else 0) * MS_DAY
             async with sem:
                 self._backfilling.add(sym)
                 try:
@@ -449,14 +475,16 @@ class Heartless:
 
     async def _retry_backfill(self) -> None:
         """Re-run the history fetch for symbols whose startup/universe backfill failed and rebuild their views."""
-        self._backfill_failed &= set(self.universe)
+        self._backfill_failed &= set(self.universe) | set(self.context_only)
         pending = sorted(self._backfill_failed)
         if not pending:
             return
         await self._backfill(pending)
         fixed = [s for s in pending if s not in self._backfill_failed]
         if fixed:
-            self._build_views(fixed)
+            # a repaired context-only symbol only needs its stored history (the next start warms the tracker from it;
+            # this process keeps what it already streamed)
+            self._build_views([s for s in fixed if s in self.universe])
             log.info("backfill retry repaired %s", ", ".join(fixed))
 
     def _build_views(self, symbols: list[str]) -> None:
@@ -868,7 +896,11 @@ class Heartless:
         k = data.get("k", {})
         if not k.get("x"):
             return
-        self._kline_queue.put_nowait((data["s"], Candle.from_ws(k)))
+        sym, c = data["s"], Candle.from_ws(k)
+        # into the market context at once, not through the worker queue: the worker holds an hour-close bar until
+        # every context symbol's bar closing at that hour has arrived (_ensure_context)
+        self._context_bar(sym, c)
+        self._kline_queue.put_nowait((sym, c))
 
     async def _on_book(self, data: dict) -> None:
         sym = data["s"]
@@ -923,6 +955,8 @@ class Heartless:
         self._roll_day(now_ms())
         ca = self.candles.get(sym)
         if ca is None:
+            if sym in self.context_only:
+                await self._process_context_bar(sym, c)
             return
         # gap detection: fetch missing bars if the stream skipped some
         missing: list[Candle] = []
@@ -934,6 +968,8 @@ class Heartless:
                     self.store.save_candles(sym, missing)
             except Exception as e:  # noqa: BLE001
                 log.warning("gap fill %s failed: %s", sym, e)
+        for b in (*missing, c):  # c again: callers that bypass _on_kline (a repeated bar replaces itself)
+            self._context_bar(sym, b)
         ca.append(c)
         if c.open_time % MS_DAY == 0:
             # once a day per symbol, here and not in the scheduler: the feature rebuild thread reads `ca` and only this
@@ -961,6 +997,7 @@ class Heartless:
         # a 5m close inside the gap is not flagged by seek() (it closed more than a minute ago): refresh explicitly
         if missing or view.closed("5m") or sym not in self.regimes:
             self.regimes[sym] = detect_regime(view)
+        await self._ensure_context(c.close_time)  # the hour's market snapshot exists before any engine decides
         ctx = self._context(sym, c.close_time)
         for eng in list(self.engines.values()):
             try:
@@ -1007,7 +1044,126 @@ class Heartless:
         nft = t.next_funding_time or ((now // (8 * MS_HOUR)) + 1) * 8 * MS_HOUR
         return Context(symbol=sym, info=self.symbols[sym], ticker=t, regime=reg, regime_info=info, btc_regime=btc,
                        oi_change=oi_change, now=now, funding_rate=t.funding_rate,
-                       minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), book_imbalance=imb, extras=extras)
+                       minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), book_imbalance=imb, extras=extras,
+                       market=self._market_context(sym, now))
+
+    # --- market context (P2a, data/context.py) ----------------------------------------------------------------
+    def _context_only_symbols(self) -> list[str]:
+        """Context-universe members trading on the exchange that the bot does not trade."""
+        return [s for s in self.context.symbols if s not in self.universe and s in self.symbols
+                and self.symbols[s].status == "TRADING"]
+
+    def _set_context_only(self, symbols: list[str]) -> None:
+        """New context-only set after a universe change: a symbol that left the universe continues as a 1m-only stream
+        from its newest stored bar; one that joined is handled by the trading path from now on."""
+        for s in symbols:
+            if s not in self._ctx_last_open:
+                _, hi = self.store.context_candle_bounds(s)
+                if hi is not None:
+                    self._ctx_last_open[s] = int(hi)
+        for s in [s for s in self._ctx_last_open if s not in symbols]:
+            del self._ctx_last_open[s]
+        self._ctx_polled &= set(symbols)
+        self.context_only = list(symbols)
+
+    def _warm_context(self) -> None:
+        """Feed the tracker the stored history its windows need (1m bars, funding, metrics of the last WARMUP_HOURS)
+        so the first snapshot after a start or restart already equals the offline build. Synchronous: a few seconds
+        once at start-up, before the market stream runs."""
+        now = now_ms()
+        self._set_context_only(self.context_only)
+        try:
+            fed = self.context.warm(self.store, now)
+        except Exception:  # noqa: BLE001 - the context must never stop the bot from trading
+            self._context_error("warm-up")
+            return
+        log.info("market context warmed: %d bars of %d symbols (%d context-only: %s)", fed,
+                 len(self.context.symbols), len(self.context_only), ",".join(self.context_only) or "-")
+
+    def _context_error(self, what: str) -> None:
+        self.context_stats["errors"] += 1
+        if self.context_stats["errors"] <= 5:  # a systematic failure must not flood the log every minute
+            log.exception("market context %s failed (ctx.market falls back to empty)", what)
+
+    def _context_bar(self, sym: str, c: Candle) -> None:
+        try:
+            self.context.on_bar(sym, c)
+        except Exception:  # noqa: BLE001
+            self._context_error("bar")
+
+    async def _process_context_bar(self, sym: str, c: Candle) -> None:
+        """A closed 1m bar of a context-only symbol: a stream gap is filled from REST first, and the bars are stored
+        (a restart warms the tracker from the store; research can build the same context offline from it)."""
+        last = self._ctx_last_open.get(sym)
+        if last is not None and c.open_time <= last:
+            return
+        bars: list[Candle] = []
+        if last is not None and c.open_time - last > MS_MINUTE and sym not in self._backfilling:
+            try:
+                got = await self.rest.klines_range(sym, last + MS_MINUTE, c.open_time - 1, "1m") or []
+                bars = [b for b in got if last < b.open_time < c.open_time and b.closed]
+            except Exception as e:  # noqa: BLE001
+                log.warning("gap fill %s failed: %s", sym, e)
+        bars.append(c)
+        for b in bars:
+            self._context_bar(sym, b)
+        self.store.save_candles(sym, bars)
+        self._ctx_last_open[sym] = c.open_time
+
+    async def _ensure_context(self, t: int) -> None:
+        """Publish the snapshot of the hour close at or before t before an engine decides on a bar of that hour. The
+        first bar closing at T waits (at most CONTEXT_GRACE_MS past T) until every context symbol that traded in the
+        previous hour delivered its bar closing at T; those bars reach the tracker from the stream callback, so they
+        arrive while this worker waits. From then on the snapshot is fixed for the hour: the champion, the challengers
+        and a live engine all decide on the same one. A bar processed long after its close (backlog, gap fill) does
+        not wait."""
+        tr = self.context
+        h = hour_of(t)
+        if tr.last_hour is not None and h <= tr.last_hour:
+            return
+        T = hour_close(h)
+        loop = asyncio.get_running_loop()
+        # bounded by the loop clock as well, so a frozen test clock can never make this spin
+        until = loop.time() + max(0, T + CONTEXT_GRACE_MS - now_ms()) / 1000
+        try:
+            while not tr.ready(T) and loop.time() < until:
+                await asyncio.sleep(CONTEXT_POLL_S)
+                if tr.last_hour is not None and h <= tr.last_hour:
+                    return  # published meanwhile (the scheduler's fallback)
+            self._publish_context(T, late=not tr.ready(T))
+        except Exception:  # noqa: BLE001
+            self._context_error("snapshot")
+
+    def _publish_context(self, T: int, late: bool = False) -> None:
+        snap = self.context.snapshot(T)
+        st = self.context_stats
+        st["snapshots"] += 1
+        st["last"] = T
+        st["symbols"] = int(snap.present.sum()) if snap is not None else 0
+        if late:
+            st["late"] += 1
+            log.info("market context %s UTC published after the %.0fs grace without every symbol's bar",
+                     fmt_ts(T, fmt="%m-%d %H:%M"), CONTEXT_GRACE_MS / 1000)
+
+    def _context_tick(self, now: int) -> None:
+        """Scheduler fallback: an hour no traded bar has published once its grace ran out is published here, so the
+        hourly snapshot (and the tracker's bounded buffers) keep moving even without a traded symbol's bar."""
+        tr = self.context
+        h = hour_of(now - CONTEXT_GRACE_MS)
+        if tr.last_hour is None or h <= tr.last_hour:
+            return
+        try:
+            self._publish_context(hour_close(h), late=not tr.ready(hour_close(h)))
+        except Exception:  # noqa: BLE001
+            self._context_error("snapshot")
+
+    def _market_context(self, sym: str, now: int):
+        """Context.market for a decision at `now`: the snapshot of the last hour close at or before it."""
+        try:
+            return self.context.view(sym, now)
+        except Exception:  # noqa: BLE001
+            self._context_error("view")
+            return NO_MARKET_CONTEXT
 
     async def _btc_shock_check(self, view: MarketView) -> None:
         m1 = view.tf("1m")
@@ -1047,6 +1203,7 @@ class Heartless:
                     asyncio.create_task(self._refresh_funding())
                 if now - self._last_universe >= self.s.universe_refresh_minutes * MS_MINUTE:
                     await self.refresh_universe()
+                self._context_tick(now)
                 if self.research.due(now) and not self.research.running:
                     asyncio.create_task(self.research.cycle())
                 elif self.research.discovery_due(now) and not self.research.running:
@@ -1126,7 +1283,7 @@ class Heartless:
                 rows = rows_from_rest(oi, tp, ta, ga, tk)
                 fresh = MetricsSeries.from_rows(rows)
                 merged = fresh if have is None else have.merge(fresh)
-                self._store_metrics(sym, rows)
+                self._context_metrics(sym, self._store_metrics(sym, rows))
                 self.metrics_series[sym] = merged.tail(1200)
                 # keep the 15m OI deque fed for anything still reading it
                 dq = self.oi_hist.setdefault(sym, deque(maxlen=64))
@@ -1137,45 +1294,69 @@ class Heartless:
             except Exception as e:  # noqa: BLE001
                 log.debug("metrics poll %s failed: %s", sym, e)
             await asyncio.sleep(0.25)
+        # context-only symbols: the market context reads open interest only (one series instead of five)
+        for sym in list(self.context_only):
+            try:
+                oi = await self.rest.open_interest_hist(sym, "5m", 6 if sym in self._ctx_polled else 500)
+                self._context_metrics(sym, self._store_metrics(sym, rows_from_rest(oi, [], [], [], [])))
+                if oi:
+                    self._ctx_polled.add(sym)
+            except Exception as e:  # noqa: BLE001
+                log.debug("metrics poll %s failed: %s", sym, e)
+            await asyncio.sleep(0.25)
 
-    def _store_metrics(self, sym: str, rows: list[dict]) -> None:
-        """Persist polled positioning rows (archive-shaped, keyed by bucket start). The research worker's backtests read
-        metrics from the store like the lab does; with polled rows kept in memory only, every research cycle evaluated
-        the metrics alphas (positioning, funding_fade) without data, so they could never pass and be switched back on.
-        A bucket polled while still incomplete is completed by the next polls (each re-reads the newest buckets). A value
-        missing from this poll keeps the stored one: a bucket that only some series answered (one series lagging a
-        bucket behind the others, or answering empty) would otherwise erase what an earlier poll stored, and with a
-        steady one-bucket lag every bucket would end up holding a single series once it left the poll window."""
+    def _context_metrics(self, sym: str, rows: list) -> None:
+        """Hand the rows just stored (merged with what was stored before, so the tracker holds what the store holds)
+        to the market context."""
+        try:
+            for r in rows:
+                self.context.on_metrics(sym, r)
+        except Exception:  # noqa: BLE001
+            self._context_error("metrics")
+
+    def _store_metrics(self, sym: str, rows: list[dict]) -> list:
+        """Persist polled positioning rows (archive-shaped, keyed by bucket start) and return them as stored. The
+        research worker's backtests read metrics from the store like the lab does; with polled rows kept in memory only,
+        every research cycle evaluated the metrics alphas (positioning, funding_fade) without data, so they could never
+        pass and be switched back on. A bucket polled while still incomplete is completed by the next polls (each
+        re-reads the newest buckets). A value missing from this poll keeps the stored one: a bucket that only some
+        series answered (one series lagging a bucket behind the others, or answering empty) would otherwise erase what
+        an earlier poll stored, and with a steady one-bucket lag every bucket would end up holding a single series once
+        it left the poll window."""
         from types import SimpleNamespace
 
         cols = ("oi", "oi_value", "top_ls_accounts", "top_ls_positions", "ls_accounts", "taker_ls_vol")
+        out: list = []
         try:
             if not rows:
-                return
+                return out
             ts = [int(r["ts"]) for r in rows]
             stored = {int(r["ts"]): r for r in self.store.load_metrics(sym, min(ts), max(ts))}
-            out = []
             for t, r in zip(ts, rows):
                 old = stored.get(t) or {}
                 out.append(SimpleNamespace(ts=t, **{c: r.get(c) if r.get(c) is not None else old.get(c) for c in cols}))
             self.store.save_metrics(sym, out)
         except Exception as e:  # noqa: BLE001 - persistence must never break the live series
             log.warning("metrics store %s failed: %s", sym, e)
+        return out
 
     async def _refresh_funding(self) -> None:
         """Store the funding settlements published since the last stored one, for every universe symbol. _backfill
         only fetched them at start-up and on universe changes, so on a long-running bot the funding table stopped at
         the start: research backtests charge the latest stored rate at every later settlement, i.e. they kept applying
-        the start-up rate for weeks (and the funding-avoidance exit saw it too)."""
+        the start-up rate for weeks (and the funding-avoidance exit saw it too). The context-only symbols are refreshed
+        too, and every new settlement is handed to the market context (its snapshots read the settled rates)."""
         now = now_ms()
-        for sym in list(self.universe):
+        for sym in list(self.universe) + list(self.context_only):
             _, f_hi = self.store.funding_range(sym)
             if f_hi is None or now < f_hi + 8 * MS_HOUR:
                 continue  # never backfilled (the backfill owns that) or no settlement due since the last stored one
             try:
                 fr = await self.rest.funding_rate_history(sym, start=f_hi + 1, end=now)
-                self.store.save_funding(sym, [(int(r["fundingTime"]), float(r["fundingRate"]),
-                                               float(r.get("markPrice", 0) or 0)) for r in fr])
+                rows = [(int(r["fundingTime"]), float(r["fundingRate"]), float(r.get("markPrice", 0) or 0)) for r in fr]
+                self.store.save_funding(sym, rows)
+                for t, rate, _ in rows:
+                    self.context.on_funding(sym, t, rate)
             except Exception as e:  # noqa: BLE001
                 log.debug("funding refresh %s failed: %s", sym, e)
 
@@ -1194,8 +1375,12 @@ class Heartless:
     def _update_health(self, now: int) -> None:
         stale = [s for s in self.universe if now - self.last_bar_ts.get(s, self.started_at) > 3 * MS_MINUTE]
         short = [s for s in self.universe if s in self.candles and self.candles[s].n < LIVE_WINDOW["1m"]]
+        st = self.context_stats
+        ctx = (f"{st['symbols']}/{len(self.context.symbols)} symbols at {fmt_ts(st['last'], fmt='%m-%d %H:%M')} UTC, "
+               f"{st['snapshots']} snapshots ({st['late']} after the grace, {st['errors']} errors), "
+               f"{len(self.context_only)} context-only streams")
         self.health = {"market_stream": self.market.connected, "stale_symbols": stale, "queue": self._kline_queue.qsize(),
-                       "short_history": short, "backfill_pending": sorted(self._backfill_failed),
+                       "short_history": short, "backfill_pending": sorted(self._backfill_failed), "market_context": ctx,
                        "user_stream": self.live_account.user_stream.connected if self.live_account else None,
                        "uptime_min": (now - self.started_at) / MS_MINUTE, "used_weight": self.rest.used_weight}
 

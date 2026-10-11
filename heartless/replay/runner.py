@@ -3,6 +3,7 @@ checker on a virtual-time loop, runs it over [start, end] and returns a JSON-ser
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import shutil
@@ -99,7 +100,8 @@ class _LogCapture(logging.Handler):
 
 def _prepare_store(cfg: ReplayConfig, work: Path, symbols: list[str]) -> None:
     """Fresh bot store holding the `seed_days` of history before start, as a bot that has been collecting data would
-    have (candles, funding; metrics only on request: the bot stores the metrics it polls, from its own start on)."""
+    have (candles, funding; metrics only on request: the bot stores the metrics it polls, from its own start on).
+    `symbols` are the traded and the market-context symbols: the context tracker warms up from this history."""
     from heartless.core.store import Store
 
     db = work / "heartless.db"
@@ -142,6 +144,13 @@ def _prepare_store(cfg: ReplayConfig, work: Path, symbols: list[str]) -> None:
             st.close()
 
 
+def _context_universe(cfg: ReplayConfig) -> list[str]:
+    """CONTEXT_UNIVERSE as the replayed bot will see it (a `--set` override or the environment, else the default)."""
+    from heartless.config import Settings
+
+    return Settings(_env_file=None, **{**REPLAY_DEFAULTS, **cfg.settings}).context_universe_list
+
+
 def _settings(cfg: ReplayConfig, work: Path, symbols: list[str]):
     from heartless.config import Settings
 
@@ -164,10 +173,12 @@ def run_replay(cfg: ReplayConfig) -> dict:
         raise ValueError("replay window is empty")
     # the replayed bot reads the seed history (research / discovery evaluate it) and the window itself
     seal.check_window(cfg.start_ms - cfg.seed_days * MS_DAY, cfg.end_ms)
-    # the source serves nothing outside the span the seal check just covered (the bot fetches HISTORY_DAYS itself)
-    source = ReplaySource(cfg.source_db, cfg.symbols, floor_ms=cfg.start_ms - cfg.seed_days * MS_DAY, ceil_ms=cfg.end_ms)
+    # the source serves nothing outside the span the seal check just covered (the bot fetches HISTORY_DAYS itself); the
+    # market-context symbols it holds are served too (1m klines, funding, metrics), but only `symbols` can be traded
+    source = ReplaySource(cfg.source_db, cfg.symbols, floor_ms=cfg.start_ms - cfg.seed_days * MS_DAY,
+                          ceil_ms=cfg.end_ms, extra_symbols=_context_universe(cfg))
     try:
-        symbols = source.symbols
+        symbols = source.traded
         for s in symbols:
             first, last, n = source.coverage(s, cfg.start_ms, cfg.end_ms)
             if not n:
@@ -184,7 +195,7 @@ def run_replay(cfg: ReplayConfig) -> dict:
             work.mkdir(parents=True, exist_ok=True)
         else:
             work = Path(tempfile.mkdtemp(prefix="heartless-replay-"))
-        _prepare_store(cfg, work, symbols)
+        _prepare_store(cfg, work, source.symbols)
         settings = _settings(cfg, work, symbols)
         commands = cfg.commands
         if commands is None:
@@ -241,6 +252,7 @@ class _Run:
         self.retired: list[dict] = []
         self.evaluations = {"calls": 0, "decisions": 0, "by_path": {}, "by_verdict": {}}
         self.decisions: list[dict] = []  # challenger decisions kept for the summary (see _record_decision)
+        self.context: dict[int, tuple[str, int]] = {}  # published market-context hour close -> (digest, symbols)
         self._decision_days: dict[str, int] = {}
         self.pending_errors: list[str] = []  # violations raised before the checker exists
         self.wall0 = time.perf_counter()
@@ -425,6 +437,16 @@ class _Run:
         seed = self.cfg.seed
         if seed is not None:
             app.bandit.rng.seed(seed)
+        tracker = app.context
+        orig_snapshot = tracker.snapshot
+
+        def snapshot(T: int):
+            snap = orig_snapshot(T)
+            if snap is not None and snap.ts not in self.context:
+                self.context[snap.ts] = (context_digest(snap.rows()), int(snap.present.sum()))
+            return snap
+
+        tracker.snapshot = snapshot
 
         async def start_challenger(slot, restore: bool = False):
             await orig_start(slot, restore)
@@ -539,6 +561,25 @@ class _Run:
                          "skipped": dict(sorted(eng.stats.skipped.items()))}
         return out
 
+    def _context_summary(self, app, market) -> dict:
+        """Market-context snapshots the replayed bot published: one per hour close from the hour it started in to the
+        end of the window is expected (`missing` lists the gaps)."""
+        cfg = self.cfg
+        first = (cfg.start_ms + cfg.app_start_offset_ms + 1) // MS_HOUR * MS_HOUR - 1
+        expected = list(range(first, cfg.end_ms + 1, MS_HOUR))
+        missing = [t for t in expected if t not in self.context]
+        present = [n for _, n in self.context.values()]
+        st = app.context_stats
+        return {"universe": list(app.context.symbols), "context_only": list(app.context_only),
+                "served_extra": list(getattr(self.source, "extra", [])), "snapshots": len(self.context),
+                "hours_expected": len(expected), "missing": len(missing),
+                "missing_first": [fmt_ts(t) for t in missing[:20]],
+                "late": st["late"], "errors": st["errors"],
+                "symbols_present": {"min": min(present), "max": max(present),
+                                    "mean": round(sum(present) / len(present), 2)} if present else {},
+                "context_bars": getattr(market, "context_bars", 0), "context_gaps": getattr(market, "context_gaps", 0),
+                "digests": {str(t): d for t, (d, _) in sorted(self.context.items())}}
+
     def _summary(self, loop, app, market, capture, memory: dict, pre_flatten: dict) -> dict:
         from heartless.execution.stats import by_alpha, summarize
 
@@ -580,6 +621,7 @@ class _Run:
                      "frozen_wall_seconds": round(loop.frozen_wall_s, 1), "deadlocked": loop.deadlocked},
             "market": {"bars": market.bars_emitted, "minutes": market.minutes, "messages": market.messages,
                        "gaps": market.gaps, "rest_calls": dict(sorted(app.rest.calls.items()))},
+            "context": self._context_summary(app, market),
             "trades": {"total": len(all_trades), "opened": opened, "closed": dict(self.closed)},
             "pnl": {"champion_net": champ.get("net"), "champion_return_pct": champ.get("return_pct"),
                     "champion_trades": champ.get("trades")},
@@ -602,6 +644,16 @@ class _Run:
             if self.log_handler else {},
             "invariants": self.checker.summary(),
         }
+
+
+def context_digest(rows) -> str:
+    """Digest of one snapshot's market_context rows ((symbol, ts, float64 blob), market row first): equal digests mean
+    bit-identical snapshots, e.g. a replayed live snapshot and the offline build of the same hour."""
+    h = hashlib.sha1()
+    for sym, ts, blob in rows:
+        h.update(f"{sym}:{int(ts)}:".encode())
+        h.update(blob)
+    return h.hexdigest()[:16]
 
 
 def _count(items) -> dict[str, int]:
@@ -633,6 +685,15 @@ def format_report(s: dict) -> str:
         lines.append(f"  {k:<12} {c['runs']:>9,} / {c['violations']:<5} {c['what']}")
     for v in inv["violations"][:25]:
         lines.append(f"  ! {v['time']} {v['check']} [{v['engine'] or '-'}] {v['detail']}")
+    cx = s.get("context") or {}
+    if cx:
+        pres = cx.get("symbols_present") or {}
+        lines += ["", f"market context: {cx['snapshots']} snapshots for {cx['hours_expected']} hour closes "
+                      f"({cx['missing']} missing, {cx['late']} published after the grace, {cx['errors']} errors), "
+                      f"symbols per snapshot {pres.get('min', 0)}..{pres.get('max', 0)} (mean {pres.get('mean', 0)}), "
+                      f"{len(cx['context_only'])} context-only streams ({cx['context_bars']:,} bars, "
+                      f"{cx['context_gaps']} gaps)"]
+        lines += [f"  missing {t}" for t in cx.get("missing_first", [])[:10]]
     lines += ["", "engines:"]
     for name, e in s["engines"].items():
         ret = f", wallet {e['wallet']:,.2f} ({e['return_pct']:+.2f}%)" if "wallet" in e else ""

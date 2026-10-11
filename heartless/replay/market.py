@@ -8,7 +8,11 @@
 * `ReplayMarketStream` is a `MarketStream` that, instead of a websocket, emits every stored 1m candle in virtual time:
   four price points inside the minute (open, first extreme, second extreme, close; bullish bars O-L-H-C, bearish
   O-H-L-C) as bookTicker + markPrice@arr messages with a consistent bid/ask/mark, then the closed kline at the bar's
-  close time. Messages go through the stream's real `_dispatch()` as JSON, exactly like websocket frames.
+  close time. Messages go through the stream's real `_dispatch()` as JSON, exactly like websocket frames. The
+  kline-only symbols (market-context members the bot does not trade) get just their closed klines.
+* The traded universe stays the replayed symbol list: the market-context symbols (`extra_symbols`) are listed in
+  exchangeInfo and served by every data route, but the all-symbol 24h ticker omits them, so the universe selection
+  never picks one.
 """
 from __future__ import annotations
 
@@ -44,11 +48,13 @@ class ReplaySource:
     """Read-only access to a stored history, chunked per symbol for minute-by-minute emission."""
 
     def __init__(self, db_path: str, symbols: list[str] | None = None, spread_bps: float = 1.0,
-                 floor_ms: int | None = None, ceil_ms: int | None = None):
+                 floor_ms: int | None = None, ceil_ms: int | None = None, extra_symbols: list[str] | None = None):
         """Nothing outside [floor_ms, ceil_ms] is ever served (candles, funding, metrics, the funding estimate). The
         replay passes the span its seal check covered (seed start .. end): the bot asks for HISTORY_DAYS of history on
         its own, the funding estimate looks at the next settlement, and the source store may hold a sealed period
-        right before or after the window."""
+        right before or after the window. `symbols` are the tradable symbols (`traded`); `extra_symbols` (the market
+        context universe) are served too when the store holds candles for them inside that span, others are
+        skipped. `symbols` lists both."""
         self.path = str(db_path)
         self.floor = int(floor_ms) if floor_ms is not None else -(2**62)
         self.ceil = int(ceil_ms) if ceil_ms is not None else 2**62
@@ -58,7 +64,12 @@ class ReplaySource:
         missing = [s for s in want if s not in stored]
         if missing:
             raise ValueError(f"replay source {self.path} has no candles for {', '.join(missing)}")
-        self.symbols = want
+        self.traded = want
+        extra = sorted({s.upper() for s in (extra_symbols or [])} - set(want))
+        self.extra = [s for s in extra if s in stored and self._conn.execute(
+            "SELECT 1 FROM candles WHERE symbol=? AND open_time>=? AND open_time<=? LIMIT 1",
+            (s, self.floor, self.ceil)).fetchone()]
+        self.symbols = want + self.extra
         self.half_spread = spread_bps / 2e4
         self._chunk: dict[str, tuple[int, int, np.ndarray, np.ndarray]] = {}  # sym -> (lo, hi, open_times, rows)
         self._funding: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
@@ -213,6 +224,7 @@ class ReplayRest(BinanceRest):
         super().__init__("", "", False)
         self.source = source
         self.infos = infos
+        self.tradable = set(getattr(source, "traded", None) or infos)  # the 24h ticker list (universe candidates)
         self.latency_ms = latency_ms
         self.calls: dict[str, int] = {}
         self._routes: dict[str, Callable[[dict], Any]] = {
@@ -278,7 +290,7 @@ class ReplayRest(BinanceRest):
         now = now_ms()
         if "symbol" in p:
             return self.source.ticker_24h(self._known(p), now) or {}
-        return [t for t in (self.source.ticker_24h(s, now) for s in self._listed(now)) if t]
+        return [t for t in (self.source.ticker_24h(s, now) for s in self._listed(now) if s in self.tradable) if t]
 
     def _klines(self, p: dict) -> list[list]:
         sym = self._known(p)
@@ -356,6 +368,8 @@ class ReplayMarketStream(MarketStream):
         self.messages = 0
         self.minutes = 0
         self.gaps = 0  # (symbol, minute) pairs without a stored bar
+        self.context_bars = 0  # klines of the kline-only (market-context) symbols, counted apart from the traded ones
+        self.context_gaps = 0
 
     async def _send(self, stream: str, data: Any) -> None:
         self.messages += 1
@@ -380,6 +394,13 @@ class ReplayMarketStream(MarketStream):
                         self.gaps += 1
                     else:
                         bars[s] = row
+                ctx_bars = {}
+                for s in list(self.kline_only):
+                    row = self.source.bar(s, m)
+                    if row is None:
+                        self.context_gaps += 1
+                    else:
+                        ctx_bars[s] = row
                 for off, which in PRICE_POINTS:
                     await sleep_until(m + off)
                     if self._stop:
@@ -403,13 +424,14 @@ class ReplayMarketStream(MarketStream):
                                       "r": _s(rate), "T": nxt})
                     if marks:
                         await self._send("!markPrice@arr@1s", marks)
-                for s, row in bars.items():
+                for s, row in (*bars.items(), *ctx_bars.items()):
                     await self._send(f"{s.lower()}@kline_1m", {
                         "e": "kline", "E": int(row[9]), "s": s,
                         "k": {"t": int(row[0]), "T": int(row[9]), "s": s, "i": "1m", "f": 0, "L": 0, "o": _s(row[1]),
                               "c": _s(row[4]), "h": _s(row[2]), "l": _s(row[3]), "v": _s(row[5]), "n": int(row[7]),
                               "x": True, "q": _s(row[6]), "V": _s(row[8]), "Q": _s(row[8] * row[4]), "B": "0"}})
-                    self.bars_emitted += 1
+                self.bars_emitted += len(bars)
+                self.context_bars += len(ctx_bars)
                 self.minutes += 1
                 m += MS_MINUTE
             await sleep_until(m + 500)  # let the last bar's processing finish at its own instant
