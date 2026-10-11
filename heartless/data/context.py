@@ -505,6 +505,14 @@ def _real(path) -> str:
     return os.path.realpath(str(path)) if path else ""
 
 
+def live_source(db_path) -> dict:
+    """The `source` a running bot records in its live context store (app.Heartless._ctx_meta): its own candle database,
+    flagged live. The bot appends that store hourly and prunes it with its data retention, so a research build or run
+    refuses it (source_status), and the bot in turn never touches a store recorded for another candle database: one
+    path resolution (Settings.context_db_path) serves both sides without one deleting the other's rows."""
+    return {"path": _real(db_path), "live": True}
+
+
 def default_path(db_path) -> str:
     """<directory of the candle database>/context.db: the CONTEXT_DB default."""
     return str(Path(db_path).resolve().parent / DB_NAME)
@@ -531,6 +539,9 @@ def source_status(meta, source: dict) -> tuple[str, int | None, str]:
     old = (meta or {}).get("source") if isinstance(meta, dict) else None
     if not isinstance(old, dict) or not old.get("path"):
         return "mismatch", None, "it records no source candle database (built before source checks existed)"
+    if old.get("live"):
+        return "mismatch", None, ("it is a running bot's live context store (appended hourly, pruned with the data "
+                                  "retention), not a research build")
     if old["path"] != source["path"]:
         return "mismatch", None, f"it was built from {old['path']}, not from {source['path']}"
     if old.get("fingerprint") == source["fingerprint"]:
@@ -613,9 +624,9 @@ def _check_or_reset(dst, meta, source: dict, universe: list[str], rebuild: bool)
         note = "rebuilding from scratch" if rebuild else ""
     else:
         status, stable, why = source_status(meta, source)
-        if status == "mismatch" and (not (meta.get("source") or {}).get("path")
-                                     or meta["source"]["path"] != source["path"]):
-            raise _refuse(dst, why)
+        rec = meta.get("source") or {}
+        if status == "mismatch" and (rec.get("live") or not rec.get("path") or rec["path"] != source["path"]):
+            raise _refuse(dst, why)  # before anything is deleted (a live store of an older definition included)
         if meta.get("universe") != universe:
             raise _refuse(dst, f"it was built for the universe {','.join(meta.get('universe') or [])}, this run asks "
                                f"for {','.join(universe)}")

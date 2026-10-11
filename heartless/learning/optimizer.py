@@ -177,7 +177,7 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
     out: dict = {"alphas": {}, "window": {"since": since, "split": split, "until": now, "folds": fold_windows,
                                           "sealed_clipped": clipped},
                  "symbols": list(bt.candles.keys()),
-                 "context": {"db": getattr(settings, "context_db", "") or "",
+                 "context": {"db": str(settings.context_db_path),
                              "hours": len(bt.market) if getattr(bt, "market", None) is not None else 0}}
     for alpha in (alphas or list(ALPHA_SPECS)):
         if alpha not in base.alphas or not _has_own_params(alpha):

@@ -73,9 +73,11 @@ FUNDING_MISS_GRACE_MS = 15 * MS_MINUTE
 
 
 def live_context_path(settings: Settings) -> Path:
-    """The store the bot appends its hourly market-context snapshots to and its research worker reads them from (C2-B):
-    CONTEXT_DB, else <data_dir>/context.db (the default C2-A gives CONTEXT_DB)."""
-    return Path(settings.context_db) if settings.context_db else Path(settings.data_dir) / "context.db"
+    """The store the bot appends its hourly market-context snapshots to and its research worker reads them from (C2-B).
+    Resolved by Settings.context_db_path, the one resolution lab, discovery and the backtester use as well (CONTEXT_DB,
+    else <data_dir>/context.db). The live and the offline stores stay apart because the bot and the research commands
+    run on different data dirs, and each refuses the other's store (_ctx_meta here, context.source_status there)."""
+    return settings.context_db_path
 
 
 # truthful status line while the champion has no alpha switched on (startup message, /status, daily report)
@@ -92,6 +94,8 @@ class Heartless:
     _depth_task: asyncio.Task | None = None
     _depth_need: int = 0
     _depth_tried: dict | None = None
+    # why the live context store is not used (it records another candle database), "" while it is (integration)
+    _ctx_off: str = ""
 
     def __init__(self, settings: Settings):
         self.s = settings
@@ -121,6 +125,7 @@ class Heartless:
         # the background at start-up. The research worker's backtests read it (ResearchManager.worker_settings).
         self.live_context_path = live_context_path(settings)
         self._ctx_store: Store | None = None
+        self._ctx_off = ""
         self._ctx_fill_task: asyncio.Task | None = None
         # C2-B: funding schedule per symbol (see DEFAULT_FUNDING_INTERVAL_MS)
         self.funding_next: dict[str, int] = {}  # symbol -> next settlement time as the exchange last reported it
@@ -304,8 +309,10 @@ class Heartless:
                     f"마지막 판정점까지 승격되지 않으면 종료")
         judged = [a for a in self.params.alphas if evidence.entry(a) is not None]
         counts = evidence.summary(judged)
+        # the documents of the judgements behind those verdicts (P1: docs/OOS_2022_2024.md, P2: docs/RESEARCH_P2.md)
+        docs = list(dict.fromkeys(evidence.entry(a).get("source") for a in judged if evidence.entry(a).get("source")))
         ev = (f"OOS 판정: {len(judged)}개 중 탈락 {counts['failed']}, 통과 {counts['passed']}"
-              + (" (docs/OOS_2022_2024.md)" if judged else ""))
+              + (f" ({', '.join(docs)})" if docs else ""))
         return {"active": active, "no_alpha": not active, "headline": NO_ALPHA_TEXT if not active else
                 f"활성 알파 {len(active)}개: {', '.join(active)}", "criteria": criteria if not active else "",
                 "evidence": ev, "evidence_counts": counts,
@@ -1157,8 +1164,12 @@ class Heartless:
 
     def _history_depth_tick(self, now: int) -> None:
         """Hourly from the scheduler: a newly enabled long-lookback alpha (promotion, a new challenger, a restored one at
-        start-up) gets its history in the background (backfill into the store, then the views are reloaded)."""
-        if now - self._last_depth_check < MS_HOUR or (self._depth_task is not None and not self._depth_task.done()):
+        start-up) gets its history in the background (backfill into the store, then the views are reloaded). A need
+        deeper than the one last handled runs at the next tick instead of up to an hour later, so a new challenger's
+        daily alpha does not decide on a short history in between."""
+        if self._depth_task is not None and not self._depth_task.done():
+            return
+        if now - self._last_depth_check < MS_HOUR and self._alpha_history_days() <= self._depth_need:
             return
         self._last_depth_check = now
         self._depth_task = asyncio.create_task(self._ensure_history_depth(), name="history-depth")
@@ -1347,38 +1358,71 @@ class Heartless:
 
     # --- live market-context store (C2-B) ----------------------------------------------------------------------
     def _ctx_db(self) -> Store:
-        """The live context store (opened on first use; the main store when CONTEXT_DB names the main database)."""
+        """The live context store (opened on first use; the main store when CONTEXT_DB names the main database).
+        Checked once when opened (_ctx_meta): a store recorded for another candle database raises ContextMismatch and
+        is not used for the rest of the process (_ctx_off)."""
+        if self._ctx_off:
+            raise CTX.ContextMismatch(self._ctx_off)
         if self._ctx_store is None:
             path = self.live_context_path
             if path.resolve() == Path(self.s.db_path).resolve():
-                self._ctx_store = self.store
+                st = self.store
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                self._ctx_store = Store(path)
+                st = Store(path)
+            try:
+                self._ctx_meta(st)
+            except CTX.ContextMismatch as e:
+                if st is not self.store:
+                    st.close()
+                self._ctx_refuse(e)
+                raise
+            self._ctx_store = st
         return self._ctx_store
 
+    def _ctx_refuse(self, err: Exception) -> None:
+        if not self._ctx_off:
+            self._ctx_off = str(err)
+            log.error("live context store not used: %s. Point CONTEXT_DB at a file of its own (or leave it empty for "
+                      "<data_dir>/context.db); until then the hourly snapshots are not stored and the research "
+                      "backtests run without market context", err)
+
     def _ctx_meta(self, st: Store) -> dict:
-        """The store's context meta for this bot's universe; rows of another universe or feature version are stale
-        (another cross-section) and dropped, as the offline build does."""
+        """The store's context meta for this bot's universe, recording this bot's candle database as its live source
+        (data/context.py live_source; research builds refuse such a store). Rows of another universe or feature version
+        are stale (another cross-section) and dropped, as the offline build does. A store recorded for ANOTHER candle
+        database (an offline research build, e.g. CONTEXT_DB exported for lab commands) is never touched: appending
+        and the retention prune would cut its years of history to the bot's 185 days, a universe mismatch would wipe
+        it. ContextMismatch instead."""
         meta = st.get("context.meta")
+        own = CTX.live_source(self.s.db_path)
+        rec = (meta.get("source") or {}).get("path") if isinstance(meta, dict) else None
+        if rec and rec != own["path"]:
+            raise CTX.ContextMismatch(f"{self.live_context_path} holds the market context built from {rec}, not from "
+                                      f"this bot's candle database {own['path']}")
         if not CTX.meta_ok(meta, self.context.symbols):
             if st.has_market_context():
                 log.warning("live context store %s holds another context version or universe: rebuilt",
                             self.live_context_path)
                 st.delete_market_context()
-            meta = CTX.meta_for(self.context.symbols)
+            meta = CTX.meta_for(self.context.symbols, own)
+            st.set("context.meta", meta)
+        elif meta.get("source") != own:  # a store from before the live flag, or an offline build of this very database
+            meta["source"] = own
             st.set("context.meta", meta)
         return meta
 
     def _persist_context(self, snap) -> None:
         """Append one published snapshot to the live context store (its hour close joins the built spans)."""
-        if snap is None:
+        if snap is None or self._ctx_off:
             return
         try:
             st = self._ctx_db()
             meta = self._ctx_meta(st)
             st.add_market_context(snap.rows(), snap.ts, snap.ts, meta)
             self.context_stats["stored"] += 1
+        except CTX.ContextMismatch as e:
+            self._ctx_refuse(e)
         except Exception:  # noqa: BLE001 - persistence must never stop the snapshot from reaching the engines
             self._context_error("persist")
 
@@ -1410,6 +1454,16 @@ class Heartless:
         finally:
             src.close()
 
+    def _build_context_gap(self, a: int, b: int) -> int:
+        """Worker thread: compute the hour closes [a, b] and store them under the store's exclusive build lock (the
+        lock data/context.py builds and readers take), so the research worker's ContextTable.load never reads a span
+        half written. Returns the number of snapshots stored."""
+        st = self._ctx_db()
+        with CTX.build_lock(st.path):
+            snaps = self._compute_context(a, b)
+            st.add_market_context([r for sn in snaps for r in sn.rows()], a, b, self._ctx_meta(st))
+        return len(snaps)
+
     async def _fill_context_gaps(self, wait_for: asyncio.Task | None = None) -> int:
         """Start-up, in the background: build the hour closes of the research window (RESEARCH_LOOKBACK_DAYS before now
         up to the hour the warm-up finalised) that the live context store lacks, from the stored candles with the
@@ -1422,7 +1476,7 @@ class Heartless:
             except Exception:  # noqa: BLE001
                 pass
         h = self.context.last_hour
-        if h is None:
+        if h is None or self._ctx_off:
             return 0
         now = now_ms()
         lo = CTX.hour_close(CTX.hour_of(now - self.s.research_lookback_days * MS_DAY))
@@ -1430,15 +1484,14 @@ class Heartless:
         stored = 0
         try:
             for a, b in self._context_gaps(lo, hi):
-                snaps = await asyncio.to_thread(self._compute_context, a, b)
-                st = self._ctx_db()
-                meta = self._ctx_meta(st)
-                st.add_market_context([r for sn in snaps for r in sn.rows()], a, b, meta)
-                stored += len(snaps)
-                log.info("live context store: built %d hour(s) %s .. %s UTC from stored candles", len(snaps),
+                n = await asyncio.to_thread(self._build_context_gap, a, b)
+                stored += n
+                log.info("live context store: built %d hour(s) %s .. %s UTC from stored candles", n,
                          fmt_ts(a, fmt="%m-%d %H:%M"), fmt_ts(b, fmt="%m-%d %H:%M"))
         except asyncio.CancelledError:
             raise
+        except CTX.ContextMismatch as e:
+            self._ctx_refuse(e)
         except Exception:  # noqa: BLE001
             self.context_stats["fill_errors"] += 1
             log.exception("live context store: building the missing hours failed")
@@ -1512,10 +1565,14 @@ class Heartless:
         self.store.prune_metrics(cutoff)
         self.store.prune_equity(cutoff)
         self.store.prune_fill_quality(cutoff)
-        try:
-            self._ctx_db().prune_market_context(cutoff)
-        except Exception:  # noqa: BLE001
-            log.warning("live context store prune failed", exc_info=True)
+        if not self._ctx_off:
+            # one DELETE (atomic for a reader) of hours far behind the research window: no build lock needed
+            try:
+                self._ctx_db().prune_market_context(cutoff)
+            except CTX.ContextMismatch as e:
+                self._ctx_refuse(e)
+            except Exception:  # noqa: BLE001
+                log.warning("live context store prune failed", exc_info=True)
 
     def _roll_day(self, now: int) -> None:
         """Start a new reporting day (the engines' daily counters) once `now` passed the local midnight. Runs before
@@ -1714,8 +1771,9 @@ class Heartless:
         st = self.context_stats
         ctx = (f"{st['symbols']}/{len(self.context.symbols)} symbols at {fmt_ts(st['last'], fmt='%m-%d %H:%M')} UTC, "
                f"{st['snapshots']} snapshots ({st['late']} after the grace, {st['errors']} errors), "
-               f"{len(self.context_only)} context-only streams; stored {st['stored']} + built {st['filled']} hours "
-               f"in {self.live_context_path.name}")
+               f"{len(self.context_only)} context-only streams; "
+               + (f"stored {st['stored']} + built {st['filled']} hours in {self.live_context_path.name}"
+                  if not self._ctx_off else f"NOT STORED ({self._ctx_off})"))
         self.health = {"market_stream": self.market.connected, "stale_symbols": stale, "queue": self._kline_queue.qsize(),
                        "short_history": short, "backfill_pending": sorted(self._backfill_failed), "market_context": ctx,
                        "user_stream": self.live_account.user_stream.connected if self.live_account else None,
