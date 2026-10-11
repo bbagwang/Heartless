@@ -1,0 +1,55 @@
+{
+ "family": "funding_carry",
+ "N_family": 7,
+ "t_bar": 3.0,
+ "best_attempt": "funding_carry_xs (defaults: d_min 0.0003, oi_filter 1 / oi_min 0, hold_k 9, sl_atr 2.5)",
+ "gate": {
+  "t_day": {
+   "value": 1.36,
+   "bar": 3.0,
+   "pass": false
+  },
+  "avg_r": {
+   "value": 0.0375,
+   "bar": 0.05,
+   "pass": false
+  },
+  "years_positive": {
+   "value": 2,
+   "bar": 2,
+   "pass": true
+  },
+  "stress_avg_r": {
+   "value": 0.032,
+   "bar": 0.0,
+   "pass": true
+  }
+ },
+ "passes_train_gate": false,
+ "final_candidates": [],
+ "engine_funding_accounting": "BarPaperAccount.apply_funding -> FUNDING fill -> Position.funding -> net_pnl = realized - fees + funding -> r_multiple = net / risk_amount (verified by tests/test_alpha_funding_carry_xs.py round trips)",
+ "funding_share": {
+  "nominal": {
+   "n": 563,
+   "avg_r": 0.0375,
+   "gross_price_r_per_trade": 0.0334,
+   "fees_r_per_trade": 0.0068,
+   "funding_r_per_trade": 0.0109,
+   "funding_usdt": 280.5,
+   "net_usdt": 961.7,
+   "funding_share_of_net": 0.292,
+   "trades_receiving_funding_pct": 82.8
+  },
+  "stress": {
+   "n": 563,
+   "avg_r": 0.032,
+   "gross_price_r_per_trade": 0.0313,
+   "fees_r_per_trade": 0.0102,
+   "funding_r_per_trade": 0.0109,
+   "funding_usdt": 279.4,
+   "net_usdt": 819.1,
+   "funding_share_of_net": 0.341,
+   "trades_receiving_funding_pct": 82.8
+  }
+ }
+}
