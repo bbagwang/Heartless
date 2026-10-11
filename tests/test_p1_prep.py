@@ -131,15 +131,19 @@ def test_load_backtester_window_warms_up_before_and_reads_nothing_after(tmp_path
 
 
 # --- (c) backtest --start/--end: joint portfolio -------------------------------------------------------------------
-def test_backtest_window_refuses_the_sealed_period_and_has_no_unseal(tmp_path, monkeypatch, capsys):
+def test_backtest_window_refuses_the_sealed_period(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HEARTLESS_DATA_DIR", str(tmp_path))
     with pytest.raises(SystemExit) as e:
         cli.main(["backtest", "--start", "2024-12-01", "--end", "2025-01-02"])
     assert e.value.code == 2 and "sealed period 2025" in capsys.readouterr().err
     assert not (tmp_path / "heartless.db").exists()  # refused before the database is opened
-    with pytest.raises(SystemExit) as e:
-        cli.main(["backtest", "--start", "2024-12-01", "--end", "2025-01-02", "--unseal", "2025"])
-    assert e.value.code == 2  # argparse: no such option
+    with pytest.raises(SystemExit) as e:  # a typo is an error, not a silent no-op
+        cli.main(["backtest", "--start", "2024-12-01", "--end", "2025-01-02", "--unseal", "2O25"])
+    assert e.value.code == 2 and "unknown sealed period" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:  # the rolling --days lookback has no way into a sealed period
+        cli.main(["backtest", "--days", "30", "--unseal", "2025"])
+    assert e.value.code == 2 and "--unseal needs --start" in capsys.readouterr().err
+    assert not Path(seal.LEDGER).exists()
     # a date-only end is exclusive: --end 2025-01-01 stops at 2024-12-31 23:59:59.999 and passes the seal
     with pytest.raises(SystemExit) as e:
         cli.main(["backtest", "--start", "2024-12-01", "--end", "2025-01-01", "--symbols", "BTCUSDT"])
@@ -209,6 +213,46 @@ def test_backtest_window_runs_one_shared_account_with_production_risk(tmp_path, 
     assert doc["drawdown_pause"] == {"latched": False, "refused_signals": 0, "hourly_crossing": None}
     assert min(doc["equity_daily"]) == "2023-03-02"
     assert "Joint backtest" in printed and "rejected" in printed and "4/5 symbols" in printed
+
+
+def test_backtest_window_unseal_opens_a_sealed_period_and_records_it(tmp_path, monkeypatch, capsys):
+    """`backtest --start/--end --unseal P` opens a sealed period like the lab: refused without it, run with it, one
+    seal-ledger line per run that touches P, and nothing recorded (nor opened) for an unseal the window does not need.
+    A synthetic period keeps the test independent of which real periods are still sealed."""
+    monkeypatch.setattr(seal, "SEALED", {"2023x": (_ms(2023, 3, 3), _ms(2023, 4, 1))})
+    orig = Ensemble.__init__
+    monkeypatch.setattr(Ensemble, "__init__", lambda self, params, bandit, alphas=None, only_alpha=None:
+                        orig(self, params, bandit, [Burst()], only_alpha))
+    monkeypatch.setattr(lab, "WARMUP_MS", DAY)
+    monkeypatch.setenv("HEARTLESS_DATA_DIR", str(tmp_path))
+    st = Store(tmp_path / "heartless.db")
+    _save(st, "AAAUSDT", _ms(2023, 3, 1), 4, seed=31)
+    st.close()
+    params = StrategyParams.default()
+    params.enabled = {a: a == "htf_trend" for a in params.enabled}
+    pfile = tmp_path / "p.json"
+    pfile.write_text(json.dumps(params.to_dict()))
+    base = ["backtest", "--start", "2023-03-02", "--end", "2023-03-04", "--params", str(pfile)]
+    with pytest.raises(SystemExit) as e:
+        cli.main(base)
+    assert e.value.code == 2 and "sealed period 2023x" in capsys.readouterr().err and not Path(seal.LEDGER).exists()
+    out = tmp_path / "joint.json"
+    cli.main([*base, "--unseal", "2023x", "--out", str(out)])
+    assert "UNSEALING 2023x" in capsys.readouterr().err
+    doc = json.loads(out.read_text())
+    assert doc["summary"]["n"] > 0 and doc["seal"]["touched"] == ["2023x"] and doc["seal"]["unsealed"] == ["2023x"]
+    assert not doc["seal"]["clean"] and doc["window"]["end_ms"] == _ms(2023, 3, 4) - 1
+    rows = [json.loads(x) for x in Path(seal.LEDGER).read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["period"] == "2023x" and rows[0]["argv"][1:3] == ["backtest", "--start"]
+    assert rows[0]["argv"][-4:-2] == ["--unseal", "2023x"]
+    # a window before the period: --unseal has no effect, nothing recorded, and nothing past the window end is read
+    seen = _spy_store(monkeypatch)
+    cli.main(["backtest", "--start", "2023-03-02", "--end", "2023-03-03", "--params", str(pfile), "--unseal", "2023x",
+              "--json"])
+    captured = capsys.readouterr()
+    assert "no effect" in captured.err and json.loads(captured.out)["seal"]["clean"]
+    assert len(Path(seal.LEDGER).read_text().splitlines()) == 1
+    assert all(e is not None and e < _ms(2023, 3, 3) for _, e in seen["candles"] + seen["funding"] + seen["metrics"])
 
 
 def test_backtest_window_reports_when_the_drawdown_pause_latched(tmp_path, monkeypatch, capsys):

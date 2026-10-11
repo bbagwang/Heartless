@@ -1,0 +1,223 @@
+{
+ "version": "sealed2025-vol_breakout_dbox-only",
+ "alphas": {
+  "trend_pullback": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "adx_min": 15,
+   "pullback_atr": 0.3,
+   "ext_max": 0.0,
+   "sl_atr": 1.5,
+   "tp_r": 4.0,
+   "tp1_r": 0.0,
+   "trail_atr": 3.0,
+   "max_hold": 24
+  },
+  "squeeze_breakout": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "squeeze_bars_min": 4,
+   "ret_atr_min": 1.0,
+   "body_min": 0.5,
+   "trend_align": 1,
+   "sl_atr": 3.0,
+   "tp_atr": 7.0,
+   "trail_atr": 0.0,
+   "max_hold": 24
+  },
+  "mean_reversion": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "lookback": 8,
+   "stretch_atr": 4.5,
+   "sl_atr": 2.0,
+   "tp_atr": 2.0,
+   "max_hold": 12,
+   "maker_entry": 0
+  },
+  "momentum_burst": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "burst_atr": 2.0,
+   "vol_z_min": 3.0,
+   "trend_align": 1,
+   "ft_max": 0.5,
+   "oi_min": -1.0,
+   "sl_atr": 1.5,
+   "tp_r": 2.5,
+   "max_hold": 8
+  },
+  "funding_fade": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "z_min": 1.5,
+   "oi_min": 0.02,
+   "fz_min": 0.5,
+   "sl_atr": 1.8,
+   "tp_r": 3.0,
+   "tp1_r": 0.0,
+   "max_hold": 24,
+   "settle_win": 120
+  },
+  "sweep_reversal": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "lookback": 96,
+   "sweep_atr": 0.1,
+   "rej_atr": 0.1,
+   "sl_buffer_atr": 1.0,
+   "tp_r": 2.0,
+   "tp1_r": 1.0,
+   "max_hold": 48,
+   "trend_filter": 0
+  },
+  "discovered": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5
+  },
+  "discovery_daily_capdisp": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "ret24_max": -0.067328,
+   "hurst_max": 0.336784,
+   "disp_min": 0.031298,
+   "sl_atr": 4.0,
+   "hold_h": 24
+  },
+  "funding_carry_xs": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "d_min": 0.0003,
+   "oi_filter": 1,
+   "oi_min": 0.0,
+   "side_mode": 0,
+   "sl_atr": 2.5,
+   "hold_k": 9
+  },
+  "htf_trend": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "week_bars": 168,
+   "pull_bars": 48,
+   "trend_z": 0.25,
+   "pull_z": 0.5,
+   "sl_atr": 3.0,
+   "tp_atr": 8.0,
+   "trail_atr": 3.0,
+   "max_hold": 48
+  },
+  "intraday_levels": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "entry_hour": 13,
+   "k_adr": 0.3,
+   "sl_atr": 1.5,
+   "tp_r": 3.0,
+   "tp1_r": 1.5,
+   "hold_h": 8,
+   "min_atr_bp": 120
+  },
+  "positioning": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "mv_min": 2.25,
+   "oiz_min": 1.0,
+   "chase": 1,
+   "wait": 24,
+   "sl_buf": 0.3,
+   "sl_min": 1.0,
+   "tp_r": 3.0,
+   "max_hold": 12
+  },
+  "positioning_flow_oimom": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "m_min": 1.0,
+   "oi_min": 0.1,
+   "retail_filter": 1,
+   "side_mode": 0,
+   "fund_max": 0.0003,
+   "sl_atr": 2.5,
+   "max_hold": 48
+  },
+  "ts_trend_tsmom": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "lookback_d": 28,
+   "z_min": 0.5,
+   "side_mode": 0,
+   "fund_max": 0.0003,
+   "btc_filter": 0,
+   "sl_atr": 3.0,
+   "trail_atr": 0.0,
+   "max_hold": 10
+  },
+  "vol_breakout_dbox": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "box_d": 20,
+   "comp_q": 1.0,
+   "comp_days": 5,
+   "btc_filter": 1,
+   "trend_filter": 0,
+   "fund_max": 0.0003,
+   "side_mode": 0,
+   "sl_atr": 2.0,
+   "trail_atr": 0.0,
+   "max_hold_h": 72
+  },
+  "xs_rank_mom": {
+   "min_conf": 0.55,
+   "tp1_frac": 0.5,
+   "lookback_h": 168,
+   "q": 0.2,
+   "hold_h": 72,
+   "sl_atr": 3.0,
+   "fund_max": 0.0003,
+   "vol_rank_min": 0.0
+  }
+ },
+ "ensemble": {
+  "entry_threshold": 0.5,
+  "confluence_bonus": 0.08
+ },
+ "enabled": {
+  "trend_pullback": false,
+  "squeeze_breakout": false,
+  "mean_reversion": false,
+  "momentum_burst": false,
+  "funding_fade": false,
+  "sweep_reversal": false,
+  "discovered": false,
+  "discovery_daily_capdisp": false,
+  "funding_carry_xs": false,
+  "htf_trend": false,
+  "intraday_levels": false,
+  "positioning": false,
+  "positioning_flow_oimom": false,
+  "ts_trend_tsmom": false,
+  "vol_breakout_dbox": true,
+  "xs_rank_mom": false
+ },
+ "created": 1791754058834,
+ "note": "sealed-2025 joint backtest (information only): shipped defaults, only vol_breakout_dbox enabled, comp_q=1.0 (the TRAIN/VALID configuration a8356702eb374c77)",
+ "schema": {
+  "trend_pullback": "03f56fa99723",
+  "squeeze_breakout": "55475caf4b21",
+  "mean_reversion": "ba16009d7ee0",
+  "momentum_burst": "d31ed6921cf6",
+  "funding_fade": "ebfe96c8583a",
+  "sweep_reversal": "4f62e06beeb7",
+  "discovered": "81049f4cdd97",
+  "discovery_daily_capdisp": "59c5549a9307",
+  "funding_carry_xs": "5dfff28cc789",
+  "htf_trend": "0956519c90ac",
+  "intraday_levels": "8a30c9e47575",
+  "positioning": "6dfba7368348",
+  "positioning_flow_oimom": "0e8d746fa3dd",
+  "ts_trend_tsmom": "270c9ce56fc7",
+  "vol_breakout_dbox": "476147769fb0",
+  "xs_rank_mom": "018cf0369fb1",
+  "__ensemble__": "4a159af5d581"
+ }
+}

@@ -27,8 +27,11 @@ def main(argv: list[str] | None = None) -> None:
     bt.add_argument("--days", type=int, default=14, help="the last N days (ignored with --start)")
     bt.add_argument("--start", default=None,
                     help="ISO date: joint-portfolio mode, all symbols in ONE account with the production risk settings "
-                         "over [start, end] of stored history (seal-checked; there is no unseal option)")
+                         "over [start, end] of stored history (seal-checked; a sealed period only with --unseal)")
     bt.add_argument("--end", default=None, help="ISO date; a date-only end is exclusive (default: last stored candle)")
+    bt.add_argument("--unseal", action="append", default=[], metavar="PERIOD",
+                    help="with --start: deliberately evaluate a sealed period (e.g. 2025); loud warning + seal ledger "
+                         "entry, like lab")
     bt.add_argument("--alpha", default=None)
     bt.add_argument("--symbols", default=None,
                     help="comma separated, default: current universe (with --start: all stored symbols)")
@@ -246,6 +249,9 @@ async def _backtest(settings, args) -> None:
     if getattr(args, "out", None):
         print("error: --out needs --start (joint-portfolio window mode)", file=sys.stderr)
         sys.exit(2)
+    if getattr(args, "unseal", None):  # the rolling --days lookback must never be a way into a sealed period
+        print("error: --unseal needs --start (joint-portfolio window mode)", file=sys.stderr)
+        sys.exit(2)
     try:
         seal.check_window(now_ms() - args.days * MS_DAY, now_ms())
     except seal.SealedError as e:
@@ -325,8 +331,10 @@ async def _backtest_window(settings, args) -> None:
     and the daily/weekly loss halts and the drawdown pause act - what a single live account would have seen. It is
     offline and reproducible: the risk settings are the shipped Settings() defaults (the local .env is not applied),
     symbol filters are inferred from the data as in the lab, indicators warm up on lab.WARMUP_MS of history before
-    `start`, and nothing stamped after `end` is read. The window must pass the seal check; there is deliberately no
-    unseal option (the sealed final exam is a lab run)."""
+    `start`, and nothing stamped after `end` is read. The window must pass the seal check. `--unseal PERIOD` opens a
+    sealed period as the lab does (loud warning, one seal-ledger line per period the window touches, nothing for one
+    it does not), because a pre-registered final exam may include the joint portfolio over the sealed period
+    (docs/ROADMAP.md section 6, 2026-10-11)."""
     import time
     from datetime import datetime, timezone
 
@@ -348,11 +356,13 @@ async def _backtest_window(settings, args) -> None:
     try:
         start = lab.parse_when(args.start)
         end = lab.parse_when(args.end, end=True) if args.end else None
+        unseal = sorted(set(getattr(args, "unseal", None) or []))
+        seal.overlapping(start, start, unseal)  # an unknown period name is an error, not a silent no-op
     except ValueError as e:
         fail(str(e))
     if end is not None:  # refuse a sealed window before touching the database
         try:
-            seal.check_window(start, end)
+            seal.check_window(start, end, unseal)
         except seal.SealedError as e:
             fail(str(e))
     store = Store(settings.db_path)
@@ -367,9 +377,19 @@ async def _backtest_window(settings, args) -> None:
         if end <= start:
             fail(f"empty window {_iso(start)} .. {_iso(end)}")
         try:
-            seal.check_window(start, end)
+            seal.check_window(start, end, unseal)
         except seal.SealedError as e:
             fail(str(e))
+        touched = seal.overlapping(start, end)
+        for period in unseal:
+            if period in touched:
+                print(f"\n{'!' * 78}\n!!! UNSEALING {period}: this joint backtest evaluates the sealed period {period}. "
+                      f"It is the one-time\n!!! final exam (docs/ROADMAP.md section 1); re-tuning after seeing it is "
+                      f"forbidden. Recorded in\n!!! {seal.LEDGER}\n{'!' * 78}\n", file=sys.stderr, flush=True)
+                seal.record_unseal(period, list(getattr(args, "argv", None) or sys.argv))
+            else:
+                print(f"note: --unseal {period} has no effect: the window does not overlap it (not recorded)",
+                      file=sys.stderr)
         # read-only parameter lookup (ResearchManager.load_champion would persist a default champion into the DB)
         if args.params:
             params, source = _params_file(args.params), f"file {args.params}"
@@ -428,7 +448,7 @@ async def _backtest_window(settings, args) -> None:
                               "hourly_crossing": _iso(pause_at) if pause_at is not None else None},
            "equity_daily": daily,
            "seconds": round(time.time() - t0, 1), "git_commit": commit, "git_dirty": dirty,
-           "seal": seal.status(start, end), "argv": list(getattr(args, "argv", None) or sys.argv),
+           "seal": seal.status(start, end, unseal), "argv": list(getattr(args, "argv", None) or sys.argv),
            "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     if args.json:
         print(json.dumps(lab._clean(doc), indent=1, default=str))
