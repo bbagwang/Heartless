@@ -84,7 +84,7 @@ def test_a_cycle_whose_worker_was_terminated_ends_quietly(tmp_path, monkeypatch)
         app.events.append(kind)
 
     app.emit = emit
-    app.params = SimpleNamespace(to_dict=lambda: {})
+    app.params = SimpleNamespace(to_dict=lambda: {}, alphas={"trend_pullback": {}}, enabled={})  # one alpha to tune
     rm = R.ResearchManager(app)
 
     async def run():
@@ -113,7 +113,9 @@ async def test_every_time_series_is_pruned_with_the_candle_retention(tmp_path):
                  DATA_RETENTION_DAYS=30, HISTORY_DAYS=5)
     app = Heartless(s)
     now = now_ms()
-    old, new = now - 40 * MS_DAY, now - 10 * MS_DAY
+    # E2: DATA_RETENTION_DAYS is a floor, raised to the research window + the longest research warm-up + slack
+    assert s.data_retention_days == 120 + 92 + 2
+    old, new = now - 230 * MS_DAY, now - 10 * MS_DAY
     st = app.store
     for t in (old, new):
         st.save_candles("BTCUSDT", [Candle(t, 1, 1, 1, 1, 1, 1, 1, 1, t + 59_999)])
@@ -124,7 +126,7 @@ async def test_every_time_series_is_pruned_with_the_candle_retention(tmp_path):
         st.save_fill_quality({"engine": "paper", "ts": t, "symbol": "BTCUSDT", "position_id": "p", "kind": "ENTRY",
                               "side": "BUY", "maker": False, "qty": 1.0, "price": 1.0, "ref": 1.0, "notional": 1.0,
                               "slip_bps": 0.0, "fee": 0.0, "model_fee": 0.0})
-    app._prune(now)  # cutoff: max(5, 30) + 5 = 35 days back
+    app._prune(now)  # cutoff: max(5, 214) + 5 = 219 days back
     for table, col in (("candles", "open_time"), ("funding", "funding_time"), ("metrics", "ts"), ("equity", "ts"),
                        ("fill_quality", "ts")):
         assert [r[0] for r in st.query(f"SELECT {col} FROM {table} ORDER BY {col}")] == [new], table
@@ -133,7 +135,8 @@ async def test_every_time_series_is_pruned_with_the_candle_retention(tmp_path):
 
 def test_research_window_and_retention_defaults():
     s = Settings(_env_file=None)
-    assert s.research_lookback_days == 120 and s.data_retention_days == 180 and s.promotion_min_days == 14
+    # E2: the 180-day default is raised to cover the research window + the 92-day warm-up of vol_breakout_dbox + 2
+    assert s.research_lookback_days == 120 and s.data_retention_days == 214 and s.promotion_min_days == 14
     assert s.data_retention_days >= s.research_lookback_days + 30  # room for warm-up and the backfill margin
     assert (s.kill_switch, s.kill_switch_k, s.kill_switch_h, s.kill_switch_window, s.kill_switch_window_r) == \
         (True, 0.25, 8.0, 30, -20.0)

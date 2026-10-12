@@ -51,16 +51,16 @@ STRONG = [[1.0, 1.0, -0.5], [1.0, -0.5, 0.0], [1.0, 1.0, -0.5]]  # 3 days, t_day
 WEAK = [[1.0, -0.6], [-1.0, 0.7], [0.5, -0.5], [1.0, -1.0]]  # 4 days, mean +0.0125R
 
 
-def test_the_thresholds_are_the_calibrated_ones():
+def test_the_c2b_calibration_is_kept_as_the_comparison_design():
+    # E2 replaced the C2-B thresholds (HAC statistics, tests/test_e2_promotion.py); the C2-B calibration stays in
+    # docs/results as history and its thresholds are what the calibration tool scores as the "before" design
     doc = json.loads((ROOT / "docs" / "results" / "c2b_promotion_calibration.json").read_text())
-    ch = doc["chosen"]
-    assert {int(k): v for k, v in ch["normal"]["abs"].items()} == R.ABS_T_AT
-    assert {int(k): v for k, v in ch["normal"]["rel"].items()} == R.REL_T_AT
-    assert {int(k): v for k, v in ch["failed"]["abs"].items()} == R.FAILED_ABS_T_AT
-    assert {int(k): v for k, v in ch["failed"]["rel"].items()} == R.FAILED_REL_T_AT
-    assert tuple(R.ABS_T_AT) == R.PROMOTION_CHECKPOINTS and tuple(R.FAILED_ABS_T_AT) == R.FAILED_CHECKPOINTS
+    ch, old = doc["chosen"], _cal().C2B_THRESHOLDS
+    for cls in ("normal", "failed"):
+        for path in ("abs", "rel"):
+            assert {int(k): v for k, v in ch[cls][path].items()} == old[cls][path], (cls, path)
     # strictest first: most of the error budget is spent where most of the evidence is (the late checkpoints)
-    for t in (R.ABS_T_AT, R.REL_T_AT, R.FAILED_ABS_T_AT, R.FAILED_REL_T_AT):
+    for t in (old["normal"]["abs"], old["normal"]["rel"], old["failed"]["abs"], old["failed"]["rel"]):
         v = list(t.values())
         assert v == sorted(v, reverse=True) and v[-1] >= 1.8
     model = doc["model"]
@@ -127,7 +127,8 @@ def test_the_relative_path_judges_the_paired_difference_at_the_checkpoint():
     assert d["path"] == "relative" and d["checkpoint"] == 30
     cut = T0 + 30 * MS_DAY
     pd_ = paired_daily_diff([t for t in _trades(better) if t["exit_time"] < cut],
-                            [t for t in _trades(champ, "paper") if t["exit_time"] < cut], T0, cut - 1)
+                            [t for t in _trades(champ, "paper") if t["exit_time"] < cut], T0, cut - 1,
+                            lag=R.PROMOTION_HAC_LAG)  # E2: the HAC paired t
     assert d["paired"]["t"] == round(pd_["t"], 4) and d["paired"]["days"] == 30
     assert d["bar"]["min_paired_t"] == R.REL_T_AT[30]
     assert d["verdict"] == ("promote" if pd_["t"] >= R.REL_T_AT[30] else "hold")
@@ -136,7 +137,7 @@ def test_the_relative_path_judges_the_paired_difference_at_the_checkpoint():
 def test_retirement_stays_continuous():
     d = _judge([[-0.8, -0.6]] * 8, at_day=8)  # 16 trades, mean -0.7R: dropped before any checkpoint
     assert d["verdict"] == "retire" and d["rule"].startswith("early drop") and d["checkpoint"] is None
-    losing = [[-1.0, 0.3]] * 20 + [[1.0, -0.2]] * 10  # 60 trades, 30 days, t_day ~ -1.5
+    losing = ([[-1.0, 0.3]] * 2 + [[1.0, -0.2]]) * 10  # 60 trades, 30 days, HAC t_day far below -1 (E2)
     d = _judge(losing, at_day=30.5)
     assert d["verdict"] == "retire" and "t_day <= -1" in d["rule"]
 

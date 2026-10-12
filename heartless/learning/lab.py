@@ -229,7 +229,9 @@ def _run_symbol(job: dict) -> dict:
     # the run-off past an interior chunk's end never reads a sealed period
     sim_end = end if final else seal.readable_until(end, end + job.get("runoff_ms", 0), unseal)
     base = {"symbol": sym, "chunk": label, "start": start, "end": end, "trades": [], "stats": summarize([])}
-    store = Store(job["db_path"])
+    if not os.path.isfile(job["db_path"]):
+        return {**base, "error": f"no candle database {job['db_path']}"}
+    store = Store(job["db_path"], readonly=True)  # a source candle database: never written, no side files (E2)
     rows = store.load_candles(sym, start=sim_start - warm, end=sim_end)
     if rows and rows[0].open_time > sim_start - warm + MS_DAY:
         sim_start = max(sim_start, rows[0].open_time + warm)  # history begins inside the warm-up: wait for a full one
@@ -251,7 +253,7 @@ def _run_symbol(job: dict) -> dict:
     if job.get("context_db") and os.path.exists(job["context_db"]):
         from heartless.data.context import MS_H, ContextTable
 
-        ctx_store = Store(job["context_db"])
+        ctx_store = Store(job["context_db"], readonly=True)
         market = ContextTable.load(ctx_store, [sym], sim_start - MS_H, sim_end, source=job["db_path"])
         ctx_store.close()
     settings = Settings(_env_file=None, **{**RESEARCH_SETTINGS, **job.get("settings", {})})
@@ -579,7 +581,10 @@ def main_cli(settings, args) -> None:
     from heartless.core.store import Store
     from heartless.strategy.params import StrategyParams
 
-    store = Store(settings.db_path)
+    if not os.path.isfile(settings.db_path):
+        print(f"error: no candle database at {settings.db_path} (run `heartless fetch` first)", file=sys.stderr)
+        sys.exit(2)
+    store = Store(settings.db_path, readonly=True)  # the lab only reads the candle database (E2)
     years = getattr(args, "years", None)
     universe = getattr(args, "universe", None)
     try:

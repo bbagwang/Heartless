@@ -528,7 +528,12 @@ def _discover(settings, args) -> None:
     from heartless.learning import seal
     from heartless.learning.lab import store_splits, universe_symbols
 
-    store = Store(settings.db_path)
+    # the candle database is a read-only source (E2): the results go to stdout, --out and the trial ledger, never into
+    # it (the live bot's own discovery cycle keeps its "discovery.last" summary in its own store)
+    if not os.path.isfile(settings.db_path):
+        print(f"error: no candle database at {settings.db_path} (run `heartless fetch` first)", file=sys.stderr)
+        sys.exit(2)
+    store = Store(settings.db_path, readonly=True)
     unseal = sorted(set(args.unseal or []))
     tag = (getattr(args, "tag", None) or "").strip() or None
     try:
@@ -587,8 +592,6 @@ def _discover(settings, args) -> None:
         store.close()
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
-    store.set("discovery.last", {"tf": res.get("tf", ",".join(grids)), "tested": res["tested"], "t_bar": res["t_bar"],
-                                 "passed": res["passed"], "ts": now_ms()})
     store.close()
     trial = None
     if tag:
@@ -643,8 +646,11 @@ def _context(settings, args) -> None:
     if args.action == "status" and not ctx_path.exists():
         print(f"context store {ctx_path}: not built (run `heartless context build`)")
         return
+    if not os.path.isfile(settings.db_path):
+        print(f"error: no candle database at {settings.db_path} (run `heartless fetch` first)", file=sys.stderr)
+        sys.exit(2)
     ctx_path.parent.mkdir(parents=True, exist_ok=True)
-    src = Store(settings.db_path)
+    src = Store(settings.db_path, readonly=True)  # the source candle database is only read (E2)
     dst = Store(ctx_path)
     try:
         if args.action == "status":

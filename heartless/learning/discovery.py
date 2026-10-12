@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -719,7 +720,9 @@ def _build_job(job: dict) -> SymbolData | None:
     from heartless.learning import seal
 
     seal.check_window(job["start"], job["end"], job.get("unseal", ()))
-    store = Store(job["db_path"])
+    if not os.path.isfile(job["db_path"]):
+        return None  # no candle database: nothing to mine (a read-only open never creates one)
+    store = Store(job["db_path"], readonly=True)  # a source candle database: never written, no side files (E2)
     sym, tf = job["symbol"], job["tf"]
     templates = tuple(job.get("templates", (0, 1, 2)))
     hold = max(TEMPLATES[t][2] for t in templates)
@@ -739,9 +742,10 @@ def _build_job(job: dict) -> SymbolData | None:
     if job.get("context_db"):
         from heartless.data.context import MS_H, ContextTable
 
-        cst = Store(job["context_db"])
+        cst = Store(job["context_db"], readonly=True) if os.path.isfile(job["context_db"]) else None
         market = ContextTable.load(cst, [sym], job["start"] - MS_H, job["end"], source=job["db_path"])
-        cst.close()
+        if cst is not None:
+            cst.close()
         if market is None:  # asked for context features but the table is gone: keep the column layout (all NaN)
             market = ContextTable({}, {})
     cost = CostModel(**job.get("cost", {}))

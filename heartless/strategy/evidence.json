@@ -1,6 +1,6 @@
 {
- "schema_version": 1,
- "about": "Out-of-sample evidence per alpha (heartless/strategy/evidence.py). Verdicts come from the pre-registered judgements (P1: OOS window 2022-2024; P2: TRAIN 2022-2024 gate, then the VALID window 2026-01-13..09-30 as oos_window, avg_r = min(TRAIN, VALID) avg_r); 'param_schema' is the parameter-schema fingerprint the alpha was judged with (a redesign makes the entry stale, i.e. 'untested'). Alphas without an entry are 'untested'.",
+ "schema_version": 2,
+ "about": "Out-of-sample evidence per alpha (heartless/strategy/evidence.py). Verdicts come from the pre-registered judgements (P1: OOS window 2022-2024; P2: TRAIN 2022-2024 gate, then the VALID window 2026-01-13..09-30 as oos_window, avg_r = min(TRAIN, VALID) avg_r); 'stage' says where the verdict was reached: 'oos' for an out-of-sample judgement (P1, P2 VALID, the sealed 2025 test), 'train' for a P2 family whose shipped design failed the TRAIN gate and was never evaluated out of sample (its numbers are TRAIN numbers, 'window' instead of 'oos_window'); both make a challenger that switches the alpha on face the failed-alpha bar. 'param_schema' is the parameter-schema fingerprint the alpha was judged with (a redesign makes the entry stale, i.e. 'untested'). Alphas without an entry are 'untested'.",
  "judgements": {
   "p1": {
    "what": "ROADMAP P1: one-shot pre-registered OOS judgement of the shipped alphas",
@@ -22,12 +22,14 @@
    "expected_r_rule": "avg_r = min(TRAIN avg_r, VALID avg_r): the kill switch's expectation if the alpha passed",
    "decided": "2026-10-11",
    "source": "docs/RESEARCH_P2.md",
-   "data": "docs/results/p2_decisions.json"
+   "data": "docs/results/p2_decisions.json",
+   "train_gate_failures": "xs_rank_mom and funding_carry_xs (no TRAIN-gate candidate in their families): recorded as failed with stage 'train' in E2 (2026-10-11), TRAIN numbers of the shipped default configuration"
   }
  },
  "alphas": {
   "htf_trend": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p1",
    "rule": "keep",
    "oos_window": "2022-01-13..2024-12-31",
@@ -42,6 +44,7 @@
   },
   "intraday_levels": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p1",
    "rule": "keep",
    "oos_window": "2022-01-13..2024-12-31",
@@ -56,6 +59,7 @@
   },
   "momentum_burst": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p1",
    "rule": "keep",
    "oos_window": "2022-01-13..2024-12-31",
@@ -70,6 +74,7 @@
   },
   "trend_pullback": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p1",
    "rule": "turn-on",
    "oos_window": "2022-01-13..2024-12-31",
@@ -84,6 +89,7 @@
   },
   "squeeze_breakout": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p1",
    "rule": "turn-on",
    "oos_window": "2022-01-13..2024-12-31",
@@ -98,6 +104,7 @@
   },
   "mean_reversion": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p1",
    "rule": "turn-on",
    "oos_window": "2022-01-13..2024-12-31",
@@ -112,6 +119,7 @@
   },
   "funding_fade": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p1",
    "rule": "turn-on",
    "oos_window": "2022-01-13..2024-12-31",
@@ -126,6 +134,7 @@
   },
   "sweep_reversal": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p1",
    "rule": "turn-on",
    "oos_window": "2022-01-13..2024-12-31",
@@ -140,6 +149,7 @@
   },
   "positioning": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p1",
    "rule": "turn-on",
    "oos_window": "2022-01-13..2024-12-31",
@@ -154,6 +164,7 @@
   },
   "ts_trend_tsmom": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p2",
    "rule": "p2-gate",
    "family": "ts_trend",
@@ -191,6 +202,7 @@
   },
   "positioning_flow_oimom": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p2",
    "rule": "p2-gate",
    "family": "positioning_flow",
@@ -228,6 +240,7 @@
   },
   "vol_breakout_dbox": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p2",
    "rule": "p2-gate",
    "family": "vol_breakout",
@@ -267,6 +280,7 @@
   },
   "discovery_daily_capdisp": {
    "verdict": "failed",
+   "stage": "oos",
    "judgement": "p2",
    "rule": "p2-gate",
    "family": "discovery_daily",
@@ -301,6 +315,93 @@
    "overrides": [],
    "source": "docs/RESEARCH_P2.md",
    "param_schema": "2d931441ea1f"
+  },
+  "xs_rank_mom": {
+   "verdict": "failed",
+   "stage": "train",
+   "judgement": "p2",
+   "rule": "p2-train-gate",
+   "family": "xs_rank",
+   "window": "2022-01-13..2024-12-31",
+   "n": 3356,
+   "avg_r": -0.0038,
+   "t_day": -0.46,
+   "years_positive": 1,
+   "years": 3,
+   "stress_avg_r": -0.0076,
+   "train": {
+    "window": "2022-01-13..2024-12-31",
+    "n": 3356,
+    "avg_r": -0.0038,
+    "t_day": -0.46,
+    "years_positive": 1,
+    "stress_avg_r": -0.0076,
+    "n_family": 20,
+    "t_day_bar": 3.0,
+    "config_hash": "b6e814efabcae09b",
+    "file": "docs/results/p2_xs_rank_mom168_h72.json",
+    "stress_file": "docs/results/p2_xs_rank_mom168_h72_stress.json"
+   },
+   "checks": {
+    "t_day >= 3.0": false,
+    "avg_r >= 0.05": false,
+    "years_positive >= 2": false,
+    "stress_avg_r > 0": false
+   },
+   "best_lab": {
+    "overrides": [
+     "xs_rank_mom.lookback_h=24",
+     "xs_rank_mom.vol_rank_min=0.5"
+    ],
+    "n": 2213,
+    "avg_r": 0.0027,
+    "t_day": 0.25,
+    "years_positive": 1,
+    "stress_avg_r": -0.0007,
+    "config_hash": "028a0f67dc4aeeea",
+    "file": "docs/results/p2_xs_rank_mom24_vol_h72.json"
+   },
+   "source": "docs/RESEARCH_P2.md",
+   "param_schema": "130fb9049c80"
+  },
+  "funding_carry_xs": {
+   "verdict": "failed",
+   "stage": "train",
+   "judgement": "p2",
+   "rule": "p2-train-gate",
+   "family": "funding_carry",
+   "window": "2022-01-13..2024-12-31",
+   "n": 563,
+   "avg_r": 0.0375,
+   "t_day": 1.36,
+   "years_positive": 2,
+   "years": 3,
+   "stress_avg_r": 0.032,
+   "train": {
+    "window": "2022-01-13..2024-12-31",
+    "n": 563,
+    "avg_r": 0.0375,
+    "t_day": 1.36,
+    "years_positive": 2,
+    "stress_avg_r": 0.032,
+    "n_family": 7,
+    "t_day_bar": 3.0,
+    "config_hash": "3e8d1140ef2b58d7",
+    "file": "docs/results/p2_funding_carry_xsdev.json",
+    "stress_file": "docs/results/p2_funding_carry_xsdev_stress.json"
+   },
+   "checks": {
+    "t_day >= 3.0": false,
+    "avg_r >= 0.05": false,
+    "years_positive >= 2": true,
+    "stress_avg_r > 0": true
+   },
+   "source": "docs/RESEARCH_P2.md",
+   "param_schema": "cf89c56bf7c2"
   }
+ },
+ "stages": {
+  "oos": "verdict from an out-of-sample judgement (P1 OOS 2022-2024, P2 VALID 2026, sealed 2025)",
+  "train": "P2 TRAIN-gate failure: the shipped design never reached the VALID window"
  }
 }
