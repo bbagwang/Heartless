@@ -29,7 +29,6 @@ from heartless.strategy.spec import ParamSpec
 _WINDOW_MS = 7 * 86_400_000  # z-score look-back of the positioning / funding history
 _MIN_SPAN_MS = 3 * 86_400_000  # history must cover this span before the alpha trades
 _MAX_GAP_MS = 2 * 86_400_000  # a longer hole (feed outage, restart, new backtest) resets the history
-_FUNDING_PERIOD_MIN = 480.0
 
 
 class _History:
@@ -123,7 +122,10 @@ class FundingFade(Alpha):
             return None
         sw = p.get("settle_win", 0)
         mtf = ctx.minutes_to_funding
-        if sw and not (mtf <= sw or mtf >= _FUNDING_PERIOD_MIN - sw):
+        # minutes since the last settlement = the symbol's own interval - minutes to the next one (a 4-hourly symbol
+        # settled 240 - mtf minutes ago, not 480 - mtf)
+        period = ctx.funding_interval_min
+        if sw and not (mtf <= sw or mtf >= period - sw):
             return None
         oi24 = (ctx.extras or {}).get("oi_chg_24h")
         if oi24 is None or not ok(oi24) or oi24 < p["oi_min"]:
@@ -163,7 +165,7 @@ class FundingFade(Alpha):
             return None
         crowd_kr = "롱" if crowd is Side.LONG else "숏"
         side_kr = "롱" if side is Side.LONG else "숏"
-        when_kr = f"펀딩 정산 {mtf:.0f}분 전" if mtf <= _FUNDING_PERIOD_MIN / 2 else f"펀딩 정산 {_FUNDING_PERIOD_MIN - mtf:.0f}분 후"
+        when_kr = f"펀딩 정산 {mtf:.0f}분 전" if mtf <= period / 2 else f"펀딩 정산 {period - mtf:.0f}분 후"
         reason = (f"상위 트레이더 {crowd_kr} 포지션 과밀(7일 대비 z {zt:+.1f}) + 24h 미결제약정 {oi24 * 100:+.1f}% 증가 + "
                   f"펀딩 {ctx.funding_rate * 100:+.4f}%(7일 대비 z {fz:+.1f}) · {when_kr} → 15m/5m 가격 전환 확인, "
                   f"과밀 포지션 역방향 {side_kr}")

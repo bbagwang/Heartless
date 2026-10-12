@@ -119,6 +119,23 @@ class Settings(BaseSettings):
     # not installed again: every fresh trial of the same change is another look at the same noise
     challenger_retry_days: int = Field(default=90, alias="CHALLENGER_RETRY_DAYS")
 
+    # --- E1: entry sizing and portfolio construction (ROADMAP P3, docs/PORTFOLIO.md) ------------------------------
+    # A market entry is decided on a bar close and fills after it (live: a second later; backtest: the next open), plus
+    # slippage. It is sized for a fill BACKTEST_SLIPPAGE_BPS + this many bps + one tick beyond the decision touch, so
+    # the risk measured at the fill stays within the per-trade budget (the next-open gap is a tick or less on ~99.9% of
+    # 2026 1m bars; the rest covers the paper account's size impact of up to ~1.5 bp).
+    market_entry_buffer_bps: float = Field(default=1.5, alias="MARKET_ENTRY_BUFFER_BPS")
+    # Signal batching + risk budgets (heartless/execution/allocator.py), used by the live engines and the joint
+    # backtester alike. Off: every symbol's entry is admitted in the order its bar is processed (FIFO) under the count
+    # limits. On: the entry candidates of one bar close are ranked by expected value, then admitted while the open
+    # risk stays within MAX_TOTAL_RISK_PCT and the BTC-beta weighted risk of each side within
+    # MAX_SAME_DIRECTION_RISK_PCT (MAX_POSITIONS / MAX_SAME_DIRECTION stay as caps). Off by default: the P3 acceptance
+    # rule needs an enabled alpha whose joint backtest improves with it (docs/PORTFOLIO.md).
+    portfolio_allocator: bool = Field(default=False, alias="PORTFOLIO_ALLOCATOR")
+    max_total_risk_pct: float = Field(default=2.5, alias="MAX_TOTAL_RISK_PCT")  # 5 positions x 0.5%
+    max_same_direction_risk_pct: float = Field(default=1.5, alias="MAX_SAME_DIRECTION_RISK_PCT")  # 3 x 0.5% at beta 1
+    beta_lookback_days: int = Field(default=30, alias="BETA_LOOKBACK_DAYS")  # BTC beta from this many days of 1h returns
+
     @field_validator("telegram_owner_id", mode="before")
     @classmethod
     def _blank_owner_id_is_none(cls, v):

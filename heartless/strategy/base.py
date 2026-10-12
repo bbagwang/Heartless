@@ -22,6 +22,9 @@ class Context:
     now: int = 0
     funding_rate: float = 0.0
     minutes_to_funding: float = 999.0
+    # the symbol's current settlement interval in minutes (480 for most symbols; 240 / 120 / 60 while Binance settles
+    # it more often), so "minutes since the last settlement" is funding_interval_min - minutes_to_funding
+    funding_interval_min: float = 480.0
     book_imbalance: float = 0.0  # (bidQty-askQty)/(bidQty+askQty)
     # derivatives positioning snapshot (open interest, long/short ratios, taker ratio) - see data/extras.py.
     # Identical computation in live trading and backtests; empty when no metrics are available.

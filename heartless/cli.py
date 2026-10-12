@@ -215,6 +215,7 @@ async def _load_symbols_and_universe(settings, store, download: bool, symbols_ar
 
 
 async def _ensure_candles(rest, store, universe: list[str], days: int) -> None:
+    from heartless.data.archive import MAX_FUNDING_INTERVAL_MS, settlement_interval
     from heartless.util.timeutil import MS_HOUR, MS_MINUTE
 
     now = now_ms()
@@ -231,7 +232,11 @@ async def _ensure_candles(rest, store, universe: list[str], days: int) -> None:
             if rows:
                 store.save_candles(sym, rows)
         f_lo, f_hi = store.funding_range(sym)
-        if f_hi is None or f_hi < now - 8 * MS_HOUR:
+        # the next settlement is due one of THIS symbol's intervals after the last stored one (8 h for most, 4 h or
+        # shorter for some), derived from its stored settlement times
+        f_iv = settlement_interval([t for t, _ in store.load_funding(sym, f_hi - MAX_FUNDING_INTERVAL_MS, f_hi)]) \
+            if f_hi is not None else MAX_FUNDING_INTERVAL_MS
+        if f_hi is None or f_hi < now - f_iv:
             fr = await rest.funding_rate_history(sym, start=since, end=now)
             store.save_funding(sym, [(int(r["fundingTime"]), float(r["fundingRate"]), float(r.get("markPrice", 0) or 0)) for r in fr])
 

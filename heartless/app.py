@@ -70,6 +70,10 @@ DEFAULT_FUNDING_INTERVAL_MS = 8 * MS_HOUR
 # a settlement that the funding history still did not show this long after it was due is not asked for again (its
 # interval changed under us); a new expectation (the next settlement) is asked for as usual
 FUNDING_MISS_GRACE_MS = 15 * MS_MINUTE
+# P3 signal batching (PORTFOLIO_ALLOCATOR, heartless/execution/allocator.py): the entry candidates of one bar close are
+# admitted together once every traded symbol's bar at that close has been processed; a batch still incomplete this long
+# after its close (a symbol's stream lagging or dead) is admitted without the stragglers by the scheduler
+ENTRY_BATCH_GRACE_MS = 15_000
 
 
 def live_context_path(settings: Settings) -> Path:
@@ -96,6 +100,11 @@ class Heartless:
     _depth_tried: dict | None = None
     # why the live context store is not used (it records another candle database), "" while it is (integration)
     _ctx_off: str = ""
+    # P3 signal batching: close time of the open entry batch, the traded symbols whose bar at it was processed, and the
+    # (engine, symbol) pairs whose BTC-beta history was already seeded from the store
+    _batch_t: int | None = None
+    _batch_seen: set | None = None
+    _beta_tried: set | None = None
 
     def __init__(self, settings: Settings):
         self.s = settings
@@ -1137,11 +1146,13 @@ class Heartless:
             self.regimes[sym] = detect_regime(view)
         await self._ensure_context(c.close_time)  # the hour's market snapshot exists before any engine decides
         ctx = self._context(sym, c.close_time)
+        await self._entry_batch_roll(c.close_time)  # P3: an older close's open batch is admitted first
         for eng in list(self.engines.values()):
             try:
                 await eng.on_bar(view, ctx)
             except Exception:  # noqa: BLE001
                 log.exception("engine %s on_bar failed for %s", eng.name, sym)
+        await self._entry_batch_done(sym, c.close_time)
         if sym == "BTCUSDT":
             await self._btc_shock_check(view)
 
@@ -1226,8 +1237,83 @@ class Heartless:
         nft = t.next_funding_time or self.funding_next.get(sym) or ((now // iv) + 1) * iv
         return Context(symbol=sym, info=self.symbols[sym], ticker=t, regime=reg, regime_info=info, btc_regime=btc,
                        oi_change=oi_change, now=now, funding_rate=t.funding_rate,
-                       minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), book_imbalance=imb, extras=extras,
-                       market=self._market_context(sym, now))
+                       minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), funding_interval_min=iv / MS_MINUTE,
+                       book_imbalance=imb, extras=extras, market=self._market_context(sym, now))
+
+    # --- P3 signal batching (PORTFOLIO_ALLOCATOR, heartless/execution/allocator.py) ----------------------------------
+    # Each engine queues the entry decisions of a bar close (TradingEngine.on_bar) and admits them together in
+    # flush_entries, ranked by expected value under the risk budgets: the same code the joint backtester runs after each
+    # step of its timeline. Here a close's batch is admitted once every traded symbol's bar at it has been processed,
+    # when a bar of a later close arrives first, or ENTRY_BATCH_GRACE_MS after the close (scheduler).
+    def _batching(self) -> bool:
+        return any(getattr(e, "allocator", None) is not None for e in self.engines.values())
+
+    async def _entry_batch_roll(self, close_time: int) -> None:
+        """A bar of a later close is about to be decided while the previous close's batch is still open (a symbol's
+        bar is late or missing): admit that batch first, so a candidate never waits for or competes with a later close."""
+        if self._batch_t is not None and close_time > self._batch_t:
+            await self._flush_entry_batch()
+
+    async def _entry_batch_done(self, sym: str, close_time: int) -> None:
+        """`sym`'s bar at `close_time` went through every engine: admit the batch once all traded symbols reported."""
+        if not self._batching():
+            return
+        if self._batch_t is None:
+            self._batch_t, self._batch_seen = close_time, set()
+        elif close_time != self._batch_t:
+            return  # an older bar (gap fill) rides with the open batch; a newer one was rolled before the engines ran
+        seen = self._batch_seen if self._batch_seen is not None else set()
+        seen.add(sym)
+        self._batch_seen = seen
+        if all(s in seen for s in self.views):
+            await self._flush_entry_batch()
+
+    async def _entry_batch_due(self, now: int) -> None:
+        """Scheduler backstop: a batch still open ENTRY_BATCH_GRACE_MS after its close is admitted without the
+        stragglers."""
+        if self._batch_t is not None and now - self._batch_t > ENTRY_BATCH_GRACE_MS:
+            await self._flush_entry_batch()
+
+    async def _flush_entry_batch(self) -> None:
+        self._batch_t, self._batch_seen = None, set()
+        for eng in list(self.engines.values()):
+            if getattr(eng, "allocator", None) is None or not eng.queued_entries:
+                continue
+            try:
+                self._prime_beta(eng)
+                await eng.flush_entries()
+            except Exception:  # noqa: BLE001
+                log.exception("engine %s entry batch failed", eng.name)
+
+    def _prime_beta(self, eng: TradingEngine) -> None:
+        """Seed an engine's BTC-beta estimator with the stored hourly closes of the traded symbols and BTC (once per
+        symbol), so a fresh process ranks and limits with the whole look-back rather than the hours it observed; the
+        joint backtester seeds it from the history before its window the same way."""
+        from heartless.execution.allocator import hourly_closes
+
+        if self._beta_tried is None:
+            self._beta_tried = set()
+        beta = eng.allocator.beta
+        now = now_ms()
+        for sym in sorted(set(self.views) | {beta.btc}):
+            key = (eng.name, sym)
+            if key in self._beta_tried:
+                continue
+            self._beta_tried.add(key)
+            try:
+                rows = self.store.query("SELECT open_time, close FROM candles WHERE symbol=? AND open_time>=? AND "
+                                        "open_time<? AND open_time % 3600000 = 3540000 ORDER BY open_time",
+                                        (sym, now - (beta.hours + 2) * MS_HOUR, now))
+            except Exception as e:  # noqa: BLE001 - a missing history only means beta 1.0 until it is observed
+                log.debug("beta history %s unavailable: %s", sym, e)
+                continue
+            if rows:
+                import numpy as np
+
+                hours, closes = hourly_closes(np.array([r[0] for r in rows], dtype=np.int64),
+                                              np.array([r[1] for r in rows], dtype=float), before=now,
+                                              limit=beta.hours + 1)
+                beta.prime(sym, hours, closes)
 
     # --- market context (P2a, data/context.py) ----------------------------------------------------------------
     def _context_only_symbols(self) -> list[str]:
@@ -1537,6 +1623,7 @@ class Heartless:
                 if now - self._last_universe >= self.s.universe_refresh_minutes * MS_MINUTE:
                     await self.refresh_universe()
                 self._context_tick(now)
+                await self._entry_batch_due(now)  # P3: an entry batch whose stragglers never came
                 self._history_depth_tick(now)  # long-lookback alphas of a new champion / challenger (C2-A)
                 if self.research.due(now) and not self.research.running:
                     asyncio.create_task(self.research.cycle())

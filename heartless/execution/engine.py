@@ -18,11 +18,12 @@ from heartless.core.store import Store
 from heartless.data.features import MarketView
 from heartless.exchange.base import Account, OrderResult
 from heartless.exchange.symbols import min_qty_for_notional, norm_price, norm_qty
+from heartless.execution.allocator import Candidate, PortfolioAllocator
 from heartless.learning.bandit import AlphaBandit
 from heartless.strategy.base import Context
 from heartless.strategy.ensemble import Ensemble
 from heartless.strategy.params import StrategyParams
-from heartless.strategy.risk import RiskManager
+from heartless.strategy.risk import RiskManager, SizeResult
 from heartless.util.ids import client_order_id, short_id
 from heartless.util.timeutil import MS_MINUTE, TF_MS, now_ms
 
@@ -49,11 +50,40 @@ class EngineStats:
     skipped: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass
+class EntryPlan:
+    """A sized, bracket-checked entry that has not been sent yet (TradingEngine._plan_entry -> _place_entry)."""
+    decision: Decision
+    view: MarketView
+    ctx: Context
+    info: SymbolInfo
+    entry_ref: float  # decision reference: the limit price, or the touch a market order is sent against
+    size: SizeResult
+    stop: float  # tick-rounded: the stop the order carries and the size was computed for
+    tp: float | None
+    tp1: float | None
+    r_unit: float
+    risk_pct: float  # per-trade budget in % of equity the entry was sized for
+    budget: float  # that budget in USDT
+    equity: float
+    open_notional: float
+    meta_x: list | None = None
+
+    @property
+    def symbol(self) -> str:
+        return self.decision.symbol
+
+    @property
+    def side(self) -> Side:
+        return self.decision.side
+
+
 class TradingEngine:
     def __init__(self, name: str, account: Account, params: StrategyParams, settings: Settings, symbols: dict[str, SymbolInfo],
                  store: Store | None = None, bus: EventBus | None = None, bandit: AlphaBandit | None = None,
                  only_alpha: str | None = None, clock: Callable[[], int] | None = None, persist: bool = True,
-                 notify: bool = False, meta=None, meta_learn: bool = True):
+                 notify: bool = False, meta=None, meta_learn: bool = True,
+                 allocator: PortfolioAllocator | None = None):
         self.name = name
         self.meta = meta  # MetaLabeler or None (heartless/learning/metalabel.py)
         self.meta_learn = meta_learn
@@ -82,6 +112,11 @@ class TradingEngine:
         self.entries_enabled = True
         self.tag = "".join(ch for ch in name.upper() if ch.isalnum())[:4]
         self._last_exit_ts: dict[str, int] = {}  # symbol -> clock() of the last finalize/cancel (reconcile freshness)
+        # P3 portfolio allocator (PORTFOLIO_ALLOCATOR, or injected to share a beta estimator): when set, on_bar queues
+        # entry decisions and flush_entries ranks and admits a bar close's batch; None = FIFO, exactly as before
+        self.allocator: PortfolioAllocator | None = allocator if allocator is not None else (
+            PortfolioAllocator(settings) if getattr(settings, "portfolio_allocator", False) else None)
+        self._batch: list[Candidate] = []
 
     # --- lifecycle -----------------------------------------------------------------------------
     async def start(self) -> None:
@@ -102,6 +137,11 @@ class TradingEngine:
     def set_params(self, params: StrategyParams) -> None:
         self.params = params
         self.ensemble.set_params(params)
+
+    @property
+    def queued_entries(self) -> int:
+        """Entry candidates waiting for this bar close's flush_entries (portfolio allocator on)."""
+        return len(self._batch)
 
     def open_positions(self) -> list[Position]:
         return [p for p in self.positions.values() if p.status in (PositionStatus.PENDING, PositionStatus.OPEN, PositionStatus.CLOSING)]
@@ -132,17 +172,28 @@ class TradingEngine:
 
     # --- bar handling --------------------------------------------------------------------------
     async def on_bar(self, view: MarketView, ctx: Context) -> None:
-        """Called once per completed 1m bar per symbol (after the view has been sought to that bar)."""
+        """Called once per completed 1m bar per symbol (after the view has been sought to that bar).
+
+        With the portfolio allocator on, an entry decision is queued instead of opened; the caller then runs
+        flush_entries() once every symbol's bar at this close has been processed."""
         self.last_views[ctx.symbol] = view
         now = self.clock()
+        if self.allocator is not None and view.closed("1h"):
+            h1 = view.tf("1h")
+            if h1.ok:
+                self.allocator.beta.observe(ctx.symbol, h1.open_time, h1.v("close"))
         pos = self.positions.get(ctx.symbol)
         if pos is not None and pos.status in (PositionStatus.PENDING, PositionStatus.OPEN, PositionStatus.CLOSING):
-            await self._manage(pos, view, ctx)
-            return
+            if not await self._manage(pos, view, ctx):
+                return
+            # an opposite-signal exit (Signal.exit_on_opposite) closed it on this bar: the bar may still decide
         if not view.ready() or not self.entries_enabled:
             return
         decision = self.ensemble.decide(view, ctx)
         if decision is None:
+            return
+        if self.allocator is not None:
+            self._batch.append(Candidate(decision, view, ctx))
             return
         equity = await self.equity()
         allowed, why = self.risk.can_open(decision, self.open_positions(), now, equity)
@@ -166,37 +217,68 @@ class TradingEngine:
             self.store.save_equity(self.name, now, self.stats.balance, eq)
 
     # --- entries -------------------------------------------------------------------------------
-    async def _open(self, d: Decision, view: MarketView, ctx: Context, equity: float) -> None:
+    async def _open(self, d: Decision, view: MarketView, ctx: Context, equity: float,
+                    meta: tuple | None = None) -> bool:
+        """Plan (size, check) and send one entry. Returns True when an entry was sent."""
+        plan = await self._plan_entry(d, view, ctx, equity, meta)
+        if plan is None:
+            return False
+        await self._place_entry(plan)
+        return True
+
+    def _meta_eval(self, view: MarketView, ctx: Context, d: Decision) -> tuple:
+        """(meta vector, allow, size multiplier, expected R or None) of the meta model for a decision."""
+        x = self._meta_vector(view, ctx, d)
+        allow, mult, er = self.meta.decide(d.primary.alpha, x)
+        return x, allow, mult, er
+
+    def _fill_buffer(self, info: SymbolInfo, entry_ref: float) -> float:
+        """Expected adverse fill of a market entry beyond its decision touch, as a fraction of it (E1): the modelled
+        slippage plus MARKET_ENTRY_BUFFER_BPS, plus one tick for the move between the decision and the fill."""
+        bps = float(getattr(self.s, "backtest_slippage_bps", 0.0) or 0.0) + \
+            float(getattr(self.s, "market_entry_buffer_bps", 0.0) or 0.0)
+        return bps / 1e4 + (info.tick_size / entry_ref if entry_ref > 0 else 0.0)
+
+    async def _plan_entry(self, d: Decision, view: MarketView, ctx: Context, equity: float,
+                          meta: tuple | None = None) -> EntryPlan | None:
+        """Everything about an entry short of sending it: reference price, spread and meta-model gates, sizing and the
+        bracket sanity checks. None (with the skip counted) when the entry must not be sent. `meta` is a precomputed
+        _meta_eval result (the allocator ranks on it before planning)."""
         sig = d.primary
         info = self.symbols.get(d.symbol)
         if info is None:
-            return
+            return None
         t = ctx.ticker
-        if sig.entry_style is EntryStyle.LIMIT and sig.limit_price:
+        limit = sig.entry_style is EntryStyle.LIMIT
+        if limit and sig.limit_price:
             entry_ref = sig.limit_price
         else:
             entry_ref = (t.ask if d.side is Side.LONG else t.bid) or t.ref or view.price
         if not entry_ref or entry_ref <= 0:
-            return
+            return None
         if t.spread_bps > 12:  # illiquid moment
             self.stats.skipped["spread"] = self.stats.skipped.get("spread", 0) + 1
-            return
+            return None
         meta_x = None
         if self.meta is not None:
-            meta_x = self._meta_vector(view, ctx, d)
-            allow, mult, er = self.meta.decide(sig.alpha, meta_x)
+            meta_x, allow, mult, er = meta if meta is not None else self._meta_eval(view, ctx, d)
             if not allow:
                 self.stats.skipped["meta veto"] = self.stats.skipped.get("meta veto", 0) + 1
-                return
+                return None
             d.size_mult *= mult
             if er is not None:
                 d.reason += f" | 메타모델 기대 {er:+.2f}R"
         open_notional = sum(p.notional for p in self.open_positions())
-        sz = self.risk.size(d, equity, info, entry_ref, open_notional)
+        # E1 sizing: the size is computed for the stop the order will carry (tick-rounded, up to half a tick further
+        # than the signal's) and, for a market entry, for the expected fill beyond the decision touch, so the risk the
+        # fill realizes stays within the budget. A post-only limit fills at its own (side-rounded) price or better.
+        stop = norm_price(info, sig.stop)
+        risk_pct = self.risk.budget_pct(d.size_mult)
+        buffer = 0.0 if limit else self._fill_buffer(info, entry_ref)
+        sz = self.risk.size(d, equity, info, entry_ref, open_notional, stop=stop, fill_buffer=buffer)
         if sz.qty <= 0:
             self.stats.skipped["size"] = self.stats.skipped.get("size", 0) + 1
-            return
-        stop = norm_price(info, sig.stop)
+            return None
         tp = norm_price(info, sig.take_profit) if sig.take_profit else None
         tp1 = norm_price(info, sig.tp1) if sig.tp1 else None
         # Bracket sanity against the price we will actually trade at (the signal's levels were computed from the bar
@@ -205,14 +287,30 @@ class TradingEngine:
         # seconds of no exchange stop. A take-profit behind the reference would self-trigger likewise, so drop it.
         if (stop - entry_ref) * d.side.sign >= 0:
             self.stats.skipped["stop"] = self.stats.skipped.get("stop", 0) + 1
-            return
+            return None
         if tp is not None and (tp - entry_ref) * d.side.sign <= 0:
             tp = None
         if tp1 is not None and ((tp1 - entry_ref) * d.side.sign <= 0 or (tp is not None and abs(tp1 - entry_ref) >= abs(tp - entry_ref))):
             tp1 = None
         r_unit = abs(entry_ref - stop)
         if r_unit <= 0:
-            return
+            return None
+        return EntryPlan(decision=d, view=view, ctx=ctx, info=info, entry_ref=entry_ref, size=sz, stop=stop, tp=tp,
+                         tp1=tp1, r_unit=r_unit, risk_pct=risk_pct, budget=equity * risk_pct / 100, equity=equity,
+                         open_notional=open_notional, meta_x=meta_x)
+
+    def _cooldown_ms(self, alpha: str, bars: int | None, timeframe: str) -> int | None:
+        """Signal.cooldown_bars in ms of the alpha's decision timeframe (the signal's own as a fallback)."""
+        if bars is None:
+            return None
+        tf = self.ensemble.alpha_timeframe(alpha) or timeframe
+        return max(int(bars), 0) * int(TF_MS.get(tf, MS_MINUTE))
+
+    async def _place_entry(self, plan: EntryPlan) -> None:
+        d, view, ctx, info, sz = plan.decision, plan.view, plan.ctx, plan.info, plan.size
+        sig = d.primary
+        t = ctx.ticker
+        entry_ref, stop, tp, tp1, r_unit = plan.entry_ref, plan.stop, plan.tp, plan.tp1, plan.r_unit
         pid = short_id("P")
         cid = client_order_id(f"E{self.tag}")
         pos = Position(id=pid, engine=self.name, symbol=d.symbol, side=d.side, qty=0.0, entry_price=entry_ref,
@@ -225,11 +323,14 @@ class TradingEngine:
                        limit_price=entry_ref if sig.entry_style is EntryStyle.LIMIT else None, pending_since=self.clock(),
                        entry_ttl_bars=d.entry_ttl_bars if sig.entry_style is EntryStyle.LIMIT else None,
                        exit_on_regime_change=d.exit_on_regime_change,
+                       time_exit=sig.time_exit, allow_renewal=sig.allow_renewal, exit_on_opposite=sig.exit_on_opposite,
+                       cooldown_ms=self._cooldown_ms(sig.alpha, sig.cooldown_bars, sig.timeframe),
+                       avoid_funding=sig.avoid_funding,
                        expected_profit=(abs((tp or entry_ref + d.side.sign * d.expected_r * r_unit) - entry_ref) * sz.qty),
                        extra={"tp1_frac": self.params.alphas.get(sig.alpha, {}).get("tp1_frac", 0.5), "tags": sig.tags,
-                              "size_mult": d.size_mult, "risk_pct": sz.risk_pct})
-        if meta_x is not None:
-            pos.extra["meta_x"] = [None if not (v == v) else float(v) for v in meta_x]
+                              "size_mult": d.size_mult, "risk_pct": sz.risk_pct, "risk_budget": plan.budget})
+        if plan.meta_x is not None:
+            pos.extra["meta_x"] = [None if not (v == v) else float(v) for v in plan.meta_x]
         self.positions[d.symbol] = pos
         self._save(pos)
         sent = False  # becomes True once an order call was reached (it may have been accepted despite an exception)
@@ -242,8 +343,11 @@ class TradingEngine:
                 if res.status in ("EXPIRED", "REJECTED"):
                     # post-only would cross: take liquidity if the price is still within a fraction of the ATR
                     ref_now = (t.ask if d.side is Side.LONG else t.bid) or entry_ref
-                    if abs(ref_now - entry_ref) <= 0.15 * max(sig.atr, r_unit):
-                        res = await self.account.market_order(d.symbol, d.side.order_side, sz.qty, client_id=cid)
+                    qty = self._taker_fallback_qty(plan, ref_now) \
+                        if abs(ref_now - entry_ref) <= 0.15 * max(sig.atr, r_unit) else 0.0
+                    if qty > 0:
+                        pos.original_qty = qty
+                        res = await self.account.market_order(d.symbol, d.side.order_side, qty, client_id=cid)
                     else:
                         res = None
             else:
@@ -272,12 +376,54 @@ class TradingEngine:
         pos.entry_order_id = res.order_id
         if res.status == "FILLED" and pos.status is PositionStatus.PENDING and pos.filled_qty <= 0:
             # REST already reports the fill (live market order): synthesize if no stream fill arrived
-            fill = Fill(symbol=d.symbol, order_side=d.side.order_side, qty=res.filled_qty or sz.qty,
-                        price=res.avg_price or entry_ref, fee=(res.filled_qty or sz.qty) * (res.avg_price or entry_ref) * self.s.taker_fee,
+            q = res.filled_qty or pos.original_qty
+            fill = Fill(symbol=d.symbol, order_side=d.side.order_side, qty=q, price=res.avg_price or entry_ref,
+                        fee=q * (res.avg_price or entry_ref) * self.s.taker_fee,
                         ts=self.clock(), client_id=cid, order_id=res.order_id, kind="ENTRY")
             await self.on_fill(fill)
             self._mark_settled(pos, res.order_id)
         self._save(pos)
+
+    def _taker_fallback_qty(self, plan: EntryPlan, ref_now: float) -> float:
+        """Quantity for the market order that replaces a post-only entry which would cross (E1): sized again for the
+        touch it now takes plus the market-entry buffer, never above the planned quantity, never lifted to the
+        exchange minimum (0 when what fits the budget is below it)."""
+        info = plan.info
+        sz = self.risk.size_at(plan.stop, ref_now, plan.equity, info, plan.risk_pct, plan.open_notional,
+                               lift_to_min=False, fill_buffer=self._fill_buffer(info, ref_now))
+        qty = min(sz.qty, plan.size.qty)
+        return qty if sz.qty > 0 and qty >= min_qty_for_notional(info, ref_now) else 0.0
+
+    async def flush_entries(self) -> int:
+        """Admit the entry candidates queued at this bar close (portfolio allocator on; a no-op otherwise): ranked by
+        expected value, each in turn passes the count caps and cool-downs (RiskManager.can_open), is sized
+        (_plan_entry) and must fit the risk budgets (PortfolioAllocator.check) before it is sent. Returns the number of
+        entries sent. Callers run it once every symbol's bar at the close has been processed (Backtester: each
+        timeline step; app: when the batch is complete)."""
+        batch, self._batch = self._batch, []
+        if not batch or self.allocator is None:
+            return 0
+        now = self.clock()
+        equity = await self.equity()
+        if self.meta is not None:
+            for c in batch:  # the meta model's expected R ranks; computed once and reused by the plan
+                c.meta = self._meta_eval(c.view, c.ctx, c.decision)
+        sent = 0
+        for c in self.allocator.rank(batch, self.bandit):
+            allowed, why = self.risk.can_open(c.decision, self.open_positions(), now, equity)
+            if allowed:
+                plan = await self._plan_entry(c.decision, c.view, c.ctx, equity, c.meta)
+                if plan is None:
+                    continue  # spread / meta veto / size / stop: counted by _plan_entry
+                allowed, why = self.allocator.check(plan.symbol, plan.side, plan.size.risk_amount,
+                                                    self.open_positions(), equity)
+                if allowed:
+                    await self._place_entry(plan)
+                    sent += 1
+                    continue
+            key = why.split(":")[0]
+            self.stats.skipped[key] = self.stats.skipped.get(key, 0) + 1
+        return sent
 
     # --- fills ---------------------------------------------------------------------------------
     async def on_fill(self, fill: Fill) -> None:
@@ -594,14 +740,16 @@ class TradingEngine:
         return True
 
     # --- management ----------------------------------------------------------------------------
-    async def _manage(self, pos: Position, view: MarketView, ctx: Context) -> None:
+    async def _manage(self, pos: Position, view: MarketView, ctx: Context) -> bool:
+        """Manage an open / pending position on a 1m bar. Returns True only when an opposite-signal exit
+        (Signal.exit_on_opposite) has just closed it, i.e. when this bar may still decide a new entry."""
         now = self.clock()
         price = ctx.ticker.ref or view.price
         if pos.status is PositionStatus.PENDING:
             await self._manage_pending(pos, view, ctx)
-            return
+            return False
         if pos.status is not PositionStatus.OPEN or not price:
-            return
+            return False
         # a post-only entry that opened on a partial fill keeps its remainder working for two bars at most, or until
         # its signal TTL runs out (or new entries get blocked meanwhile)
         step = self.symbols[pos.symbol].step_size if pos.symbol in self.symbols else 0.0
@@ -610,7 +758,7 @@ class TradingEngine:
                      else now - pos.pending_since >= 2 * MS_MINUTE)):
             await self._cancel_entry_remainder(pos)
             if pos.status is not PositionStatus.OPEN:
-                return
+                return False
         pos.bars_held += 1
         fav = (price - pos.entry_price) * pos.side.sign
         pos.max_fav = max(pos.max_fav, fav)
@@ -620,24 +768,43 @@ class TradingEngine:
         atr = tf.v("atr") if tf.ok else pos.atr
         if not atr or math.isnan(atr):
             atr = pos.atr
+        # 0) opt-ins (E1), on the alpha's own decision bars and before the time stop, so a signal on the deadline bar
+        #    counts: the same alpha signalling the same side again re-arms the time stop from this bar
+        #    (Signal.allow_renewal; not while new entries are blocked), the other side ends the trade
+        #    (Signal.exit_on_opposite; the bar may then decide a new entry)
+        if pos.allow_renewal or pos.exit_on_opposite:
+            s = self.ensemble.evaluate_alpha(pos.alpha, view, ctx)
+            if s is not None and s.side is pos.side:
+                if (pos.allow_renewal and pos.max_hold_bars > 0 and s.max_hold_bars > 0 and self.entries_enabled
+                        and not self.risk.entries_blocked(now)):
+                    pos.max_hold_bars = max(pos.max_hold_bars, pos.bars_held + s.max_hold_bars)
+                    pos.extra["renewals"] = int(pos.extra.get("renewals", 0) or 0) + 1
+                    pos.extra["renewed_at"] = now
+            elif s is not None and pos.exit_on_opposite:
+                await self.close_position(pos.symbol, "반대 신호 청산")
+                return pos.status is PositionStatus.CLOSED and self.positions.get(pos.symbol) is None
         # 1) time stop
         if pos.max_hold_bars and pos.bars_held >= pos.max_hold_bars:
+            if pos.time_exit:
+                # Signal.time_exit: a fixed holding period ends here whatever the trade made
+                await self.close_position(pos.symbol, "보유 기간 만료 청산(time exit)")
+                return False
             if r_now < 0.5 or pos.bars_held >= 3 * pos.max_hold_bars:
                 # not working at the deadline, or a winner held 3x past it: a scalp must not turn into a swing
                 reason = "시간 초과 청산(time stop)" if r_now < 0.5 else "최대 보유시간 초과 청산"
                 await self.close_position(pos.symbol, reason)
-                return
+                return False
             if not pos.be_moved:
                 await self._move_stop_to_breakeven(pos)
             if pos.trail_atr_mult <= 0:
                 # a working trade past its deadline keeps running only under a protective trail
                 pos.trail_atr_mult = 1.5
-        # 2) funding avoidance: don't pay a large funding bill on a trade that is not working
-        if ctx.minutes_to_funding <= 2 and r_now < 0.3:
+        # 2) funding avoidance: don't pay a large funding bill on a trade that is not working (Signal.avoid_funding)
+        if pos.avoid_funding and ctx.minutes_to_funding <= 2 and r_now < 0.3:
             adverse = ctx.funding_rate * pos.side.sign  # long pays positive funding
             if adverse > 0.0003:
                 await self.close_position(pos.symbol, f"펀딩 회피 청산 (펀딩 {ctx.funding_rate * 100:+.3f}%)")
-                return
+                return False
         # 3) breakeven once 1R in profit even without a partial TP
         if not pos.be_moved and r_now >= 1.0 and pos.trail_atr_mult > 0:
             await self._move_stop_to_breakeven(pos)
@@ -663,8 +830,9 @@ class TradingEngine:
             slope = m15.v("slope20") if m15.ok else float("nan")
             if not math.isnan(adx) and not math.isnan(slope) and adx > 32 and (slope * pos.side.sign) < 0 and r_now < 0:
                 await self.close_position(pos.symbol, "레짐 전환(강한 역추세) 청산")
-                return
+                return False
         self._save(pos)
+        return False
 
     async def _manage_pending(self, pos: Position, view: MarketView, ctx: Context) -> None:
         """Re-quote or cancel a resting post-only entry.
@@ -1023,7 +1191,7 @@ class TradingEngine:
         self.stats.wins_today += 1 if net > 0 else 0
         self.stats.last_trade_ts = ts
         if net < 0:
-            self.risk.register_loss(pos.symbol, ts)
+            self.risk.register_loss(pos.symbol, ts, ms=pos.cooldown_ms)
         self.bandit.update(pos.alpha, pos.regime, pos.r_multiple, live=not self.account.is_paper)
         if self.meta is not None and self.meta_learn and pos.extra.get("meta_x"):
             try:
@@ -1232,4 +1400,7 @@ class TradingEngine:
                 "wins_today": self.stats.wins_today, "total_trades": self.stats.total_trades,
                 "paused": self.risk.state.paused, "halted": self.risk.state.halted_until > self.clock(),
                 "halt_reason": self.risk.state.halt_reason, "risk_scale": self.risk.state.risk_scale,
-                "positions": pos_rows, "skipped": self.stats.skipped, "entries_enabled": self.entries_enabled}
+                "positions": pos_rows, "skipped": self.stats.skipped, "entries_enabled": self.entries_enabled,
+                # P3: open risk in % of equity (total, beta-weighted per side) while the portfolio allocator is on
+                "risk_budget": (self.allocator.exposure(self.open_positions(), self.stats.equity)
+                                if self.allocator is not None else None)}

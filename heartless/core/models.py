@@ -152,6 +152,23 @@ class Signal:
     # (a retest limit; cancelled early once new entries are blocked). None = chase the touch: re-quote every 2
     # minutes, cancel after two re-quotes.
     entry_ttl_bars: int | None = None
+    # --- E1 execution opt-ins (all off by default: a signal that sets none of them trades exactly as before) ---------
+    # unconditional exit at max_hold_bars. Default: at the deadline a trade >= 0.5R keeps running under breakeven + a
+    # trail (up to 3x the hold), which turns a fixed-holding-period design into an open-ended one.
+    time_exit: bool = False
+    # while the position is open, a new signal of the SAME alpha on the same side re-arms the time stop from that bar
+    # (max_hold_bars counted again) instead of being skipped, so a daily rule that still holds keeps its position
+    # rather than closing it a minute before the decision and paying a round trip to re-open it.
+    allow_renewal: bool = False
+    # while the position is open, a signal of the same alpha on the OTHER side closes it (and that bar may then
+    # decide a new entry as usual); evaluated on the alpha's decision bars like a renewal.
+    exit_on_opposite: bool = False
+    # loss cool-down of the symbol after this trade loses, in bars of the alpha's decision timeframe (0 = none).
+    # None: the fixed 20-minute cool-down, which on a daily alpha blocks the one decision right after its exit.
+    cooldown_bars: int | None = None
+    # the engine's funding-avoidance exit (close a trade under 0.3R about to pay > 0.03% funding); False opts out,
+    # e.g. for a multi-day design whose expected move dwarfs one settlement.
+    avoid_funding: bool = True
 
     @property
     def r_distance(self) -> float:
@@ -247,6 +264,13 @@ class Position:
     requotes: int = 0
     entry_ttl_bars: int | None = None  # signal TTL of a resting post-only entry (None = re-quote policy)
     exit_on_regime_change: bool = False  # the signal opted into the engine's regime-flip exit
+    # E1 opt-ins copied from the opening signal (see Signal); a row persisted before they existed loads the defaults,
+    # i.e. the behaviour it was opened under
+    time_exit: bool = False
+    allow_renewal: bool = False
+    exit_on_opposite: bool = False
+    cooldown_ms: int | None = None  # Signal.cooldown_bars x the alpha's decision timeframe; None = 20 minutes
+    avoid_funding: bool = True
     expected_profit: float = 0.0
     last_stop_update: int = 0
     stop_dirty: bool = False

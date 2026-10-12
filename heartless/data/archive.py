@@ -264,7 +264,23 @@ class BinanceArchive:
         return sorted({r.ts: r for r in rows if start_ms <= r.ts <= end_ms}.values(), key=lambda r: r.ts)
 
 
-FUNDING_STEP_MS = 8 * 3_600_000  # regular funding settlement interval
+# The longest funding settlement interval Binance uses (most symbols settle every 8 h; others every 4 h, or 1-2 h while
+# the rate sits at its cap, e.g. SOLUSDT in November 2022). Not an assumed schedule: a symbol settles at LEAST this
+# often, so a longer spacing between stored settlements is a missing one and `span / MAX_FUNDING_INTERVAL_MS` is the
+# fewest settlements a complete span can hold. The actual interval is per symbol (settlement_interval).
+MAX_FUNDING_INTERVAL_MS = 8 * 3_600_000
+FUNDING_STEP_MS = MAX_FUNDING_INTERVAL_MS  # former name (coverage gap step)
+
+
+def settlement_interval(times) -> int:
+    """A symbol's current settlement interval from its stored settlement times (ascending): the spacing of the last
+    two, bounded to (0, MAX_FUNDING_INTERVAL_MS]; the maximum when fewer than two are known (or across a hole)."""
+    ts = [int(t) for t in times]
+    if len(ts) >= 2:
+        iv = ts[-1] - ts[-2]
+        if 0 < iv <= MAX_FUNDING_INTERVAL_MS:
+            return iv
+    return MAX_FUNDING_INTERVAL_MS
 MIN_GAP_MIN = 5  # candle holes of at least this many minutes are reported (and re-requested from the archive)
 MAX_SPAN_MS = 366 * MS_DAY  # at most about one year of 1m klines is held in memory per archive request
 HOLES_KEY = "archive.holes.{}"  # kv: published candle ranges the archive was asked for and does not have
@@ -365,7 +381,9 @@ async def sync_symbol(store, archive: BinanceArchive, symbol: str, start_ms: int
     lo = max(start_ms, first)
     if funding:
         _, _, f_rows = store.series_stats("funding", symbol, lo, end_ms)
-        if f_rows < 0.95 * (end_ms - lo) / (8 * 3_600_000) - 1:
+        # fewer rows than even the longest interval allows, or a spacing longer than it: settlements are missing
+        if (f_rows < 0.95 * (end_ms - lo) / MAX_FUNDING_INTERVAL_MS - 1
+                or store.series_gaps("funding", symbol, MAX_FUNDING_INTERVAL_MS, 1, lo, end_ms)):
             fr = await archive.funding(symbol, lo, end_ms)
             if fr:
                 store.save_funding(symbol, fr)
@@ -427,9 +445,9 @@ def coverage(store, symbols: list[str], start_ms: int | None = None, end_ms: int
         f_first, f_last, f_rows = store.series_stats("funding", sym, start_ms, end_ms)
         m_first, m_last, m_rows = store.series_stats("metrics", sym, start_ms, end_ms)
         m_gaps = store.series_gaps("metrics", sym, 300_000, int(metrics_gap_days * MS_DAY // 300_000), start_ms, end_ms)
-        # settlements are 8h apart (some symbols temporarily 4h): a step of more than 8h means a missing settlement,
-        # which a backtest would silently charge at the previous rate
-        f_gaps = store.series_gaps("funding", sym, FUNDING_STEP_MS, 1, start_ms, end_ms)
+        # settlements are at most 8h apart (most symbols 8h, some 4h / 1-2h): a longer step means a missing
+        # settlement, which a backtest would silently skip
+        f_gaps = store.series_gaps("funding", sym, MAX_FUNDING_INTERVAL_MS, 1, start_ms, end_ms)
         entry["funding"] = {"rows": f_rows, "first": _iso(f_first), "last": _iso(f_last), "n_gaps": len(f_gaps),
                             "gaps": [{"start": _iso(a), "end": _iso(b), "settlements": m} for a, b, m in f_gaps]}
         entry["metrics"] = {"rows": m_rows, "first": _iso(m_first), "last": _iso(m_last), "n_gaps": len(m_gaps),

@@ -48,6 +48,34 @@ class Ensemble:
         self.last_signals[ctx.symbol] = out
         return out
 
+    def evaluate_alpha(self, name: str, view: MarketView, ctx: Context) -> Signal | None:
+        """The raw signal of ONE alpha at this bar, under the same rules as evaluate_signals (switched on unless it is
+        the isolated alpha, its timeframe just closed, a failing alpha yields nothing). The engine asks it while that
+        alpha's position is open (Signal.allow_renewal / exit_on_opposite); only that alpha is evaluated, so no other
+        alpha's internal state sees a bar it would not have seen before. last_signals is left alone."""
+        if self.only_alpha and name != self.only_alpha:
+            return None
+        if not self.only_alpha and not self.params.enabled.get(name, True):
+            return None
+        for a in self.alphas:
+            if a.name != name:
+                continue
+            if not view.closed(a.timeframe):
+                return None
+            try:
+                return a.evaluate(view, ctx, self.params.alphas[a.name])
+            except Exception:  # noqa: BLE001
+                log.exception("alpha %s failed on %s", a.name, ctx.symbol)
+                return None
+        return None
+
+    def alpha_timeframe(self, name: str) -> str | None:
+        """Decision timeframe of a registered alpha (None for an unknown name, e.g. an adopted position)."""
+        for a in self.alphas:
+            if a.name == name:
+                return a.timeframe
+        return None
+
     def decide(self, view: MarketView, ctx: Context) -> Decision | None:
         signals = self.evaluate_signals(view, ctx)
         if not signals:

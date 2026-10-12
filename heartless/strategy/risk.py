@@ -179,8 +179,13 @@ class RiskManager:
         self.state.shock_until = max(self.state.shock_until, now + minutes * MS_MINUTE)
         self.save()
 
-    def register_loss(self, symbol: str, now: int, minutes: int = 20) -> None:
-        self.state.symbol_cooldown[symbol] = now + minutes * MS_MINUTE
+    def register_loss(self, symbol: str, now: int, minutes: int = 20, ms: int | None = None) -> None:
+        """Block new entries on `symbol` after a losing exit: `minutes` (the fixed default), or `ms` when the trade's
+        signal set its own cool-down (Signal.cooldown_bars in its decision timeframe; 0 = none)."""
+        span = int(ms) if ms is not None else minutes * MS_MINUTE
+        if span <= 0:
+            return
+        self.state.symbol_cooldown[symbol] = now + span
         self.save()
 
     # --- gating --------------------------------------------------------------------------------
@@ -224,26 +229,35 @@ class RiskManager:
         return max(0.1, min(self.s.max_risk_per_trade_pct, risk_pct))
 
     def size(self, decision: Decision, equity: float, info: SymbolInfo, entry_price: float,
-             open_notional: float = 0.0) -> SizeResult:
-        return self.size_at(decision.primary.stop, entry_price, equity, info, self.budget_pct(decision.size_mult),
-                            open_notional)
+             open_notional: float = 0.0, stop: float | None = None, fill_buffer: float = 0.0) -> SizeResult:
+        """Size a new entry. `stop` is the stop the order will carry (the engine passes the tick-rounded one; default:
+        the signal's raw stop) and `fill_buffer` the expected adverse fill beyond `entry_price` (size_at)."""
+        return self.size_at(decision.primary.stop if stop is None else stop, entry_price, equity, info,
+                            self.budget_pct(decision.size_mult), open_notional, fill_buffer=fill_buffer)
 
     def size_at(self, stop: float, entry_price: float, equity: float, info: SymbolInfo, risk_pct: float,
                 open_notional: float = 0.0, filled_risk: float = 0.0, filled_notional: float = 0.0,
-                lift_to_min: bool = True) -> SizeResult:
+                lift_to_min: bool = True, fill_buffer: float = 0.0) -> SizeResult:
         """Order size for an entry at `entry_price` with a protective stop at `stop`, risking `risk_pct` of equity.
 
         The single sizing rule shared by new entries and re-quotes. `open_notional` is the notional of the OTHER open
         positions (gross leverage cap). `filled_risk` / `filled_notional` describe the already filled part of the
         same trade (a re-quoted remainder): it consumes the risk budget and the notional caps first, and the result
         sizes the remainder only. With `lift_to_min=False` a size below the exchange minimum is never lifted to it
-        (the lift may exceed the budget); the result is then qty 0 ("below min notional")."""
+        (the lift may exceed the budget); the result is then qty 0 ("below min notional").
+
+        `fill_buffer` (a fraction of `entry_price`, E1): how far beyond `entry_price` the fill is expected to land,
+        against the position. A market entry is decided on a bar close and fills after it (the next open plus
+        slippage), and the trade's realized risk is measured from its fill (TradingEngine._on_entry_fill); sizing for
+        the buffered price keeps that realized risk within the budget instead of up to a few % over it."""
         dist = abs(entry_price - stop)
         if dist <= 0 or equity <= 0 or entry_price <= 0:
             return SizeResult(0, 0, 0, 0, self.s.exchange_leverage, "invalid stop distance")
         risk_amount = equity * risk_pct / 100
+        if fill_buffer > 0:
+            dist += entry_price * fill_buffer
         # size so that a stop-out *including* round-trip fees and slippage costs exactly risk_amount
-        cost_per_unit = entry_price * (2 * self.s.taker_fee + 0.0003)
+        cost_per_unit = entry_price * (1 + max(fill_buffer, 0.0)) * (2 * self.s.taker_fee + 0.0003)
         qty = max(risk_amount - filled_risk, 0.0) / (dist + cost_per_unit)
         max_notional = equity * self.s.max_position_leverage
         remaining_gross = equity * self.s.max_gross_leverage - open_notional

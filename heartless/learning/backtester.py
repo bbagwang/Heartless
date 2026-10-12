@@ -24,7 +24,34 @@ from heartless.strategy.regime import detect_regime
 from heartless.util.timeutil import MS_HOUR, MS_MINUTE
 
 log = logging.getLogger(__name__)
+# The longest settlement interval Binance uses: most symbols settle every 8 h, some every 4 h, and 1-2 h while the rate
+# sits at its cap (SOLUSDT settled every 2-4 h in November 2022). The settlements themselves are charged at their stored
+# times (funding_schedule); this constant only bounds the funding history loaded around a window and marks a hole in
+# the stored settlements (a spacing longer than it).
 FUNDING_INTERVAL = 8 * MS_HOUR
+_NO_TIMES = np.zeros(0, dtype=np.int64)
+
+
+def funding_schedule(times: np.ndarray, ts: int) -> tuple[int, int]:
+    """(next settlement time after `ts`, settlement interval) from a symbol's stored settlement times (ascending): the
+    next stored settlement and its spacing from the one before, as the exchange announces them live (premiumIndex
+    nextFundingTime, fundingInfo fundingIntervalHours). Past the stored span, or across a hole in it (a spacing over
+    FUNDING_INTERVAL), the settlements continue on the last interval from the last settlement before `ts`, and on the
+    8-hour UTC grid without any. The same rule as the replay market (heartless/replay/market.py funding_schedule), so a
+    backtest, a replay and the live bot see one schedule; for 8-hourly settlements on the UTC grid it is the grid."""
+    t = times
+    n = len(t)
+    i = int(np.searchsorted(t, ts, side="right"))  # first settlement strictly after ts
+    if 1 <= i < n and int(t[i]) - int(t[i - 1]) <= FUNDING_INTERVAL:
+        return int(t[i]), int(t[i]) - int(t[i - 1])
+    if i == 0:
+        if n >= 2 and int(t[1]) - int(t[0]) <= FUNDING_INTERVAL and int(t[0]) - ts <= int(t[1]) - int(t[0]):
+            return int(t[0]), int(t[1]) - int(t[0])
+        return (ts // FUNDING_INTERVAL + 1) * FUNDING_INTERVAL, FUNDING_INTERVAL
+    last = int(t[i - 1])
+    iv = int(t[i - 1]) - int(t[i - 2]) if i >= 2 else FUNDING_INTERVAL
+    iv = iv if 0 < iv <= FUNDING_INTERVAL else FUNDING_INTERVAL
+    return last + ((ts - last) // iv + 1) * iv, iv
 
 
 @dataclass
@@ -98,7 +125,7 @@ class Backtester:
         self.market = market
         self._extras_cache: dict[str, tuple[int, dict]] = {}
         self._extras_bounds: dict[str, tuple[int, int, int]] = {}  # symbol -> (usable row, valid from, valid until)
-        self._fund_cache: dict[str, tuple] = {}  # symbol -> cached settlement neighbourhood (_upcoming_funding_rate)
+        self._fund_cache: dict[str, tuple] = {}  # symbol -> cached settlement neighbourhood (_funding_view)
         self.views: dict[str, MarketView] = {}
         self.now = 0
         self._timeline: np.ndarray | None = None
@@ -162,34 +189,45 @@ class Backtester:
         return rows[idx][1] if idx >= 0 else 0.0
 
     def _upcoming_funding_rate(self, sym: str, t: int) -> float:
-        """What the live markPrice stream's `r` shows at `t`: the rate for the NEXT settlement (Context.funding_rate).
+        """What the live markPrice stream's `r` shows at `t`: the rate for the NEXT settlement (Context.funding_rate)."""
+        return self._funding_view(sym, t)[0]
 
-        Binance publishes `r` as a running estimate that converges to the charged value over the 8h window; the
-        stored history only has the final values, so the estimate is approximated by a linear blend from the last
-        settled rate (window start) to the rate actually charged at the next settlement (window end). Hence the
-        funding-avoidance exit (<= 2 min before settlement) is evaluated against the rate that is then charged,
-        while the early window does not see the final value outright. Without a next row (end of history / gap)
-        the settled rate is used."""
-        rows = self.funding.get(sym)
-        if not rows:
-            return 0.0
-        bucket = t // FUNDING_INTERVAL
+    def _funding_view(self, sym: str, t: int) -> tuple[float, int, int]:
+        """(upcoming rate, next settlement time, settlement interval) of `sym` at `t`, from its stored settlements.
+
+        The schedule is funding_schedule (each symbol's own interval). Binance publishes `r` as a running estimate that
+        converges to the charged value over the interval; the stored history only has the final values, so the
+        estimate is approximated by a linear blend from the last settled rate (interval start) to the rate actually
+        charged at the next settlement (interval end). Hence the funding-avoidance exit (<= 2 min before settlement) is
+        evaluated against the rate that is then charged, while the early interval does not see the final value
+        outright. When the next settlement is not stored (end of history / a hole) the settled rate is used."""
         c = self._fund_cache.get(sym)
-        if c is None or not (c[0] == bucket and c[1] <= t < c[2]):
-            # the neighbourhood (previous settled rate, next row) is constant between two stored settlements and the
-            # due time within one 8h bucket, so it is looked up once per change instead of on every bar
-            idx = int(np.searchsorted(self._fund_idx[sym], t, side="right"))  # first row strictly after t
-            prev = rows[idx - 1][1] if idx >= 1 else 0.0
-            next_due = (bucket + 1) * FUNDING_INTERVAL
-            nxt = None if (idx >= len(rows) or rows[idx][0] >= next_due + FUNDING_INTERVAL // 2) else rows[idx][1]
-            lo = rows[idx - 1][0] if idx >= 1 else -(2**62)
-            hi = rows[idx][0] if idx < len(rows) else 2**62
-            c = self._fund_cache[sym] = (bucket, lo, hi, prev, nxt)
-        prev, nxt = c[3], c[4]
-        if nxt is None:
-            return prev
-        w = (t % FUNDING_INTERVAL) / FUNDING_INTERVAL
-        return (1 - w) * prev + w * nxt
+        if c is None or not (c[0] <= t < c[1]):
+            # the neighbourhood (previous settled rate, next settlement and its rate) is constant between two stored
+            # settlements and within one scheduled interval, so it is looked up once per change, not on every bar
+            times = self._fund_idx.get(sym, _NO_TIMES)
+            rows = self.funding.get(sym) or []
+            nxt, iv = funding_schedule(times, t)
+            i = int(np.searchsorted(times, t, side="right"))  # first settlement strictly after t
+            prev = rows[i - 1][1] if i >= 1 else 0.0
+            nrate = rows[i][1] if i < len(rows) and abs(int(times[i]) - nxt) <= MS_MINUTE else None
+            lo = max(int(times[i - 1]) if i >= 1 else -(2**62), nxt - iv)
+            hi = min(int(times[i]) if i < len(times) else 2**62, nxt)
+            c = self._fund_cache[sym] = (lo, hi, nxt, iv, prev, nrate)
+        _, _, nxt, iv, prev, nrate = c
+        if nrate is None:
+            return prev, nxt, iv
+        w = (t - (nxt - iv)) / iv
+        return (1 - w) * prev + w * nrate, nxt, iv
+
+    def _prime_beta(self, beta, start: int) -> None:
+        """Seed the allocator's BTC-beta estimator with the hourly closes before `start` (as the live app seeds it from
+        its stored candles), at most its look-back; later hours are observed by the engine as the run proceeds."""
+        from heartless.execution.allocator import hourly_closes
+
+        for sym, ca in self.candles.items():
+            hours, closes = hourly_closes(ca.view("open_time"), ca.view("close"), before=start, limit=beta.hours + 1)
+            beta.prime(sym, hours, closes)
 
     def run(self, params: StrategyParams, start: int | None = None, end: int | None = None, only_alpha: str | None = None,
             initial_balance: float = 10_000.0, bandit: AlphaBandit | None = None) -> BacktestResult:
@@ -223,18 +261,33 @@ class Backtester:
         equity_curve: list[tuple[int, float]] = []
         peak = initial_balance
         dd_pct = 0.0
-        last_funding_bucket = tl[lo] // FUNDING_INTERVAL
+        # funding is charged at every stored settlement of each symbol (its own schedule: 8 h, or 4 / 2 / 1 h while
+        # Binance settles it more often), at that settlement's rate, on the first bar closing at or after it; for
+        # 8-hourly settlements on the UTC grid that is the first bar of 00:00 / 08:00 / 16:00 as before
+        fund_ptr = {s: int(np.searchsorted(self._fund_idx[s], tl[lo], side="right")) for s in self.candles
+                    if s in self._fund_idx}
+        next_fund = min((int(self._fund_idx[s][k]) for s, k in fund_ptr.items() if k < len(self._fund_idx[s])),
+                        default=2**62)
+        if engine.allocator is not None:
+            self._prime_beta(engine.allocator.beta, int(tl[lo]))
         for i in range(lo, hi):
             t = int(tl[i])
             self.now = t
-            # funding settlement at 00:00 / 08:00 / 16:00 UTC
-            bucket = t // FUNDING_INTERVAL
-            if bucket != last_funding_bucket:
-                last_funding_bucket = bucket
+            if t >= next_fund:
+                next_fund = 2**62
                 for sym in self.candles:
-                    rate = self._funding_rate(sym, t)
-                    if rate:
-                        await account.apply_funding(sym, rate, account.mark(sym), t)
+                    k = fund_ptr.get(sym)
+                    if k is None:
+                        continue
+                    times, rows = self._fund_idx[sym], self.funding[sym]
+                    while k < len(times) and int(times[k]) <= t:
+                        rate = rows[k][1]
+                        if rate:
+                            await account.apply_funding(sym, rate, account.mark(sym), t)
+                        k += 1
+                    fund_ptr[sym] = k
+                    if k < len(times):
+                        next_fund = min(next_fund, int(times[k]))
             for sym, ca in self.candles.items():
                 ci = cursors[sym]
                 if ci >= ca.n or int(ca.close_time[ci]) != t:
@@ -250,19 +303,24 @@ class Backtester:
                         btc_regime = regimes[sym][0]
                 reg, reg_info = regimes[sym]
                 half = account.spread_bps / 2e4
+                fr, nft, f_iv = self._funding_view(sym, t)
                 tk = Ticker(sym, bid=c.close * (1 - half), ask=c.close * (1 + half), mark=c.close, last=c.close, ts=t,
-                            funding_rate=self._upcoming_funding_rate(sym, t), next_funding_time=(bucket + 1) * FUNDING_INTERVAL)
+                            funding_rate=fr, next_funding_time=nft)
                 extras = self._extras(sym, t)
                 oi4 = extras.get("oi_chg_4h") if extras else None
                 ctx = Context(symbol=sym, info=self.symbols[sym], ticker=tk, regime=reg, regime_info=reg_info,
                               btc_regime=btc_regime if sym != "BTCUSDT" else None,
                               oi_change=oi4 if oi4 is not None and oi4 == oi4 else None, now=t,
-                              funding_rate=tk.funding_rate, minutes_to_funding=((bucket + 1) * FUNDING_INTERVAL - t) / MS_MINUTE,
+                              funding_rate=fr, minutes_to_funding=(nft - t) / MS_MINUTE,
+                              funding_interval_min=f_iv / MS_MINUTE,
                               extras=extras, market=self.market.view(sym, t) if self.market is not None else EMPTY)
                 pos = engine.positions.get(sym)
                 if pos is not None:
                     pos.extra["last_mark"] = c.close
                 await engine.on_bar(view, ctx)
+            if engine.allocator is not None:
+                # P3: every symbol's bar at t has been processed: rank and admit this close's entry candidates
+                await engine.flush_entries()
             # risk anchors / loss halts / drawdown are observed every bar (live: on_equity_tick every 30 s), so a
             # limit breached mid-hour blocks entries from the next bar on; the stored curve stays hourly
             eq = account.equity()
