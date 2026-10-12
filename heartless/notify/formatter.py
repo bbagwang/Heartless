@@ -297,13 +297,17 @@ def _num(v, fmt: str = "+.3f") -> str:
 
 
 def evidence_stage(e: dict | None) -> str:
-    """The last pre-registered test an alpha's evidence comes from."""
+    """The last pre-registered test an alpha's evidence comes from. A P2 family whose design failed the TRAIN gate
+    never reached the VALID window: its entry has a TRAIN block only (stage 'train'), and calling that a VALID
+    failure would misstate what was tested."""
     if not e:
         return "미검증"
     if e.get("sealed2025"):
         return "2025 확인 시험"
-    if e.get("judgement") == "p2" or e.get("train"):
+    if e.get("valid"):
         return "P2 VALID"
+    if e.get("judgement") == "p2" or e.get("train"):
+        return "P2 TRAIN"
     return "P1 OOS"
 
 

@@ -17,13 +17,14 @@ from heartless.config import Settings
 from heartless.core.models import Decision, EntryStyle, Regime, Side, Signal
 from heartless.execution.engine import DECISION_LOG_PER_SYMBOL, TradingEngine
 from heartless.exchange.paper import PaperAccount
+from heartless.learning import research as R
 from heartless.learning import seal
 from heartless.notify import formatter as F
 from heartless.notify.telegram import COMMANDS, TelegramBot
 from heartless.replay.invariants import _RE_DAILY_TODAY, _RE_DAILY_WEEK
 from heartless.strategy import evidence
 from heartless.util.timeutil import MS_DAY, MS_HOUR, now_ms
-from heartless.web.app import WebServer, equity_svg
+from heartless.web.app import WebServer, _evidence_cells, equity_svg
 from tests.test_p4_app import N_HIST, SYMS, FakeRest, _boot, _rec
 
 SECRETS = {"BINANCE_API_KEY": "AKtestKEY0123456789abcdef", "BINANCE_API_SECRET": "SECRETtest0123456789zyxw",
@@ -235,6 +236,25 @@ def test_the_evidence_line_quotes_train_valid_and_the_sealed_2025_test(monkeypat
     assert F.fmt_evidence(None) == "OOS 미검증" and "재설계" in F.fmt_evidence(None, stale=True)
 
 
+def test_a_train_gate_failure_is_not_called_a_valid_failure(monkeypatch):
+    """A P2 family whose design failed the TRAIN gate never reached VALID: its entry carries a TRAIN block only
+    (stage 'train'), and /why, /alphas and the research page must not present it as a VALID failure."""
+    data = json.loads(json.dumps(evidence.registry()))
+    data["alphas"]["funding_carry_xs"] = {
+        "verdict": "failed", "stage": "train", "judgement": "p2", "rule": "p2-train-gate", "family": "funding_carry",
+        "window": "2022-01-13..2024-12-31", "n": 563, "avg_r": 0.0375, "t_day": 1.36, "years_positive": 2, "years": 3,
+        "stress_avg_r": 0.032, "train": {"window": "2022-01-13..2024-12-31", "n": 563, "avg_r": 0.0375, "t_day": 1.36,
+                                         "years_positive": 2, "stress_avg_r": 0.032, "n_family": 7, "t_day_bar": 3.0},
+        "source": "docs/RESEARCH_P2.md"}
+    monkeypatch.setattr(evidence, "registry", lambda: data)
+    e = evidence.entry("funding_carry_xs")
+    assert F.evidence_stage(e) == "P2 TRAIN"
+    assert F.fmt_evidence(e) == "P2 TRAIN 탈락: TRAIN 2022~2024 n=563 +0.037R t +1.36/3"
+    assert _evidence_cells(e)[1:] == ["–", "–"]  # no VALID, no 2025 cell on the research page
+    assert F.evidence_stage(evidence.entry("vol_breakout_dbox")) == "P2 VALID"
+    assert F.evidence_stage(evidence.entry("htf_trend")) == "P1 OOS"
+
+
 # --- /alphas -------------------------------------------------------------------------------------------------------
 async def test_alphas_gives_one_line_per_alpha_with_challengers_evidence_live_stats_and_kill_switch():
     app, candles = _make()
@@ -265,7 +285,8 @@ async def test_alphas_explains_the_no_alpha_state():
     await bot._handle_command("/alphas", 1)
     text = sent[-1]
     assert NO_ALPHA_TEXT in text and "거래 시작 조건: 챌린저가 실시간 페이퍼에서 절대 기준을 넘으면" in text
-    assert "OOS 판정: 13개 중 탈락 13, 통과 0" in text and "✅" not in text.split("\n", 2)[2]
+    n = len([a for a in app.params.alphas if evidence.entry(a) is not None])  # every judged alpha failed (P1, P2)
+    assert f"OOS 판정: {n}개 중 탈락 {n}, 통과 0" in text and "✅" not in text.split("\n", 2)[2]
     await app.stop()
 
 
@@ -286,8 +307,10 @@ async def test_the_daily_report_adds_alpha_performance_research_discovery_and_ch
     assert "🔬 리서치 " in text and "131분" in text and "개선 후보 1(htf_trend)" in text and "파라미터 개선" in text
     assert "⛏ 발굴 " in text and "규칙 104,871개 검사" in text and "기준 t≥4.81, 통과 0" in text
     line = next(ln for ln in text.split("\n") if f"<code>{slot.name}</code>" in ln)
-    # failed-alpha schedule (trend_pullback failed P1): 30/60/90, at day 20 the next one is 30 with t >= 4.09
-    assert "절대 경로: 3/30건" in line and "t_day " in line and "/4.09" in line and "다음 판정점 30일" in line
+    # failed-alpha schedule (trend_pullback failed P1): 30/60/90, at day 20 the next one is 30 with its stricter bar
+    bar = R.promotion_bar(app.s, "absolute", ["trend_pullback"], 30)
+    assert f"절대 경로: 3/{bar['min_trades']}건" in line and "t_day " in line and f"/{bar['min_t_day']:g} →" in line
+    assert "다음 판정점 30일" in line
     assert "판정점 30·60·90일" in line and "최근 판정 hold" in line and "OOS 탈락 알파 trend_pullback" in line
     assert "킬 스위치 <code>htf_trend</code>" in text
     assert "체결 품질(paper" in text or "체결 품질: 체결 기록 없음" in text
@@ -300,10 +323,29 @@ async def test_the_daily_report_explains_the_no_alpha_state_and_an_idle_loop():
     bot, sent = _bot(app)
     await app.daily_report()
     text = next(m for m in sent if "일일 리포트" in m)
-    assert NO_ALPHA_TEXT in text and "거래 시작 조건" in text and "OOS 판정: 13개 중 탈락 13" in text
+    n = len([a for a in app.params.alphas if evidence.entry(a) is not None])
+    assert NO_ALPHA_TEXT in text and "거래 시작 조건" in text and f"OOS 판정: {n}개 중 탈락 {n}" in text
     assert "알파별 성과: 거래 없음 (켜진 알파 0개라 챔피언은 거래하지 않음)" in text
     assert "🔬 리서치: 아직 사이클 없음" in text and "⛏ 발굴: 아직 실행 없음" in text and "챌린저: 없음" in text
     assert "체결 품질: 체결 기록 없음" in text
+    await app.stop()
+
+
+async def test_the_outlook_before_the_first_hourly_decision_is_the_judges_own_statistic(monkeypatch):
+    """Before evaluate_challengers has judged a new challenger the outlook shows judge_challenger's retirement
+    statistic, path and record, not a re-derivation that drifts from the statistic the bar is calibrated for."""
+    app, candles = _make()
+    await _boot(app, candles)
+    slot = await _challenger(app, r_list=(0.8, 0.8, 0.8, -0.5, -0.5, 0.9, 0.9, -0.3, 0.7, 0.7))
+    assert slot.name not in app.research.last_decisions
+    ch = [t for t in app.store.load_trades(engine=slot.name, since=slot.started)
+          if (t.get("entry_time") or 0) >= slot.started]
+    d = R.judge_challenger(ch, [], app.s, slot.started, now_ms(), app.research.slot_new_alphas(slot))
+    o = app.challenger_outlook()[0]
+    assert (o["path"], o["stat"], o["current"]["n"]) == (d["retire_path"], d["retire_stat"], d["current"]["n"])
+    real = R.judge_challenger
+    monkeypatch.setattr(R, "judge_challenger", lambda *a, **k: {**real(*a, **k), "retire_stat": 9.99})
+    assert app.challenger_outlook()[0]["stat"] == 9.99  # read from the judge, whatever its statistic is
     await app.stop()
 
 

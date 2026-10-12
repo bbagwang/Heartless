@@ -2055,9 +2055,8 @@ class Heartless:
     def challenger_outlook(self) -> list[dict]:
         """Per challenger: its checkpoint schedule, the next checkpoint and its date, and the current record against
         that checkpoint's bar on the path the champion's record selects now (the retirement statistic of the latest
-        hourly decision, or the same statistic computed here before the first one)."""
-        from heartless.execution.stats import paired_daily_diff
-
+        hourly decision, or before the first one judge_challenger's own: a re-derivation here would drift from the
+        statistic the bar is calibrated for whenever the judge changes)."""
         now = now_ms()
         out = []
         for c in self.challengers:
@@ -2073,9 +2072,8 @@ class Heartless:
                       if (t.get("entry_time") or 0) >= c.started]
                 champ = [t for t in self.store.load_trades(engine="paper", since=c.started)
                          if (t.get("entry_time") or 0) >= c.started]
-                path = "relative" if len(champ) >= self.s.promotion_min_trades else "absolute"
-                cur = r_stats(ch)
-                stat = paired_daily_diff(ch, champ, c.started, now)["t"] if path == "relative" else cur["t_day"]
+                j = R.judge_challenger(ch, champ, self.s, c.started, now, self.research.slot_new_alphas(c))
+                path, cur, stat = j["retire_path"], j["current"], j["retire_stat"]
             bar = R.promotion_bar(self.s, path or "absolute", failed, nxt if nxt is not None else sched[-1])
             out.append({"name": c.name, "source": c.source, "version": c.params.version, "started": c.started,
                         "checkpoints": sched, "passed": passed, "next_checkpoint": nxt,
