@@ -11,8 +11,9 @@ arrives first). Both run this module, so the backtest measures the exact admissi
    * expected R where an estimate exists: the meta model's expected R when it is enabled and ready for the alpha,
      else the evidence registry's mean R of an alpha whose out-of-sample verdict is 'passed';
    * otherwise the bandit's posterior mean for (alpha, regime) (no exploration noise) x the signal's confidence.
-   Candidates with an R estimate come first (by R), the rest by the bandit score; ties are broken by symbol so a live
-   bot and a backtest order the same candidates the same way regardless of stream arrival.
+   Candidates with an R estimate come first (by R), the rest by the bandit score. Equal values (e.g. one alpha, no
+   evidence yet) go to the lower BTC beta first, the candidate that uses less of its side's budget, then by symbol,
+   so a live bot and a backtest order the same candidates the same way regardless of stream arrival.
 2. Limits (check), applied in rank order after the engine's count caps (MAX_POSITIONS, MAX_SAME_DIRECTION, gross
    leverage) and its sizing:
    * total open risk (every pending / open position's risk to its current stop, plus the candidate's planned risk)
@@ -196,7 +197,7 @@ class PortfolioAllocator:
         out = list(cands)
         for c in out:
             c.tier, c.value, c.source = self.value(c, bandit)
-        return sorted(out, key=lambda c: (-c.tier, -c.value, c.symbol))
+        return sorted(out, key=lambda c: (-c.tier, -c.value, self.beta.beta(c.symbol), c.symbol))
 
     # --- limits --------------------------------------------------------------------------------------------------
     @staticmethod

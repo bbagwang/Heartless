@@ -106,6 +106,10 @@ def test_rank_expected_r_first_then_bandit_score_then_symbol(monkeypatch):
     assert [c.symbol for c in ranked] == ["CCCUSDT", "MMMUSDT", "BBBUSDT", "AAAUSDT", "ZZZUSDT"]
     assert [c.source for c in ranked] == ["meta", "evidence", "bandit", "bandit", "bandit"]
     assert ranked[1].value == 0.12 and ranked[2].value > ranked[3].value == pytest.approx(0.5 * 0.65)
+    # equal values: the lower BTC beta first (less of the side's budget), then the symbol
+    alloc.beta.beta = lambda s: {"ZZZUSDT": 0.8}.get(s, 1.2)  # type: ignore[method-assign]
+    ranked = alloc.rank([_cand("AAAUSDT"), _cand("ZZZUSDT"), _cand("BBBUSDT")], bandit)
+    assert [c.symbol for c in ranked] == ["ZZZUSDT", "AAAUSDT", "BBBUSDT"]
 
 
 # --- limits -----------------------------------------------------------------------------------------------------------
