@@ -78,12 +78,17 @@ def readonly_uri(path: str | Path) -> str:
     writing, and every committed transaction is in the main file - it is also opened immutable=1: no lock, no
     side file. With such a file (the live bot, a fetch, or a writer that left transactions un-checkpointed) the normal
     shared-memory read path is used, which reads the WAL's committed content and the writer's later commits. An
-    immutable reader assumes nobody writes while it is open: start a writer on a database only after its readers end."""
+    immutable reader assumes nobody writes while it is open: start a writer on a database only after its readers end.
+
+    SQLite resolves a symlinked database file and keeps the writer's -wal / -journal beside the real file, so the side
+    files are looked for there (and beside the given name): looking only beside a symlink missed the running bot's WAL
+    and opened its database immutable, blind to every commit not yet checkpointed into the main file."""
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(f"database {p} does not exist (read-only open never creates it)")
-    uri = p.resolve().as_uri() + "?mode=ro"
-    if not any(Path(f"{p}{sfx}").exists() for sfx in ("-wal", "-journal")):
+    real = p.resolve()
+    uri = real.as_uri() + "?mode=ro"
+    if not any(Path(f"{base}{sfx}").exists() for base in {p, real} for sfx in ("-wal", "-journal")):
         uri += "&immutable=1"
     return uri
 

@@ -117,6 +117,25 @@ def test_uncheckpointed_transactions_are_read(tmp_path):
     con.close()
 
 
+def test_a_symlinked_database_with_a_live_writer_is_not_opened_immutable(tmp_path):
+    # SQLite keeps the WAL beside the symlink's target: a check beside the link alone opened the bot's database
+    # immutable and the reader missed every commit still in the WAL
+    (tmp_path / "real").mkdir()
+    db = _candle_db(tmp_path / "real" / "heartless.db")
+    link = tmp_path / "heartless.db"
+    link.symlink_to(db)
+    writer = sqlite3.connect(link, isolation_level=None)  # the running bot, opened through the link
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("INSERT INTO kv(key, value) VALUES('w', '7')")
+    assert (db.parent / "heartless.db-wal").exists() and not (tmp_path / "heartless.db-wal").exists()
+    assert "immutable" not in readonly_uri(link)
+    st = Store(link, readonly=True)
+    assert st.get("w") == 7
+    st.close()
+    writer.close()
+    assert "immutable" in readonly_uri(link)  # the writer gone (WAL checkpointed and removed): immutable again
+
+
 def test_the_lab_reads_its_source_database_read_only(tmp_path):
     db = _candle_db(tmp_path / "heartless.db", minutes=20 * 1440)
     before = (db.stat().st_mtime_ns, _schema(db))
