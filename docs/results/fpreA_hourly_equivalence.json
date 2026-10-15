@@ -1,0 +1,67 @@
+{
+ "what": "evaluator equivalence on the deterministic non-signal reference alpha (long at the 01:00 UTC close every day, stop 2 ATR(14) 1h, 12 h time exit); not a hypothesis, no ledger line",
+ "window": [
+  "2024-01-01 00:00",
+  "2024-12-31 23:59"
+ ],
+ "symbols": [
+  "BTCUSDT",
+  "ETHUSDT",
+  "SOLUSDT",
+  "XRPUSDT",
+  "DOGEUSDT",
+  "ADAUSDT",
+  "AVAXUSDT",
+  "LINKUSDT",
+  "LTCUSDT",
+  "BCHUSDT",
+  "BNBUSDT",
+  "SUIUSDT",
+  "DOTUSDT",
+  "ATOMUSDT",
+  "NEARUSDT",
+  "FILUSDT",
+  "ETCUSDT",
+  "TRXUSDT",
+  "UNIUSDT",
+  "AAVEUSDT"
+ ],
+ "n_hourly": 7320,
+ "n_lab": 7320,
+ "matched": 7320,
+ "matched_share": 1.0,
+ "mean_abs_r_diff": 0.002556,
+ "p99_abs_r_diff": 0.023619,
+ "max_abs_r_diff": 0.083695,
+ "same_exit_hour_share": 1.0,
+ "same_exit_reason_share": 1.0,
+ "only_hourly": [],
+ "only_lab": [],
+ "acceptance": {
+  "matched_share_min": 0.99,
+  "mean_abs_r_diff_max": 0.02,
+  "passed": true
+ },
+ "seconds": {
+  "hourly": 0.2,
+  "lab": 330.0
+ },
+ "lab_errors": {},
+ "argv": [
+  "heartless",
+  "hourly",
+  "--equivalence",
+  "--start",
+  "2024-01-01",
+  "--end",
+  "2025-01-01",
+  "--universe",
+  "extended",
+  "--workers",
+  "2"
+ ],
+ "git_commit": "7a595b0849def6a3853264bdef6eb282efa30453",
+ "git_dirty": true,
+ "code_note": "measured on the wave-f-prep working tree that became the F-pre-A commit: hourly.py's evaluation code as committed; lab.py as committed except the later skip of chunks that start after a delisting (none of the 20 symbols is delisted); environment HEARTLESS_DATA_DIR=data/longhist ARCHIVE_BACKFILL=false",
+ "generated_utc": "2026-10-15T18:32:16Z"
+}

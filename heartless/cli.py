@@ -126,6 +126,30 @@ def main(argv: list[str] | None = None) -> None:
     un.add_argument("--month", default=None, help="show: the ranked month, YYYY-MM")
     un.add_argument("--top", type=int, default=40)
     un.add_argument("--out", default=None, help="write the report / resolution JSON here")
+    hr = sub.add_parser("hourly", help="Wave F hourly directional evaluator on universe.db 1h bars (an HourlyAlpha), "
+                                       "or --equivalence with the lab")
+    hr.add_argument("--alpha", default=None, metavar="MODULE:CLASS", help="an HourlyAlpha subclass")
+    hr.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="alpha parameter override")
+    ne = sub.add_parser("neutral", help="Wave F two-leg neutral evaluator on universe.db 1h bars (a NeutralStrategy)")
+    ne.add_argument("--strategy", required=True, metavar="MODULE:CLASS", help="a NeutralStrategy subclass")
+    ne.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="strategy parameter override")
+    ne.add_argument("--capital", type=float, default=1.0, help="capital C (statistics are in percent of it)")
+    for p_ in (hr, ne):
+        p_.add_argument("--period", default=None, help="a Wave F partition: TRAIN-F, TRAIN-A, TRAIN-B, VALID-F, FWD-k")
+        p_.add_argument("--start", default=None, help="ISO date (instead of --period)")
+        p_.add_argument("--end", default=None, help="ISO date; a date-only end is exclusive")
+        p_.add_argument("--universe", default=None, type=_universe_name,
+                        help="topN research universe (entries only in member months)" + (", core or extended" if p_ is hr
+                                                                                          else ""))
+        p_.add_argument("--symbols", default=None, help="comma separated, instead of --universe")
+        p_.add_argument("--stress", action="store_true", help="fees x1.5, slippage x2 (ROADMAP 7.4)")
+        p_.add_argument("--tag", default=None, metavar="FAMILY", help="record the run in the trial ledger")
+        p_.add_argument("--out", default=None, help="result JSON")
+    hr.add_argument("--trades-out", default=None)
+    hr.add_argument("--equivalence", action="store_true",
+                    help="F-pre-A acceptance: the reference alpha here and in the lab (1m data) on --symbols / "
+                         "--universe core|extended (default extended) over the window; prints the match statistics")
+    hr.add_argument("--workers", type=int, default=2, help="lab workers for --equivalence")
     tr = sub.add_parser("trials", help="P2 trial ledger: evaluated configurations per family and the t_day bar")
     tr.add_argument("--family", default=None)
     tr.add_argument("--ledger", default=None, help="ledger path (default docs/results/p2_trials.jsonl)")
@@ -165,6 +189,14 @@ def main(argv: list[str] | None = None) -> None:
         universe_main(settings, args)
     elif cmd == "context":
         _context(settings, args)
+    elif cmd == "hourly":
+        from heartless.learning.hourly import main_cli as hourly_main
+
+        hourly_main(settings, args)
+    elif cmd == "neutral":
+        from heartless.learning.neutral import main_cli as neutral_main
+
+        neutral_main(settings, args)
     elif cmd == "trials":
         from heartless.learning import trials
 
@@ -230,14 +262,17 @@ def _top_universe(settings, args, cmd: str) -> dict | None:
           f"{'window' if cmd == 'lab' else 'TRAIN window'}; {len(res['symbols'])} have stored 1m candles in it; "
           f"skipped {len(res['skipped'])} without 1m candles"
           + (f": {', '.join(res['skipped'])}" if res["skipped"] else ""), file=sys.stderr, flush=True)
-    if res["symbols"]:
-        print(f"note: every member is evaluated over the whole window, also in the months it was not top {n} (members "
-              f"cover {res['member_share']:.0%} of the symbol-hours): results include that look-ahead until the "
-              f"{cmd} filters by membership; universe_resolution.windows in --out has the spans "
-              f"(heartless.data.universe.member_trades)", file=sys.stderr, flush=True)
     if not res["symbols"]:
         print("error: none of them has stored 1m candles in this database", file=sys.stderr)
         sys.exit(2)
+    # Wave F (docs/ROADMAP.md 7.4): entries count only in member months, so the union's look-ahead is gone; the lab
+    # runs only the membership spans, discover keeps only member decision rows
+    print(f"membership: {res.get('member_months_total', 0)} member-months over {len(res['symbols'])} symbols "
+          f"({res['member_share']:.0%} of their symbol-hours), {res.get('skipped_member_months', 0)} member-months "
+          f"skipped; delisted in the window: "
+          f"{', '.join(sorted(res.get('delisted') or {})) or 'none'}; only entries in member months count (no "
+          f"look-ahead from the union of monthly members)", file=sys.stderr, flush=True)
+    args.universe_resolution = res
     return res
 
 
@@ -249,6 +284,8 @@ def _note_top_universe(args, res: dict | None) -> None:
         doc = json.load(f)
     doc["universe_resolution"] = {k: res[k] for k in ("rule", "research", "symbols", "skipped", "unranked", "members",
                                                       "member_share")}
+    doc["universe_resolution"].update({k: res[k] for k in ("member_months", "member_months_total",
+                                                          "skipped_member_months", "delisted") if k in res})
     # membership spans as [first ms, last ms] per evaluated symbol: the trades entered inside them are the ones free of
     # the union's look-ahead (heartless.data.universe.member_trades)
     doc["universe_resolution"]["windows"] = {s: [list(w) for w in ws] for s, ws in res["windows"].items()}
@@ -692,6 +729,10 @@ def _discover(settings, args) -> None:
                 "features": len(D.FEATURES_X if context else D.FEATURES), "symbols": sorted(symbols),
                 "search": {"min_trades": cfg.min_trades, "beam": cfg.beam, "depth": cfg.depth},
                 "train": [int(train[0]), int(train[1])]}
+        if getattr(args, "universe_resolution", None) is not None:
+            # a topN search is identified by its rule (member rows only), not by the symbols that had 1m candles
+            conf["symbols"] = args.universe
+            conf["membership"] = "member_months"
         # the family's other configurations: an identical rerun replaces its own earlier count (the ledger keeps the
         # largest count per configuration), so its bar must not add that count on top of this run's
         n_prior = trials.family_tests(tag, exclude=trials.config_hash(conf))
@@ -699,6 +740,21 @@ def _discover(settings, args) -> None:
           "unseal": [p for p in unseal if p in touched]}
     if templates != "classic" or context or n_prior:  # the defaults keep the call the live discovery cycle makes
         kw.update(templates=templates, context=context, n_prior=n_prior)
+    resolution = getattr(args, "universe_resolution", None)
+    if resolution is not None:
+        # topN (docs/ROADMAP.md 7.4): TRAIN rows only in the TRAIN member months; VALID keeps the symbol list frozen at
+        # the end of TRAIN and counts each symbol only in its VALID member months (ranked month by month)
+        from heartless.data import universe as U
+
+        try:
+            valid_member = U.member_windows_for(settings.universe_db_path, symbols, valid[0], valid[1],
+                                                U.parse_top(args.universe))
+        except ValueError as e:
+            store.close()
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(2)
+        kw["member"] = {"train": {"windows": resolution["windows"], "delisted": resolution.get("delisted") or {}},
+                        "valid": valid_member}
     from heartless.data.context import ContextMismatch
 
     try:

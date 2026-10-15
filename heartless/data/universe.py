@@ -366,6 +366,57 @@ def membership_windows(members: dict[str, list[str]], start: int | None = None,
     return out
 
 
+def member_mask(times, spans: list[tuple[int, int]]):
+    """Boolean mask of `times` (ms, ascending or not) that fall inside one of `spans` ([first, last] inclusive, sorted
+    and disjoint as membership_windows gives them): the vectorised member test of the hourly evaluator and discover."""
+    import numpy as np
+
+    t = np.asarray(times, dtype=np.int64)
+    if not spans or not len(t):
+        return np.zeros(len(t), dtype=bool)
+    lo = np.array([a for a, _ in spans], dtype=np.int64)
+    hi = np.array([b for _, b in spans], dtype=np.int64)
+    k = np.searchsorted(lo, t, side="right") - 1
+    ok = k >= 0
+    ok[ok] &= t[ok] <= hi[k[ok]]
+    return ok
+
+
+def member_months(windows: dict[str, list[tuple[int, int]]]) -> dict[str, int]:
+    """Calendar months covered by each symbol's membership spans (a clipped first / last month counts once)."""
+    out = {}
+    for sym, spans in windows.items():
+        months: set[str] = set()
+        for a, b in spans:
+            months.update(months_of(int(a), int(b)))
+        out[sym] = len(months)
+    return out
+
+
+def delisting_closes(store, symbols: list[str] | None = None, start: int | None = None,
+                     end: int | None = None) -> dict[str, int]:
+    """Per delisted symbol, the last instant of its last traded hour (open of that hour + 1 h - 1 ms): where a position
+    still open is force-closed (ROADMAP 7.4: that hour's close, 5x the nominal slippage, 10x under stress). Delisted =
+    no trade in the last ACTIVE_SLACK_MS of the stored data (symbols_inventory.symbol_status); only closes inside
+    [start, end] are returned. A pause followed by a relisting is not a delisting here (the 1h / 1m data simply has a
+    gap); the announcement date is not in the data, so nothing blocks entries before the delisting."""
+    from heartless.data.symbols_inventory import ACTIVE_SLACK_MS, MS_H, data_end
+
+    stop = data_end(store)
+    if stop is None:
+        return {}
+    wanted = None if symbols is None else set(symbols)
+    out = {}
+    for r in store.load_symbol_inventory():
+        sym, last = r["symbol"], r.get("last_trade")
+        if last is None or (wanted is not None and sym not in wanted) or last >= stop - ACTIVE_SLACK_MS:
+            continue
+        close = int(last) + MS_H - 1
+        if (start is None or close >= start) and (end is None or close <= end):
+            out[sym] = close
+    return out
+
+
 def member_trades(trades: list[dict], windows: dict[str, list[tuple[int, int]]]) -> list[dict]:
     """The trades entered while their symbol was a member (entry_time inside one of its membership_windows).
 
@@ -374,6 +425,27 @@ def member_trades(trades: list[dict], windows: dict[str, list[tuple[int, int]]])
     selected on the outcome it is evaluated on. Only the trades this keeps are free of that look-ahead."""
     return [t for t in trades
             if any(a <= int(t.get("entry_time") or 0) <= b for a, b in windows.get(t.get("symbol"), ()))]
+
+
+def member_windows_for(universe_db, symbols: list[str], start: int, end: int, top: int) -> dict:
+    """Membership of a FIXED symbol list over another window by the same monthly rule: {"windows": spans of each of
+    `symbols` that is top-`top` in a month of [start, end] (the others get no span), "delisted": their delisting
+    closes in it}. discover uses it for VALID: the symbol list is frozen at the end of TRAIN (no VALID-period
+    liquidity chooses symbols), and each frozen symbol counts only in the VALID months it is a member (each month
+    ranked on the month before it, so this is point-in-time)."""
+    from heartless.core.store import Store
+
+    store = Store(universe_db)
+    try:
+        res = research_universe(store, start, end, top)
+        delisted = delisting_closes(store, list(symbols), start, end)
+    finally:
+        store.close()
+    if res["unranked"]:
+        raise ValueError(f"months {', '.join(res['unranked'])} cannot be ranked from {universe_db} (their previous "
+                         f"month's 1h data is not built): run `heartless universe build` over the window")
+    members = {s: res["members"].get(s, []) for s in symbols}
+    return {"windows": membership_windows(members, start, end), "delisted": delisted}
 
 
 def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> dict:
@@ -399,9 +471,21 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> d
     have = stored_candle_symbols(candle_db, res["symbols"], start, end)
     symbols = sorted(s for s in res["symbols"] if s in have)
     windows = membership_windows({s: res["members"][s] for s in symbols}, start, end)
+    skipped = sorted(s for s in res["symbols"] if s not in have)
+    store = Store(universe_db)
+    try:
+        delisted = delisting_closes(store, res["symbols"], start, end)
+    finally:
+        store.close()
+    months = member_months(windows)
+    skipped_months = member_months(membership_windows({s: res["members"][s] for s in skipped}, start, end))
     return {"rule": f"top{top} by median daily quote volume of the previous month, listed >= {RESEARCH_MIN_AGE_DAYS}d "
                     f"(docs/UNIVERSE.md)", "research": res["symbols"], "symbols": symbols,
-            "skipped": sorted(s for s in res["symbols"] if s not in have), "unranked": res["unranked"],
+            "skipped": skipped, "unranked": res["unranked"],
             "members": res["members"], "windows": windows,
+            # member-months of the evaluated symbols and of the skipped ones (no 1m candles in the window), and the
+            # members whose trading ended (delisting close, docs/ROADMAP.md 7.4) after the window start
+            "member_months": months, "member_months_total": sum(months.values()),
+            "skipped_member_months": sum(skipped_months.values()), "delisted": delisted,
             "member_share": round(sum(b - a + 1 for w in windows.values() for a, b in w)
                                   / max(1, len(symbols) * (int(end) - int(start) + 1)), 4)}
