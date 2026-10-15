@@ -176,3 +176,12 @@ def test_a_long_window_is_read_a_month_at_a_time_into_the_same_arrays(tmp_path, 
                            market=None)
     assert bt.candles["BTCUSDT"].view("close").tobytes() == ref.view("close").tobytes()
     st.close()
+
+
+def test_the_timeline_union_equals_unique_of_the_concatenation():
+    rng = np.random.default_rng(5)
+    arrays = [np.unique(rng.integers(0, 10_000, n)).astype(np.int64) * 60_000 + 59_999 for n in (3000, 1, 0, 5000)]
+    ref = np.unique(np.concatenate(arrays))
+    out = B._union_sorted(arrays)
+    assert out.dtype == ref.dtype and out.tobytes() == ref.tobytes()
+    assert B._union_sorted([]).size == 0 and B._union_sorted(arrays[:1]).tobytes() == arrays[0].tobytes()

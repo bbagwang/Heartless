@@ -155,6 +155,17 @@ class _LazyFrame(FeatureFrame):
         self.f = _LazyColumns(self.tf, b, names if b.n else _RAW_COLUMNS, state)  # empty: bar columns only, as eager
 
 
+def _union_sorted(arrays: list[np.ndarray]) -> np.ndarray:
+    """np.unique(np.concatenate(arrays)) folded one array at a time: the same sorted values, without a copy of every
+    symbol's close times at once (20 symbols x 3 years: 250 MB, and unique's sort copies of it)."""
+    if not arrays:
+        return np.array([], dtype=np.int64)
+    out = np.unique(arrays[0])
+    for a in arrays[1:]:
+        out = np.union1d(out, a)
+    return out
+
+
 def _frame_names(ca: CandleArrays) -> tuple[str, ...]:
     """Every column a FeatureFrame holds, in its order (computed on two bars: the set does not depend on the data)."""
     return tuple(FeatureFrame("1m", ca.slice(0, min(ca.n, 2))).f)
@@ -243,7 +254,7 @@ class Backtester:
         for sym, ca in self.candles.items():
             self.views[sym] = self._build_view(sym, ca)
             all_times.append(ca.view("close_time"))
-        self._timeline = np.unique(np.concatenate(all_times)) if all_times else np.array([], dtype=np.int64)
+        self._timeline = _union_sorted(all_times)
         self._fund_idx: dict[str, np.ndarray] = {}
         for sym, rows in self.funding.items():
             if rows:
@@ -516,6 +527,7 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
             mrows = store.load_metrics(s, lo - 2 * 86_400_000, until)
             if mrows:
                 metrics[s] = MetricsSeries.from_rows(mrows)
+            del mrows  # a year of 5-minute rows is about 70 MB of row objects: not held while the next symbol loads
     if isinstance(market, str):
         market = stored_context(settings, store, list(candles), lo, until if until is not None else 2**62)
     return Backtester(settings, symbols, candles, funding, metrics, market)
