@@ -329,3 +329,65 @@ def test_replay_reports_latency_features_profile_and_the_book_proxy(perf_replay)
     assert "performance:" in s["report"] and "hot path" in s["report"]
     assert seen["book"].source == "proxy" and seen["book"].spread_bps > 0 and seen["book"].imbalance == 0.0
     assert all(seen["live"].values())
+
+
+# --- review fixes ----------------------------------------------------------------------------------------------------
+def test_the_context_book_age_is_never_negative():
+    """ctx.book is built on a bar close that is in the past by the processing delay; a book updated after that close
+    is a few milliseconds old, not negative (the staleness used to be bar close - local receive time)."""
+    from heartless.core.models import SymbolInfo
+    from heartless.util.timeutil import now_ms
+
+    app = _app(ORDERBOOK_STREAM=True)
+    app.symbols = {"BTCUSDT": SymbolInfo("BTCUSDT", "BTC", "USDT", 0.1, 0.001, 0.001, 5.0, 1, 3)}
+    app.books.set_symbols(["BTCUSDT"])
+    asyncio.run(app.books.on_message({"e": "depthUpdate", "s": "BTCUSDT", "u": 3, "U": 1, "pu": 0,
+                                      "b": [["100.0", "2"]], "a": [["100.1", "1"]]}))
+    bar_close = now_ms() - 45_000
+    age = app._context("BTCUSDT", bar_close).book.staleness_ms
+    assert 0 <= age < 5_000
+    app.store.close()
+    asyncio.run(app.rest.close())
+
+
+def test_new_credentials_drop_prefetched_answers():
+    """Prefetched answers are keyed by request, not by account: after the owner swaps the keys, neither a stored answer
+    nor one still in flight may reach the new account's start-up reads."""
+    async def main():
+        r = SlowRest()
+        await r.prefetch([("GET", "/fapi/v3/account", None, True)])
+        r.set_credentials("k2", "s2")
+        await r.request("GET", "/fapi/v3/account", signed=True)
+        assert r.sent.count("/fapi/v3/account") == 2  # asked again with the new keys
+        task = asyncio.create_task(r.prefetch([("GET", "/fapi/v3/positionRisk", None, True)]))
+        await asyncio.sleep(LAT / 4)
+        r.set_credentials("k3", "s3")  # while the prefetch is on its way
+        took = await task
+        assert took["/fapi/v3/positionRisk"] < 0 and not r._prefetched
+        await r.request("GET", "/fapi/v3/positionRisk", signed=True)
+        assert r.sent.count("/fapi/v3/positionRisk") == 2
+        await r.close()
+
+    asyncio.run(main())
+
+
+def test_health_reads_each_views_incremental_state_once():
+    """A feature step in a worker thread can drop view.live (fallback to batch) at any moment; the health summary must
+    not read it twice (a check, then .stats on what has become None)."""
+    class Flaky:
+        incremental = True
+
+        def __init__(self):
+            self.reads = 0
+
+        @property
+        def live(self):
+            self.reads += 1
+            return types.SimpleNamespace(stats={"reanchors": 3}) if self.reads == 1 else None
+
+    app = _app()
+    app.views = {"BTCUSDT": Flaky()}
+    out = app._f7_health_now()
+    assert "incremental 1/1 symbols, 3 re-anchors" in out["features"]
+    app.store.close()
+    asyncio.run(app.rest.close())

@@ -66,9 +66,14 @@ class BinanceRest:
         self._last_sync = 0.0
         self.time_rtt_ms = float("nan")  # round trip of the last server-time request
         self._prefetched: dict[tuple, tuple[float, Any]] = {}  # F7: key -> (expiry monotonic s, answer)
+        self._cred_gen = 0  # F7: bumped by set_credentials; a prefetch sent under older keys is not kept
 
     def set_credentials(self, api_key: str, api_secret: str, testnet: bool | None = None) -> None:
-        """Swap the API key pair at runtime (owner entered new keys)."""
+        """Swap the API key pair at runtime (owner entered new keys). F7: prefetched answers are dropped (they are
+        keyed by request, not by account: a signed answer read with the old keys must never reach the new account's
+        LiveAccount.start or reconcile), and a prefetch still in flight is not kept when it lands."""
+        self._prefetched.clear()
+        self._cred_gen += 1
         self.api_key = api_key
         self.api_secret = api_secret.encode() if api_secret else b""
         if api_key:
@@ -118,12 +123,16 @@ class BinanceRest:
         if type(self).request is not BinanceRest.request:
             return {}
 
+        gen = self._cred_gen
+
         async def one(method: str, path: str, params: dict[str, Any] | None, signed: bool) -> tuple[str, float]:
             t0 = time.perf_counter()
             try:
                 data = await self._send(method, path, params, signed)
             except Exception as e:  # noqa: BLE001
                 log.debug("prefetch %s %s failed: %s", method, path, e)
+                return path, -(time.perf_counter() - t0) * 1e3
+            if self._cred_gen != gen:  # the keys (or the endpoint) changed while it was in flight
                 return path, -(time.perf_counter() - t0) * 1e3
             self._prefetched[self._prefetch_key(method, path, params, signed)] = (time.monotonic() + ttl, data)
             return path, (time.perf_counter() - t0) * 1e3

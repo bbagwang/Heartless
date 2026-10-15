@@ -316,10 +316,15 @@ class OrderBooks:
             delay = min(delay * 2, 30.0)
 
     def features(self, symbol: str, now: int | None = None) -> BookFeatures:
+        """The symbol's book as it is at this call. `now` (the bar close a decision is made on; the replay's ProxyBooks
+        picks its bars by it) does not enter staleness_ms: every update was stamped with the local clock on arrival,
+        so the age is that clock now minus the stamp. Measured from the bar close instead (the exchange clock, earlier
+        than the read by the whole processing delay), a book updated after the close read as negative staleness and
+        one that stopped updating seconds before the decision as fresh."""
         book = self.books.get(symbol)
         if book is None:
             return EMPTY_BOOK
-        return book.features(now_ms() if now is None else now, self.depth_bps)
+        return book.features(now_ms(), self.depth_bps)
 
     def status(self) -> dict[str, Any]:
         synced = sum(1 for b in self.books.values() if b.synced)

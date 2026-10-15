@@ -254,3 +254,25 @@ def test_book_of_reads_ctx_book_or_the_empty_book():
     assert book_of(ctx) is EMPTY_BOOK
     ctx.book = BookFeatures(spread_bps=1.0, source="stream")
     assert book_of(ctx).spread_bps == 1.0
+
+
+def test_staleness_is_the_age_on_the_local_clock_not_the_time_since_the_bar_close(monkeypatch):
+    """Review fix: the app asks with the bar close it decides on (exchange clock, earlier than the read by the
+    processing delay). The age must come from the local clock that stamped the updates: measured from the bar close, a
+    book updated after the close read negative and one that stopped seconds before the decision read fresh."""
+    from heartless.exchange import orderbook as OB
+
+    clock = {"t": 1_000_000}
+    monkeypatch.setattr(OB, "now_ms", lambda: clock["t"])
+
+    async def main():
+        books = OrderBooks("partial", 10.0)
+        books.set_symbols([SYM])
+        await books.on_message(ev(1, 2, 1, b=BIDS, a=ASKS))  # arrives at 1_000_000, after the bar closed at 999_999
+        clock["t"] = 1_002_500  # the decision reads the book 2.5 s later
+        assert books.features(SYM, 999_999).staleness_ms == 2_500
+        assert books.features(SYM).staleness_ms == 2_500
+        clock["t"] = 1_009_000  # the stream went quiet: the book ages, whatever bar the caller decides on
+        assert books.features(SYM, 1_008_999).staleness_ms == 9_000
+
+    asyncio.run(main())

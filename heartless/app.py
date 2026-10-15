@@ -1387,8 +1387,10 @@ class Heartless:
 
     def _f7_health_now(self) -> dict[str, Any]:
         views = list(self.views.values())
-        inc = [v for v in views if getattr(v, "live", None) is not None]
-        reanchors = sum(v.live.stats["reanchors"] for v in inc)
+        # each view's LiveFrames read once: a feature step in a worker thread may drop it (fallback to batch) between
+        # a check and a second attribute read
+        inc = [lf for lf in (getattr(v, "live", None) for v in views) if lf is not None]
+        reanchors = sum(lf.stats["reanchors"] for lf in inc)
         fallback = sum(1 for v in views if self.s.incremental_features and not getattr(v, "incremental", False))
         d = perf.DRIFT.snapshot()
         out = {"latency": " | ".join(perf.LATENCY.lines()) or "-",
