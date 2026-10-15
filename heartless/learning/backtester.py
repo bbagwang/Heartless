@@ -9,10 +9,10 @@ import numpy as np
 
 from heartless.config import Settings
 from heartless.core.models import Candle, Regime, SymbolInfo, Ticker
-from heartless.data.candles import CandleArrays
+from heartless.data.candles import COLUMNS, CandleArrays, resample
 from heartless.data.context import EMPTY, ContextTable
 from heartless.data.extras import AVAILABLE_AFTER_MS, MetricsSeries
-from heartless.data.features import MarketView
+from heartless.data.features import LONG_TIMEFRAMES, TIMEFRAMES, FeatureFrame, MarketView
 from heartless.exchange.base import OrderResult
 from heartless.exchange.paper import PaperAccount, PaperOrder
 from heartless.execution.engine import TradingEngine
@@ -52,6 +52,112 @@ def funding_schedule(times: np.ndarray, ts: int) -> tuple[int, int]:
     iv = int(t[i - 1]) - int(t[i - 2]) if i >= 2 else FUNDING_INTERVAL
     iv = iv if 0 < iv <= FUNDING_INTERVAL else FUNDING_INTERVAL
     return last + ((ts - last) // iv + 1) * iv, iv
+
+
+# The bar columns a FeatureFrame carries as views of its bars (no computation); every other column is an indicator.
+_RAW_COLUMNS = ("open", "high", "low", "close", "volume", "quote_volume")
+# Frames whose indicator columns a backtest computes on first read: over a year plus a 92-day warm-up the eager 1m and 5m
+# frames held about 330 of a symbol's 400 MB of frames. The 15m .. 1d frames stay eager: about 30 MB per symbol, and a
+# run reads many of their columns at different bars (each new read would recompute the frame).
+_LAZY_TIMEFRAMES = ("1m", "5m")
+# A lazy frame computed more often than this keeps every column from then on: a run that reads it widely pays at most
+# _KEEP_ALL_AFTER + 1 computations of it, not one per newly read column.
+_KEEP_ALL_AFTER = 2
+# Candles are read from the store this much at a time: one query over a year held about 0.5 GB of row objects per
+# symbol at once (sqlite rows + Candle objects) on top of the arrays they fill.
+_LOAD_CHUNK_MS = 30 * 86_400_000
+
+
+class _LazyState:
+    """What the lazy frames of one Backtester share: the indicator columns read so far per timeframe (a symbol's
+    first recompute keeps every column another symbol already needed), and the frames holding a spare full
+    computation until the current bar is done (release, called by the bar loop)."""
+
+    __slots__ = ("reads", "spared")
+
+    def __init__(self) -> None:
+        self.reads: dict[str, set[str]] = {}
+        self.spared: list[_LazyColumns] = []
+
+    def release(self) -> None:
+        for cols in self.spared:
+            cols.spare = None
+        self.spared.clear()
+
+
+class _LazyColumns(dict):
+    """A backtest frame's column mapping holding the bar columns and only the indicator columns the run has read.
+
+    A missing indicator is filled from FeatureFrame computed again on the same bars: the same code on the same input,
+    so every value is the one the eager frame held. The recompute is kept as a spare until the bar is done (the
+    regime reads two 5m columns in a row: one computation), and the columns kept are every one of that timeframe
+    read so far by any symbol; after _KEEP_ALL_AFTER recomputes the frame keeps them all. Unknown names behave as in
+    a plain dict (get -> default, [] -> KeyError)."""
+
+    __slots__ = ("tf", "bars", "names", "state", "spare", "computes")
+
+    def __init__(self, tf: str, bars: CandleArrays, names: tuple[str, ...], state: _LazyState):
+        super().__init__((k, bars.view(k)) for k in _RAW_COLUMNS)
+        self.tf, self.bars, self.names, self.state = tf, bars, names, state
+        self.spare: dict | None = None
+        self.computes = 0
+
+    def __missing__(self, name: str) -> np.ndarray:
+        if name not in self.names:
+            raise KeyError(name)
+        reads = self.state.reads.setdefault(self.tf, set())
+        reads.add(name)
+        if self.spare is None:
+            self.spare = FeatureFrame(self.tf, self.bars).f
+            self.computes += 1
+            self.state.spared.append(self)
+        keep = self.spare if self.computes > _KEEP_ALL_AFTER else reads
+        for k in keep:
+            if not dict.__contains__(self, k) and k in self.spare:
+                dict.__setitem__(self, k, self.spare[k])
+        return dict.__getitem__(self, name)
+
+    def get(self, name: str, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+    def __contains__(self, name) -> bool:
+        return name in self.names
+
+    def __iter__(self):
+        return iter(self.names)
+
+    def __len__(self) -> int:
+        return len(self.names)
+
+    def keys(self):
+        return list(self.names)
+
+    def values(self):
+        return [self[k] for k in self.names]
+
+    def items(self):
+        return [(k, self[k]) for k in self.names]
+
+
+class _LazyFrame(FeatureFrame):
+    """FeatureFrame over a backtest's whole history whose indicator columns are computed on first read (see
+    Backtester._build_view)."""
+
+    def __init__(self, tf: str, bars: CandleArrays, names: tuple[str, ...], state: _LazyState):
+        self._lazy = (names, state)
+        super().__init__(tf, bars)
+
+    def _compute(self, b: CandleArrays) -> None:
+        names, state = self._lazy
+        self.f = _LazyColumns(self.tf, b, names if b.n else _RAW_COLUMNS, state)  # empty: bar columns only, as eager
+
+
+def _frame_names(ca: CandleArrays) -> tuple[str, ...]:
+    """Every column a FeatureFrame holds, in its order (computed on two bars: the set does not depend on the data)."""
+    return tuple(FeatureFrame("1m", ca.slice(0, min(ca.n, 2))).f)
 
 
 @dataclass
@@ -127,6 +233,7 @@ class Backtester:
         self._extras_bounds: dict[str, tuple[int, int, int]] = {}  # symbol -> (usable row, valid from, valid until)
         self._fund_cache: dict[str, tuple] = {}  # symbol -> cached settlement neighbourhood (_funding_view)
         self.views: dict[str, MarketView] = {}
+        self._lazy = _LazyState()
         self.now = 0
         self._timeline: np.ndarray | None = None
         self._prepare()
@@ -134,15 +241,35 @@ class Backtester:
     def _prepare(self) -> None:
         all_times = []
         for sym, ca in self.candles.items():
-            v = MarketView(sym)
-            v.rebuild(ca, live=False)
-            self.views[sym] = v
+            self.views[sym] = self._build_view(sym, ca)
             all_times.append(ca.view("close_time"))
         self._timeline = np.unique(np.concatenate(all_times)) if all_times else np.array([], dtype=np.int64)
         self._fund_idx: dict[str, np.ndarray] = {}
         for sym, rows in self.funding.items():
             if rows:
                 self._fund_idx[sym] = np.array([r[0] for r in rows], dtype=np.int64)
+
+    def _build_view(self, sym: str, ca: CandleArrays) -> MarketView:
+        """MarketView.rebuild(ca, live=False), except that the 1m and 5m frames compute an indicator column only when
+        the run first reads it (_LazyColumns, docs/PORTFOLIO.md section 4.4).
+
+        Eagerly every frame held all 55 indicator columns over the whole loaded history: about 400 MB per symbol for a
+        year plus a 92-day warm-up, 276 MB of it in the 1m frame and 55 MB in the 5m frame, so a 20-symbol joint
+        backtest needed about 9 GB. No alpha, the regime or the engine reads a 1m indicator in a backtest (the 1m bars
+        are read), and of the 5m frame the regime and the engine read atr and atr_rank; the 1m indicators also cost a
+        few seconds of computation per symbol. The values are the eager ones: each column is computed by FeatureFrame
+        over the same bars. The 15m .. 1d frames are built as rebuild builds them (the long ones up front too: the
+        engine looks a position's timeframe up in view.frames)."""
+        v = MarketView(sym)
+        v.base = ca
+        names = _frame_names(ca)
+        for tf in TIMEFRAMES:
+            bars = ca if tf == "1m" else resample(ca, tf)
+            v.frames[tf] = (_LazyFrame(tf, bars, names, self._lazy) if tf in _LAZY_TIMEFRAMES
+                            else FeatureFrame(tf, bars))
+        for tf in LONG_TIMEFRAMES:
+            v.tf(tf)
+        return v
 
     def _make_meta(self):
         if not getattr(self.s, "meta_label", False):
@@ -321,6 +448,8 @@ class Backtester:
             if engine.allocator is not None:
                 # P3: every symbol's bar at t has been processed: rank and admit this close's entry candidates
                 await engine.flush_entries()
+            if self._lazy.spared:
+                self._lazy.release()  # a frame recomputed for this bar's first reads keeps only the columns read
             # risk anchors / loss halts / drawdown are observed every bar (live: on_equity_tick every 30 s), so a
             # limit breached mid-hour blocks entries from the next bar on; the stored curve stays hourly
             eq = account.equity()
@@ -333,6 +462,7 @@ class Backtester:
                 equity_curve.append((t, eq))
         # flatten at the end so every trade is accounted for
         await engine.close_all("backtest end")
+        self._lazy.release()
         trades = [r.__dict__ if not hasattr(r, "to_dict") else r.to_dict() for r in engine.closed]
         for tr in trades:
             if isinstance(tr.get("alphas"), str):
@@ -374,11 +504,9 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
     for s in syms:
         if s not in symbols:
             continue
-        rows = store.load_candles(s, start=lo, end=until)
-        if len(rows) < 500:
+        ca = _load_1m(store, s, lo, until)
+        if ca.n < 500:
             continue
-        ca = CandleArrays("1m", capacity=len(rows) + 16)
-        ca.extend(rows)
         candles[s] = ca
         # by default one interval past `until`, so the last bucket's upcoming (next-settlement) rate is known to the
         # Context; without look-ahead the last bucket sees the settled rate instead (Backtester._upcoming_funding_rate)
@@ -391,6 +519,39 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
     if isinstance(market, str):
         market = stored_context(settings, store, list(candles), lo, until if until is not None else 2**62)
     return Backtester(settings, symbols, candles, funding, metrics, market)
+
+
+def _load_1m(store, symbol: str, lo: int, until: int | None) -> CandleArrays:
+    """The symbol's stored 1m candles in [lo, until]: the rows of one query, read _LOAD_CHUNK_MS at a time (a window
+    shorter than that is one query, as before) and copied into arrays sized like one CandleArrays.extend over all of
+    them. Open-ended windows (until None) stay one query."""
+    if until is None or until - lo < _LOAD_CHUNK_MS:
+        rows = store.load_candles(symbol, start=lo, end=until)
+        ca = CandleArrays("1m", capacity=len(rows) + 16)
+        ca.extend(rows)
+        return ca
+    pieces: list[CandleArrays] = []
+    a = lo
+    while a <= until:
+        b = min(until, a + _LOAD_CHUNK_MS - 1)
+        rows = store.load_candles(symbol, start=a, end=b)  # open_time in [a, b]: the pieces neither overlap nor gap
+        if rows:
+            piece = CandleArrays("1m", capacity=len(rows) + 16)
+            piece.extend(rows)
+            pieces.append(piece)
+        del rows
+        a = b + 1
+    total = sum(p.n for p in pieces)
+    ca = CandleArrays("1m", capacity=total + 16)
+    k = 0
+    for piece in pieces:
+        if ca.n and int(piece.open_time[0]) <= int(ca.open_time[ca.n - 1]):
+            raise ValueError(f"{symbol}: candle pieces out of order")  # cannot happen with ORDER BY open_time
+        for name in COLUMNS:
+            getattr(ca, name)[k:k + piece.n] = piece.view(name)
+        k += piece.n
+        ca.n = k
+    return ca
 
 
 def stored_context(settings: Settings, store, symbols: list[str], start: int, end: int) -> ContextTable | None:

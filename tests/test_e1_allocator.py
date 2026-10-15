@@ -350,3 +350,30 @@ def test_app_batching_is_inert_with_the_allocator_off():
     app.engines["paper"].allocator = None
     asyncio.run(app._entry_batch_done("AAAUSDT", T0))
     assert app._batch_t is None
+
+
+def test_full_app_replay_with_the_allocator_passes_every_invariant(tmp_path):
+    """The real orchestrator on the virtual-time loop (tests/test_p5_replay.py) with PORTFOLIO_ALLOCATOR on: entries go
+    through the per-close batches (every traded symbol's bar, then flush) and every minute's invariants hold."""
+    from heartless.data import features
+    from heartless.replay.runner import ReplayConfig, run_replay
+    from tests.test_p5_replay import NO_LEARNING, SEED_DAYS, SMALL_FRAMES, START, build_source, busy_params
+
+    flushed: list[int] = []
+    orig = TradingEngine.flush_entries
+
+    async def counting(self):
+        n = await orig(self)
+        flushed.append(n)
+        return n
+
+    with pytest.MonkeyPatch.context() as mp:
+        for tf, n in SMALL_FRAMES.items():
+            mp.setitem(features.LIVE_WINDOW, tf, n)
+        mp.setattr(TradingEngine, "flush_entries", counting)
+        cfg = ReplayConfig(source_db=build_source(tmp_path / "src.db", 1), start_ms=START,
+                           end_ms=START + MS_HOUR * 24 - 1, work_dir=str(tmp_path / "bot"), seed_days=SEED_DAYS,
+                           params=busy_params(), settings={**NO_LEARNING, "PORTFOLIO_ALLOCATOR": True})
+        s = run_replay(cfg)
+    assert s["passed"] and s["invariants"]["violations_total"] == 0, s["report"]
+    assert flushed and sum(flushed) == s["trades"]["opened"]["paper"] >= 1
