@@ -112,11 +112,12 @@ async def test_messages_state_that_nothing_trades_and_what_starts_trading():
     assert "14·30·60·90일 판정점" in text and "t ≥ " + "/".join(f"{R.ABS_T_AT[c]:g}" for c in R.PROMOTION_CHECKPOINTS) in text
     assert "PF ≥ 1.15" in text and "최대낙폭 ≤ 10R×√(n/30)" in text and "30·60·90일 판정점·청산일 30일" in text
     assert "마지막 판정점까지 승격되지 않으면 종료" in text
-    assert "OOS 판정: 13개 중 탈락 13, 통과 0" in text and "킬 스위치 켜짐" in text  # P1: 9, P2 candidates: 4
+    # P1: 9, P2 candidates: 4, E2: the two P2 TRAIN-gate failures (evidence stage "train")
+    assert "OOS 판정: 15개 중 탈락 15, 통과 0" in text and "킬 스위치 켜짐" in text
     assert "(docs/OOS_2022_2024.md, docs/RESEARCH_P2.md)" in text  # both judgements' documents
     assert "리서치 사이클이 통과 알파를 켭니다" not in text  # the old, untrue claim
     st = app.status()
-    assert st["learning"]["no_alpha"] is True and st["learning"]["evidence_counts"]["failed"] == 13
+    assert st["learning"]["no_alpha"] is True and st["learning"]["evidence_counts"]["failed"] == 15
     status = F.fmt_status(st, "UTC")
     assert NO_ALPHA_TEXT in status and "거래 시작 조건" in status
     daily = F.fmt_daily(app.pnl_report("today"), app.pnl_report("week"), st, "UTC")

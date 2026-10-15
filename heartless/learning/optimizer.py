@@ -126,14 +126,57 @@ def _has_own_params(alpha: str) -> bool:
     return bool(a is not None and getattr(a, "param_specs", None))
 
 
+def research_alphas(params: StrategyParams, alphas: list[str] | None = None) -> list[str]:
+    """The alphas a research cycle tunes: `alphas` (default: every registered one) that the parameter set knows and that
+    have parameters of their own (the rule-driven "discovered" alpha is improved by the discovery engine, not here)."""
+    return [a for a in (alphas if alphas is not None else list(ALPHA_SPECS)) if a in params.alphas and _has_own_params(a)]
+
+
+def research_warmup_ms(params: StrategyParams, alphas: list[str]) -> int:
+    """History loaded before the research window (E2): the longest warm-up any evaluated alpha needs, as in the lab
+    (lab.warmup_for: its lookback_days + LOOKBACK_MARGIN_MS, at least lab.WARMUP_MS). The window used to be its own
+    warm-up, so an alpha whose lookback is a large part of the window (ts_trend_tsmom 45 days, vol_breakout_dbox 90,
+    discovery_daily_capdisp 22 against a 120-day window, split 60/20/20) was evaluated on a fraction of its train /
+    test windows or not at all."""
+    from heartless.learning.lab import WARMUP_MS, warmup_for
+
+    return max([WARMUP_MS] + [warmup_for(params, only_alpha=a) for a in alphas])
+
+
+def longest_research_warmup_ms() -> int:
+    """research_warmup_ms over every alpha a research cycle may tune (their lookback_days are class attributes, so the
+    parameter values do not matter): what the stored history must cover before the research window
+    (Settings.data_retention_days, E2)."""
+    p = StrategyParams.default()
+    return research_warmup_ms(p, research_alphas(p))
+
+
+def warmup_start(since: int, warm: int, unseal=()) -> int:
+    """First timestamp of the warm-up before a research window starting at `since`: `since - warm`, moved past any
+    sealed period it would overlap (an automated loop never reads one, not even as warm-up)."""
+    from heartless.learning import seal
+
+    lo = int(since) - int(warm)
+    for name in seal.overlapping(lo, int(since) - 1, unseal):
+        lo = max(lo, int(seal.SEALED[name][1]))
+    return min(lo, int(since))
+
+
 def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, symbols_dict: dict,
                        lookback_days: int, n_candidates: int, seed: int | None = None,
                        alphas: list[str] | None = None, seeds: dict[str, list[dict]] | None = None,
                        folds: int = 3, unseal=()) -> dict:
     """Entry point executed in a worker process. Returns a JSON-serialisable summary.
 
+    `alphas` are the alphas to tune (default: all; ResearchManager.research_selection bounds a live cycle to the
+    champion's enabled ones, the disabled ones not marked failed and a rotating few of the failed ones). History of
+    research_warmup_ms(evaluated alphas) is loaded before the window (`window.warmup_ms`, `window.loaded_from`), so
+    every alpha decides with its full lookback from the window's first bar on. The candle database is opened
+    read-only (Store readonly=True).
+
     The lookback window never touches a sealed period (heartless.learning.seal): an automated loop cannot ask for
-    an unseal, so the window is clipped to its unsealed recent side (noted in `window.sealed_clipped`)."""
+    an unseal, so the window is clipped to its unsealed recent side (noted in `window.sealed_clipped`); the warm-up
+    before it stops at a sealed period as well."""
     import logging as _logging
 
     from heartless.core.models import SymbolInfo
@@ -143,12 +186,14 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
     _logging.basicConfig(level=_logging.WARNING)
     t0 = time.time()
     settings = Settings(_env_file=None, **settings_dict)
-    store = Store(db_path)
+    store = Store(db_path, readonly=True)
     symbols = {k: SymbolInfo(**v) for k, v in symbols_dict.items()}
     base = StrategyParams.from_dict(params_dict)
     rng = random.Random(seed)
+    evaluated = research_alphas(base, alphas)
     now = max((store.candle_range(s)[1] or 0) for s in store.candle_symbols()) if store.candle_symbols() else 0
     if not now:
+        store.close()
         return {"error": "no candles", "alphas": {}}
     since = now - lookback_days * MS_DAY
     clipped = seal.overlapping(since, now, unseal)
@@ -159,10 +204,13 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
             return {"error": f"research window overlaps sealed period(s) {clipped}", "alphas": {}}
         since, now = win
     seal.check_window(since, now, unseal)
+    # the warm-up before the window: the longest lookback of the evaluated alphas (+ margin), never inside a seal
+    lo = warmup_start(since, research_warmup_ms(base, evaluated), unseal)
     # load_backtester's default market="auto" attaches the stored market context of the window (CONTEXT_DB: the bot's
     # live context store, see ResearchManager.worker_settings), so alphas reading ctx.market are evaluated on what they
     # see live
-    bt = load_backtester(settings, store, symbols, since, until=now if clipped else None)
+    bt = load_backtester(settings, store, symbols, since, until=now if clipped else None, warmup_ms=since - lo)
+    store.close()
     if not bt.candles:
         return {"error": "not enough candles", "alphas": {}}
     # screening: train on the first 60% of the window, test on the next 20%; confirmation: the last K windows
@@ -174,14 +222,15 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
     conf_start = since + int(span * 0.4)
     step = (now - conf_start) // k
     fold_windows = [(conf_start + i * step, conf_start + (i + 1) * step if i < k - 1 else now) for i in range(k)]
+    first = min((int(ca.open_time[0]) for ca in bt.candles.values() if ca.n), default=since)
     out: dict = {"alphas": {}, "window": {"since": since, "split": split, "until": now, "folds": fold_windows,
-                                          "sealed_clipped": clipped},
+                                          "sealed_clipped": clipped, "warmup_ms": since - lo, "loaded_from": lo,
+                                          "first_candle": first},
+                 "selection": list(evaluated),
                  "symbols": list(bt.candles.keys()),
                  "context": {"db": str(settings.context_db_path),
                              "hours": len(bt.market) if getattr(bt, "market", None) is not None else 0}}
-    for alpha in (alphas or list(ALPHA_SPECS)):
-        if alpha not in base.alphas or not _has_own_params(alpha):
-            continue  # e.g. the rule-driven "discovered" alpha is improved by the discovery engine, not here
+    for alpha in evaluated:
         ta = time.time()
         cands = optimize_alpha(bt, base, alpha, n_candidates, train, test, rng, seeds=(seeds or {}).get(alpha))
         finalists = [c for c in cands[:3] if c.score > -1e8]
@@ -204,7 +253,6 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
                       "test_avg_r": round(c.test.get("avg_r", 0.0), 3)} for c in cands[:3]],
         }
     out["seconds"] = round(time.time() - t0, 1)
-    store.close()
     return out
 
 

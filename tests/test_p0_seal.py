@@ -164,13 +164,14 @@ def test_research_cycle_clips_its_lookback_out_of_the_seal(tmp_path, monkeypatch
     st.close()
     calls = []
 
-    def fake_loader(settings, store, symbols, since, until=None, symbol_list=None):
-        calls.append((since, until))
+    def fake_loader(settings, store, symbols, since, until=None, symbol_list=None, warmup_ms=0):
+        calls.append((since, until, warmup_ms))
         return SimpleNamespace(candles={})
 
     monkeypatch.setattr(O, "load_backtester", fake_loader)
     out = O.run_research_cycle(str(db), {}, StrategyParams.default().to_dict(), {}, lookback_days=30, n_candidates=2)
     assert out["error"] == "not enough candles" and calls[-1][0] == E25  # 2025-12-21 -> clipped to 2026-01-01
+    assert calls[-1][2] == 0  # E2: the warm-up before the window stops at the sealed period as well
     out = O.run_research_cycle(str(db), {}, StrategyParams.default().to_dict(), {}, lookback_days=60, n_candidates=2)
     assert "sealed" in out["error"] and len(calls) == 1  # too little unsealed history left: skipped, nothing loaded
 
@@ -312,7 +313,9 @@ def test_an_unseal_the_window_does_not_need_opens_nothing(tmp_path, monkeypatch,
     monkeypatch.setattr(Store, "load_candles", spy_c)
     D.build_dataset(str(db), ["SYM0USDT"], _ms(2024, 12, 26), S25 - 1, "1h", workers=1, unseal=["2025"])
     assert seen["candle_ends"] == [S25 - 1]
-    # the CLIs hand only the periods the window opens to the evaluation
+    # the CLIs hand only the periods the window opens to the evaluation (E2: they open an existing candle database
+    # read-only, so it has to exist)
+    Store(tmp_path / "heartless.db").close()
     settings = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(tmp_path))
     ran = []
     monkeypatch.setattr(lab, "evaluate", lambda params, symbols, start, end, *a, **k: ran.append(k) or _stub_result(start, end))

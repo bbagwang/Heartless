@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -61,14 +61,19 @@ class Settings(BaseSettings):
     backtest_slippage_bps: float = Field(default=1.5, alias="BACKTEST_SLIPPAGE_BPS")  # simulated market-order slippage
 
     # --- learning ----------------------------------------------------------------------------
-    # 360 (was 240, C2-B): one 120-day cycle takes ~2.2 h of a core (docs/SELF_IMPROVEMENT.md 3.1), 54% of a 4-hour
-    # interval; 6 hours keep the research worker busy at most ~36% of the time and leave room for the daily discovery
-    research_interval_minutes: int = Field(default=360, alias="RESEARCH_INTERVAL_MINUTES")
+    # 120 (E2; was 360 in C2-B, 240 before): a cycle now tunes the champion's enabled alphas, the disabled ones not marked
+    # failed and RESEARCH_FAILED_PER_CYCLE failed ones (below). With the shipped defaults (2 failed alphas) the heaviest
+    # cycle - the 92-day warm-up pair ts_trend_tsmom + vol_breakout_dbox - took 1,865 s of a core (docs/SELF_IMPROVEMENT.md
+    # 3.1): 26% of 2 hours. ResearchManager.due() also waits twice the last cycle's length, so a longer cycle (more
+    # enabled alphas) never pushes the research duty cycle past one half
+    research_interval_minutes: int = Field(default=120, alias="RESEARCH_INTERVAL_MINUTES")
     # 120 days (was 30): a 30-day window holds too few independent days for 1h alphas (docs/SELF_IMPROVEMENT.md)
     research_lookback_days: int = Field(default=120, alias="RESEARCH_LOOKBACK_DAYS")
     research_folds: int = Field(default=3, alias="RESEARCH_FOLDS")  # walk-forward confirmation windows
     # history kept in the database for research / discovery (live feature views only use HISTORY_DAYS)
-    # (candles, funding, metrics and equity rows; 180 days (was 90) keep the 120-day research window plus margin)
+    # (candles, funding, metrics and equity rows; 180 days (was 90) keep the 120-day research window plus margin).
+    # A floor since E2: raised to the research window + the longest research warm-up + slack when that is longer
+    # (Settings._retention_covers_research below; default 214 days)
     data_retention_days: int = Field(default=180, alias="DATA_RETENTION_DAYS")
     discovery_interval_hours: int = Field(default=24, alias="DISCOVERY_INTERVAL_HOURS")
     discovery_min_days: int = Field(default=45, alias="DISCOVERY_MIN_DAYS")
@@ -136,6 +141,24 @@ class Settings(BaseSettings):
     max_same_direction_risk_pct: float = Field(default=1.5, alias="MAX_SAME_DIRECTION_RISK_PCT")  # 3 x 0.5% at beta 1
     beta_lookback_days: int = Field(default=30, alias="BETA_LOOKBACK_DAYS")  # BTC beta from this many days of 1h returns
 
+    # --- E2: research-cycle cost and the history it needs (docs/SELF_IMPROVEMENT.md 3.1, 9) ------------------------
+    # A research cycle tunes the champion's enabled alphas, the disabled alphas the evidence registry does not mark
+    # failed, and RESEARCH_FAILED_PER_CYCLE of the failed ones in a fixed rotation (ResearchManager.research_selection;
+    # each failed alpha is revisited every ceil(failed / k) cycles). Tuning all 15 parametrised alphas every cycle cost
+    # about 3.5 hours of a core, mostly on alphas that already failed out of sample.
+    research_failed_per_cycle: int = Field(default=2, alias="RESEARCH_FAILED_PER_CYCLE")
+
+    @model_validator(mode="after")
+    def _retention_covers_research(self):
+        """The research worker loads the warm-up of the longest-lookback alpha it tunes before its window (E2), so the
+        stored history must reach RESEARCH_LOOKBACK_DAYS + that warm-up + RETENTION_SLACK_DAYS. DATA_RETENTION_DAYS is
+        raised to research_retention_days() when it is shorter (default 120 + 92 + 2 = 214 > 180 days); the backfill,
+        the retention prune and the live context store all follow data_retention_days."""
+        need = research_retention_days(self.research_lookback_days)
+        if self.data_retention_days < need:
+            self.data_retention_days = need
+        return self
+
     @field_validator("telegram_owner_id", mode="before")
     @classmethod
     def _blank_owner_id_is_none(cls, v):
@@ -168,6 +191,22 @@ class Settings(BaseSettings):
     @property
     def context_db_path(self) -> Path:
         return Path(self.context_db) if self.context_db else self.data_dir / "context.db"
+
+
+# E2: days of stored history beyond the research window and its warm-up (the research window ends at the newest stored
+# candle, the backfill starts from the wall clock)
+RETENTION_SLACK_DAYS = 2
+
+
+def research_retention_days(lookback_days: int) -> int:
+    """History a research cycle may read: its window (`lookback_days`) plus the longest warm-up of any alpha it may tune
+    (learning/optimizer.longest_research_warmup_ms: vol_breakout_dbox's 90-day lookback + the lab's 2-day margin) plus
+    RETENTION_SLACK_DAYS."""
+    import math
+
+    from heartless.learning.optimizer import longest_research_warmup_ms  # lazy: it imports the strategy stack
+
+    return int(lookback_days) + math.ceil(longest_research_warmup_ms() / 86_400_000) + RETENTION_SLACK_DAYS
 
 
 def load_settings(**overrides) -> Settings:

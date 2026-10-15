@@ -164,12 +164,13 @@ def test_the_prune_reaches_the_live_context_store(tmp_path):
     s = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(tmp_path), WEB_ENABLED=False, TELEGRAM_BOT_TOKEN="",
                  DATA_RETENTION_DAYS=10, HISTORY_DAYS=2)
     app = Heartless(s)
-    now = START + 40 * MS_DAY
+    keep = app.s.data_retention_days + 5  # retention (E2: raised from 10 to the research need) + 5 days of margin
+    now = START + (keep + 25) * MS_DAY
     st = app._ctx_db()
     meta = app._ctx_meta(st)
-    for d in range(40):
+    for d in range(keep + 25):
         T = START + d * MS_DAY + MS_HOUR - 1
         st.add_market_context([(C.MARKET_KEY, T, b"\0" * 8)], T, T, meta)
     app._prune(now)
-    assert st.market_context_stats()["hours"] == 15  # retention 10 days + 5 days of margin, as every other series
+    assert st.market_context_stats()["hours"] == keep  # one row per day: the retention window, as every other series
     asyncio.run(app.stop())

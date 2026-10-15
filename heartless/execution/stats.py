@@ -139,13 +139,15 @@ def day_clustered_t(trades: list[dict], min_days: int = 5) -> float:
     return mean / math.sqrt(var) if var > 0 else 0.0
 
 
-def paired_daily_diff(a: list[dict], b: list[dict], start_ms: int | None = None, end_ms: int | None = None) -> dict:
+def paired_daily_diff(a: list[dict], b: list[dict], start_ms: int | None = None, end_ms: int | None = None,
+                      lag: int = 0) -> dict:
     """Paired comparison of two engines' daily R over the same calendar days: d_i = R_a(day i) - R_b(day i).
 
     The days are every UTC calendar day from `start_ms` to `end_ms` (both engines ran over the whole span, so a day on
     which one of them closed nothing is a real 0R day for it), or, without a span, the days on which either engine
     closed a trade. Returns days, mean difference per day, its t (0.0 with fewer than 2 days or no dispersion) and the
-    R totals of both sides over those days."""
+    R totals of both sides over those days. `lag` > 0 makes `t` the Newey-West t of the day series (hac_t, Bartlett
+    kernel, `lag` days: the promotion statistic since E2); `t_iid` is always the plain t (lag 0)."""
     ra, rb = daily_r(a), daily_r(b)
     if start_ms is not None and end_ms is not None and end_ms >= start_ms:
         days = list(range(int(start_ms // MS_DAY_UTC), int(end_ms // MS_DAY_UTC) + 1))
@@ -153,16 +155,74 @@ def paired_daily_diff(a: list[dict], b: list[dict], start_ms: int | None = None,
         days = sorted(set(ra) | set(rb))
     diffs = [ra.get(d, 0.0) - rb.get(d, 0.0) for d in days]
     k = len(diffs)
-    out = {"days": k, "mean": 0.0, "t": 0.0, "sum_a": sum(ra.get(d, 0.0) for d in days),
+    out = {"days": k, "mean": 0.0, "t": 0.0, "t_iid": 0.0, "lag": int(lag), "sum_a": sum(ra.get(d, 0.0) for d in days),
            "sum_b": sum(rb.get(d, 0.0) for d in days)}
     if k == 0:
         return out
-    mean = sum(diffs) / k
-    out["mean"] = mean
-    if k >= 2:
-        sd = math.sqrt(sum((x - mean) ** 2 for x in diffs) / (k - 1))
-        out["t"] = mean / (sd / math.sqrt(k)) if sd > 0 else 0.0
+    out["mean"] = sum(diffs) / k
+    out["t_iid"] = hac_t(diffs, 0)
+    out["t"] = hac_t(diffs, lag) if lag > 0 else out["t_iid"]
     return out
+
+
+# --- dependence across days (E2) ---------------------------------------------------------------------------------------
+# The day-clustered statistics above treat UTC days as independent. Live trades are not: a market regime, a funding
+# cycle or a multi-day trend links neighbouring days, and a zero-edge change whose edge switches sign with the regime
+# looks like a real one inside a regime. In the promotion model (tools/calibrate_promotion.py) day factors following an
+# AR(1) with phi 0.3 / 0.6, or a zero-mean edge switching sign in 10-20 day blocks, raised the false promotion of the
+# C2-B thresholds from 4.7% to 6-14% (failed-alpha bar 2% -> 3.5-8%). The promotion statistics are therefore
+# Newey-West (HAC) t statistics over the calendar-day series with a fixed Bartlett lag of HAC_LAG days: the variance
+# adds the weighted autocovariances of the day scores up to HAC_LAG days apart. With lag 0 both reduce exactly to the
+# C2-B statistics (day_clustered_t, the plain paired t).
+HAC_LAG = 5
+# a variance below this fraction of the series' sum of squares is rounding noise (a constant series): no t, instead of
+# the huge t that dividing by ~0 would give
+VAR_FLOOR = 1e-12
+
+
+def bartlett_weights(lag: int) -> list[float]:
+    """Newey-West Bartlett weights 1 - l / (lag + 1) for l = 1..lag (they keep the variance estimate non-negative)."""
+    return [1.0 - lg / (lag + 1.0) for lg in range(1, int(lag) + 1)]
+
+
+def _lrv(scores: dict[int, float], lag: int) -> float:
+    """Bartlett long-run variance sum of a calendar-day score series given sparsely (day index -> score; a missing day
+    scores 0): sum_t u_t^2 + 2 sum_l w_l sum_t u_t u_(t-l)."""
+    v = sum(u * u for u in scores.values())
+    for lg, w in enumerate(bartlett_weights(lag), start=1):
+        v += 2.0 * w * sum(u * scores.get(d - lg, 0.0) for d, u in scores.items())
+    return v
+
+
+def hac_t(xs: list[float], lag: int = HAC_LAG) -> float:
+    """Newey-West t of the mean of a consecutive calendar-day series `xs` (Bartlett kernel, `lag` days, small-sample
+    factor D / (D - 1)); lag 0 is the plain t of the mean. 0.0 with fewer than 2 days or no dispersion."""
+    k = len(xs)
+    if k < 2:
+        return 0.0
+    mean = sum(xs) / k
+    v = _lrv({i: x - mean for i, x in enumerate(xs)}, lag) * k / (k - 1)
+    return mean * k / math.sqrt(v) if v > VAR_FLOOR * sum(x * x for x in xs) else 0.0
+
+
+def day_hac_t(trades: list[dict], lag: int = HAC_LAG, min_days: int = 5) -> float:
+    """day_clustered_t with a Newey-West variance across calendar days: the day scores u_d = R_d - n_d x mean (zero on
+    days without a closed trade) enter with their Bartlett-weighted autocovariances up to `lag` days apart, and the
+    cluster factor k / (k - 1) of day_clustered_t is kept, so lag 0 gives exactly day_clustered_t. The absolute-path
+    promotion and retirement statistic since E2. 0.0 with fewer than 3 trades or `min_days` exit days."""
+    n = len(trades)
+    if n < 3:
+        return 0.0
+    days = daily_r(trades)
+    k = len(days)
+    if k < min_days or k < 2:
+        return 0.0
+    mean = sum(_r(t) for t in trades) / n
+    counts: dict[int, int] = defaultdict(int)
+    for t in trades:
+        counts[exit_day(t)] += 1
+    v = _lrv({d: s - counts[d] * mean for d, s in days.items()}, lag) * k / (k - 1)
+    return mean * n / math.sqrt(v) if v > VAR_FLOOR * sum(s * s for s in days.values()) else 0.0
 
 
 def max_drawdown_r(trades: list[dict]) -> float:
@@ -182,12 +242,14 @@ def profit_factor_r(trades: list[dict]) -> float:
     return win / loss if loss > 0 else (float("inf") if win > 0 else 0.0)
 
 
-def r_stats(trades: list[dict]) -> dict:
-    """The R-unit record every promotion / retirement / kill-switch decision reads (and stores as its inputs)."""
+def r_stats(trades: list[dict], lag: int = HAC_LAG) -> dict:
+    """The R-unit record every promotion / retirement / kill-switch decision reads (and stores as its inputs): `t_day`
+    is the lab's day-clustered t, `t_hac` the same with the Newey-West variance across days (`lag` days), the
+    statistic the absolute promotion path decides on (E2)."""
     n = len(trades)
     return {"n": n, "days": exit_days(trades), "avg_r": (sum(_r(t) for t in trades) / n) if n else 0.0,
-            "sum_r": sum(_r(t) for t in trades), "t_day": day_clustered_t(trades), "pf_r": profit_factor_r(trades),
-            "max_dd_r": max_drawdown_r(trades)}
+            "sum_r": sum(_r(t) for t in trades), "t_day": day_clustered_t(trades), "t_hac": day_hac_t(trades, lag),
+            "pf_r": profit_factor_r(trades), "max_dd_r": max_drawdown_r(trades)}
 
 
 def cusum_lower(rs: list[float], expected: float = 0.0, k: float = 0.25, scale: float = 1.0) -> tuple[float, float]:

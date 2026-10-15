@@ -69,10 +69,43 @@ CREATE INDEX IF NOT EXISTS idx_fill_quality_engine_ts ON fill_quality(engine, ts
 """
 
 
+def readonly_uri(path: str | Path) -> str:
+    """SQLite URI of a read-only connection to `path` (E2).
+
+    mode=ro never creates the file, a table, an index or a journal mode change. A WAL database opened that way alone
+    still creates (and leaves behind) -wal and -shm files for its shared-memory index, and fails in a read-only
+    directory, so when no -wal (or rollback -journal) file sits next to the database - no process has it open for
+    writing, and every committed transaction is in the main file - it is also opened immutable=1: no lock, no
+    side file. With such a file (the live bot, a fetch, or a writer that left transactions un-checkpointed) the normal
+    shared-memory read path is used, which reads the WAL's committed content and the writer's later commits. An
+    immutable reader assumes nobody writes while it is open: start a writer on a database only after its readers end.
+
+    SQLite resolves a symlinked database file and keeps the writer's -wal / -journal beside the real file, so the side
+    files are looked for there (and beside the given name): looking only beside a symlink missed the running bot's WAL
+    and opened its database immutable, blind to every commit not yet checkpointed into the main file."""
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"database {p} does not exist (read-only open never creates it)")
+    real = p.resolve()
+    uri = real.as_uri() + "?mode=ro"
+    if not any(Path(f"{base}{sfx}").exists() for base in {p, real} for sfx in ("-wal", "-journal")):
+        uri += "&immutable=1"
+    return uri
+
+
 class Store:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, readonly: bool = False):
+        """`readonly=True` (E2) opens an existing database through readonly_uri for readers of source candle databases
+        (lab, discovery, the context build, the research worker): no table, index, -wal or -shm file is created and
+        every write raises sqlite3.OperationalError. Default: read-write in WAL mode with the schema created."""
         self.path = str(path)
+        self.readonly = bool(readonly)
         self._lock = threading.RLock()
+        if self.readonly:
+            self._conn = sqlite3.connect(readonly_uri(path), uri=True, check_same_thread=False, isolation_level=None)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+            return
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")

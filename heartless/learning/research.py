@@ -1,10 +1,12 @@
 """Self-improvement loop: champion/challenger parameter management.
 
-* Every `research_interval_minutes` a worker process runs walk-forward optimisation per alpha.
+* Every `research_interval_minutes` a worker process runs walk-forward optimisation per alpha (the champion's enabled
+  alphas, the disabled ones not marked failed and a rotation of the failed ones, ResearchManager.research_selection).
 * Improvements become *challengers*: full parameter sets traded by dedicated paper engines on the
   live data feed, side by side with the champion.
-* Challengers are judged on day-clustered statistics (trades clustered by UTC exit day). While the champion trades
-  enough to compare with, a challenger must beat it on the paired daily-R difference (relative path); while it does
+* Challengers are judged on day-clustered statistics (trades clustered by UTC exit day, Newey-West across neighbouring
+  days since E2). While the champion trades enough to compare with, a challenger must beat it on the paired daily-R
+  difference (relative path); while it does
   not (e.g. no alpha enabled) a challenger must clear an absolute bar on its own record (absolute path), a stricter
   one when it switches on an alpha that failed out of sample (evidence registry). The live engine hot-swaps to a
   promoted champion. Retirement uses the same statistics.
@@ -28,9 +30,9 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 
-from heartless.execution.stats import cusum_lower, paired_daily_diff, r_stats, summarize
+from heartless.execution.stats import HAC_LAG, cusum_lower, paired_daily_diff, r_stats, summarize
 from heartless.learning import seal
-from heartless.learning.optimizer import run_research_cycle
+from heartless.learning.optimizer import research_alphas, run_research_cycle
 from heartless.strategy import evidence
 from heartless.strategy.params import StrategyParams
 from heartless.util.ids import short_id
@@ -48,13 +50,20 @@ log = logging.getLogger(__name__)
 # its whole trial (<= 2% for the failed-alpha schedule) on either path, at 1-5 trades a day, fat-tailed R with win
 # rates of 30-60% and same-day clustering. A challenger not promoted at its last checkpoint is retired (trial over).
 # Retirement itself stays continuous (hourly): it is the safe direction.
+# E2: both statistics are Newey-West t statistics over the calendar days (Bartlett kernel, PROMOTION_HAC_LAG days;
+# heartless.execution.stats.day_hac_t / hac_t). The C2-B statistics assumed independent UTC days, and day factors that
+# persist across days (AR(1), phi 0.3 / 0.6) or a zero-mean edge switching sign in 10-20 day blocks pushed the false
+# promotion of the C2-B thresholds to 6-14% (failed-alpha bar 3.5-8%). The thresholds below are recalibrated over the
+# C2-B scenarios plus those (docs/results/e2_promotion_calibration.json, docs/ROADMAP.md section 6).
 PROMOTION_CHECKPOINTS = (14, 30, 60, 90)
 FAILED_CHECKPOINTS = (30, 60, 90)
-# checkpoint (days) -> minimum t: absolute path (day-clustered t_day) / relative path (paired daily-difference t)
-ABS_T_AT = {14: 4.9, 30: 3.35, 60: 2.37, 90: 1.93}
-REL_T_AT = {14: 4.72, 30: 3.23, 60: 2.28, 90: 1.86}
-FAILED_ABS_T_AT = {30: 4.09, 60: 2.9, 90: 2.36}
-FAILED_REL_T_AT = {30: 3.94, 60: 2.79, 90: 2.27}
+PROMOTION_HAC_LAG = HAC_LAG
+# checkpoint (days) -> minimum t: absolute path (day-clustered HAC t, r_stats "t_hac") / relative path (paired
+# daily-difference HAC t)
+ABS_T_AT = {14: 6.88, 30: 4.7, 60: 3.32, 90: 2.71}
+REL_T_AT = {14: 5.96, 30: 4.08, 60: 2.88, 90: 2.35}
+FAILED_ABS_T_AT = {30: 5.69, 60: 4.02, 90: 3.28}
+FAILED_REL_T_AT = {30: 4.92, 60: 3.48, 90: 2.84}
 # Relative path (the champion closed >= PROMOTION_MIN_TRADES trades since the challenger started): the challenger needs
 # PROMOTION_MIN_TRADES trades on >= PROMOTION_MIN_DAYS exit days, the checkpoint's paired t, a higher mean R and an R
 # drawdown <= REL_DD_MULT x the champion's + REL_DD_SLACK_R.
@@ -62,7 +71,7 @@ REL_DD_MULT = 1.2
 REL_DD_SLACK_R = 2.0
 # Absolute path (the champion closed fewer trades than that, e.g. no alpha enabled): the challenger's own record must
 # show max(PROMOTION_MIN_TRADES, ABS_MIN_TRADES) trades on >= PROMOTION_MIN_DAYS exit days, mean R > 0, the checkpoint's
-# t_day, PF (in R) >= ABS_MIN_PF_R and an R drawdown <= abs_dd_cap(n).
+# HAC t_day, PF (in R) >= ABS_MIN_PF_R and an R drawdown <= abs_dd_cap(n).
 ABS_MIN_TRADES = 30
 ABS_MIN_PF_R = 1.15
 ABS_MAX_DD_R = 10.0
@@ -71,7 +80,7 @@ ABS_MAX_DD_R = 10.0
 # exit days, and the thresholds are calibrated to 2%
 FAILED_MIN_DAYS = 30
 # Retirement: the early drop of a clearly bleeding challenger, else after 2x the path's minimum trades and days when
-# the path's statistic (absolute: day-clustered t; relative: paired-difference t) is <= RETIRE_T
+# the path's statistic (absolute: day-clustered HAC t; relative: paired-difference HAC t) is <= RETIRE_T
 EARLY_DROP_TRADES = 15
 EARLY_DROP_AVG_R = -0.5
 RETIRE_T = -1.0
@@ -103,10 +112,11 @@ def promotion_bar(settings, path: str, failed: list[str] | tuple = (), checkpoin
                "min_paired_t": (FAILED_REL_T_AT if failed else REL_T_AT)[cp], "dd_mult": REL_DD_MULT,
                "dd_slack_r": REL_DD_SLACK_R}
     else:
+        t_min = (FAILED_ABS_T_AT if failed else ABS_T_AT)[cp]
+        # min_t_hac is the bar of r_stats "t_hac"; min_t_day carries the same value for renderers written before E2
         bar = {"min_trades": max(settings.promotion_min_trades, ABS_MIN_TRADES), "min_days": min_days, "min_avg_r": 0.0,
-               "min_t_day": (FAILED_ABS_T_AT if failed else ABS_T_AT)[cp], "min_pf_r": ABS_MIN_PF_R,
-               "max_dd_r": ABS_MAX_DD_R}
-    bar.update(checkpoint=cp, checkpoints=list(sched))
+               "min_t_hac": t_min, "min_t_day": t_min, "min_pf_r": ABS_MIN_PF_R, "max_dd_r": ABS_MAX_DD_R}
+    bar.update(checkpoint=cp, checkpoints=list(sched), hac_lag=PROMOTION_HAC_LAG)
     if failed:
         bar["failed_alphas"] = list(failed)
     return bar
@@ -135,6 +145,10 @@ def judge_challenger(ch_trades: list[dict], champ_trades: list[dict], settings, 
     thresholds: re-evaluating it every hour until the next checkpoint gives the same verdict, so the number of looks
     is the number of checkpoints. Past the last checkpoint an unpromoted challenger is retired.
 
+    The path statistics are Newey-West t statistics over the calendar days (lag PROMOTION_HAC_LAG): the record's
+    `t_hac` on the absolute path, the paired daily-difference `paired.t` on the relative one (`t_day` and
+    `paired.t_iid` are the lag-0 values, shown for comparison).
+
     Returns the decision with every input, threshold and check, so it can be stored and shown as is: `verdict` is
     'promote' | 'retire' | 'hold', `path` 'relative' | 'absolute' (docs/SELF_IMPROVEMENT.md)."""
     failed = evidence.failed(new_alphas)
@@ -143,29 +157,31 @@ def judge_challenger(ch_trades: list[dict], champ_trades: list[dict], settings, 
     cp = passed[-1] if passed else None
     upcoming = [c for c in sched if c not in passed]
     # retirement: the whole record so far, on the path the champion's record selects now
-    cur, champ_cur = r_stats(ch_trades), r_stats(champ_trades)
+    lag = PROMOTION_HAC_LAG
+    cur, champ_cur = r_stats(ch_trades, lag), r_stats(champ_trades, lag)
     cur_path = "relative" if champ_cur["n"] >= settings.promotion_min_trades else "absolute"
     cur_bar = promotion_bar(settings, cur_path, failed, cp)
     if cur_path == "relative":
-        retire_stat = paired_daily_diff(ch_trades, champ_trades, start_ms, now)["t"]
+        retire_stat = paired_daily_diff(ch_trades, champ_trades, start_ms, now, lag=lag)["t"]
     else:
-        retire_stat = cur["t_day"]
+        retire_stat = cur["t_hac"]
     # promotion: the records cut at the checkpoint (before the first one: the record so far, for display)
     cutoff = start_ms + cp * MS_DAY if cp is not None else int(now) + 1
     ch_t, champ_t = (_before(ch_trades, cutoff), _before(champ_trades, cutoff)) if cp is not None else \
         (ch_trades, champ_trades)
-    ch, champ = (r_stats(ch_t), r_stats(champ_t)) if cp is not None else (cur, champ_cur)
+    ch, champ = (r_stats(ch_t, lag), r_stats(champ_t, lag)) if cp is not None else (cur, champ_cur)
     path = "relative" if champ["n"] >= settings.promotion_min_trades else "absolute"
     bar = promotion_bar(settings, path, failed, cp)
     d: dict = {"path": path, "since": int(start_ms), "at": int(now), "checkpoint": cp,
                "next_checkpoint": upcoming[0] if upcoming else None, "checkpoints": list(sched),
                "cutoff": int(cutoff) if cp is not None else None, "challenger": _round(ch), "champion": _round(champ),
-               "current": _round(cur), "new_alphas": list(new_alphas), "failed_alphas": failed, "bar": bar}
+               "current": _round(cur), "new_alphas": list(new_alphas), "failed_alphas": failed, "bar": bar,
+               "stat": {"kind": "newey-west", "kernel": "bartlett", "lag_days": lag}}
     checks: dict[str, bool] = {f"n >= {bar['min_trades']}": ch["n"] >= bar["min_trades"],
                                f"days >= {bar['min_days']}": ch["days"] >= bar["min_days"]}
     if path == "relative":
-        pdiff = paired_daily_diff(ch_t, champ_t, start_ms, cutoff - 1)
-        d["paired"] = _round({"days": pdiff["days"], "mean": pdiff["mean"], "t": pdiff["t"]})
+        pdiff = paired_daily_diff(ch_t, champ_t, start_ms, cutoff - 1, lag=lag)
+        d["paired"] = _round({"days": pdiff["days"], "mean": pdiff["mean"], "t": pdiff["t"], "t_iid": pdiff["t_iid"]})
         dd_cap = REL_DD_MULT * champ["max_dd_r"] + REL_DD_SLACK_R
         checks[f"paired t >= {bar['min_paired_t']:g}"] = pdiff["t"] >= bar["min_paired_t"]
         checks["avgR > champion"] = ch["avg_r"] > champ["avg_r"]
@@ -173,7 +189,7 @@ def judge_challenger(ch_trades: list[dict], champ_trades: list[dict], settings, 
     else:
         dd_cap = abs_dd_cap(ch["n"])
         checks["avgR > 0"] = ch["avg_r"] > 0
-        checks[f"t_day >= {bar['min_t_day']:g}"] = ch["t_day"] >= bar["min_t_day"]
+        checks[f"HAC t_day >= {bar['min_t_hac']:g}"] = ch["t_hac"] >= bar["min_t_hac"]
         checks[f"PF >= {ABS_MIN_PF_R:g}"] = ch["pf_r"] >= ABS_MIN_PF_R
         checks[f"DD <= {dd_cap:.2f}R"] = ch["max_dd_r"] <= dd_cap + 1e-9
     d["checks"] = checks
@@ -182,7 +198,7 @@ def judge_challenger(ch_trades: list[dict], champ_trades: list[dict], settings, 
     if cur["n"] >= EARLY_DROP_TRADES and cur["avg_r"] < EARLY_DROP_AVG_R:
         d["verdict"], d["rule"] = "retire", f"early drop: avgR < {EARLY_DROP_AVG_R:g} after >= {EARLY_DROP_TRADES} trades"
     elif (cur["n"] >= 2 * cur_bar["min_trades"] and cur["days"] >= 2 * cur_bar["min_days"] and retire_stat <= RETIRE_T):
-        what = "paired t" if cur_path == "relative" else "t_day"
+        what = "HAC paired t" if cur_path == "relative" else "HAC t_day"
         d["verdict"], d["rule"] = "retire", f"{what} <= {RETIRE_T:g} after 2x the minimum trades and days"
     elif cp is not None and all(checks.values()):
         d["verdict"], d["rule"] = "promote", f"{path} bar met at the {cp}-day checkpoint"
@@ -195,24 +211,43 @@ def judge_challenger(ch_trades: list[dict], champ_trades: list[dict], settings, 
     return d
 
 
+def describe_selection(sel: dict) -> str:
+    """Korean one-liner of a research cycle's alpha selection (ResearchManager.research_selection)."""
+    parts = []
+    if sel.get("enabled"):
+        parts.append("켜진 알파 " + "·".join(sel["enabled"]))
+    if sel.get("untested"):
+        parts.append("꺼진 미탈락 알파 " + "·".join(sel["untested"]))
+    if sel.get("failed"):
+        parts.append(f"탈락 알파 순환 {len(sel['failed'])}/{sel.get('failed_total', len(sel['failed']))} "
+                     + "·".join(sel["failed"]))
+    return ", ".join(parts) or "없음"
+
+
 def describe_decision(d: dict) -> str:
-    """Korean one-to-four-line rendering of a decision's inputs for Telegram, logs and version notes."""
+    """Korean one-to-four-line rendering of a decision's inputs for Telegram, logs and version notes. Since E2 the path
+    statistics are HAC t values (Newey-West over `bar.hac_lag` days); a decision stored before E2 has none and shows
+    its lag-0 t_day / paired t as it was judged."""
     ch, champ, bar = d.get("challenger", {}), d.get("champion", {}), d.get("bar", {})
     cp, nxt = d.get("checkpoint"), d.get("next_checkpoint")
     sched = "·".join(str(c) for c in d.get("checkpoints") or bar.get("checkpoints") or [])
     when = (f"{cp}일 판정점 기록" if cp is not None else "첫 판정점 전 현재 기록") + \
         (f" · 다음 판정점 {nxt}일" if nxt else " · 마지막 판정점") + (f" (판정점 {sched}일)" if sched else "")
+    hac = f"HAC({bar['hac_lag']}일) " if bar.get("hac_lag") else ""
+    t_rec = (f"{hac}t_day {ch['t_hac']:+.2f} (일 독립 가정 {ch.get('t_day', 0):+.2f})" if "t_hac" in ch
+             else f"t_day {ch.get('t_day', 0):+.2f}")
     rec = (f"챌린저 n={ch.get('n', 0)} (청산일 {ch.get('days', 0)}일), 평균 {ch.get('avg_r', 0):+.3f}R, "
-           f"t_day {ch.get('t_day', 0):+.2f}, PF {min(ch.get('pf_r', 0), 99):.2f}, 낙폭 {ch.get('max_dd_r', 0):.1f}R")
+           f"{t_rec}, PF {min(ch.get('pf_r', 0), 99):.2f}, 낙폭 {ch.get('max_dd_r', 0):.1f}R")
     if d.get("path") == "relative":
         pr = d.get("paired", {})
-        head = (f"상대 경로: 일별 차이 t {pr.get('t', 0):+.2f} ({pr.get('days', 0)}일, 평균 {pr.get('mean', 0):+.3f}R/일) · "
+        head = (f"상대 경로: {hac}일별 차이 t {pr.get('t', 0):+.2f} ({pr.get('days', 0)}일, 평균 {pr.get('mean', 0):+.3f}R/일) · "
                 f"챔피언 n={champ.get('n', 0)} 평균 {champ.get('avg_r', 0):+.3f}R 낙폭 {champ.get('max_dd_r', 0):.1f}R")
-        need = (f"기준 n≥{bar.get('min_trades')}·청산일 {bar.get('min_days')}일, 차이 t≥{bar.get('min_paired_t', 0):g}, "
+        need = (f"기준 n≥{bar.get('min_trades')}·청산일 {bar.get('min_days')}일, {hac}차이 t≥{bar.get('min_paired_t', 0):g}, "
                 f"평균R>챔피언, 낙폭≤{bar.get('dd_mult', 0):g}×챔피언+{bar.get('dd_slack_r', 0):g}R")
     else:
         head = f"절대 경로 (챔피언 거래 {champ.get('n', 0)}건 < 비교 최소치)"
-        need = (f"기준 n≥{bar.get('min_trades')}·청산일 {bar.get('min_days')}일, 평균R>0, t_day≥{bar.get('min_t_day', 0):g}, "
+        t_min = bar.get("min_t_hac", bar.get("min_t_day", 0))
+        need = (f"기준 n≥{bar.get('min_trades')}·청산일 {bar.get('min_days')}일, 평균R>0, {hac}t_day≥{t_min:g}, "
                 f"PF≥{bar.get('min_pf_r', 0):g}, 낙폭≤{abs_dd_cap(int(ch.get('n', 0) or 0)):.1f}R")
     if d.get("failed_alphas"):
         need += f" (OOS 탈락 알파 {', '.join(d['failed_alphas'])}: 강화 기준)"
@@ -315,6 +350,8 @@ class ResearchManager:
         self.store = app.store
         self.pool: ProcessPoolExecutor | None = None
         self.last_cycle_ts: int = int(self.store.get("research.last_cycle", 0) or 0)
+        # wall-clock length of the last finished cycle (ms): due() keeps the worker's research duty cycle <= 1/2
+        self.last_cycle_ms: int = int(self.store.get("research.last_cycle_ms", 0) or 0)
         self.last_summary: dict = self.store.get("research.last_summary", {}) or {}
         self.last_promotion_check: int = 0
         self.graduation_notified_day: int = int(self.store.get("research.graduation_day", 0) or 0)
@@ -389,7 +426,37 @@ class ResearchManager:
         return d
 
     def due(self, now: int) -> bool:
-        return (now - self.last_cycle_ts) >= self.s.research_interval_minutes * 60_000
+        """RESEARCH_INTERVAL_MINUTES after the last cycle started, and at least twice the last cycle's length (E2): the
+        worker spends at most half of its time on research even when the champion enables more alphas than the
+        default interval was measured with, which leaves the daily discovery (run only while the worker is idle)
+        its turn."""
+        gap = max(self.s.research_interval_minutes * 60_000, 2 * self.last_cycle_ms)
+        return (now - self.last_cycle_ts) >= gap
+
+    # --- which alphas a cycle tunes (E2) ---------------------------------------------------------
+    ROTATION_KEY = "research.failed_rotation"
+
+    def research_selection(self, advance: bool = False) -> dict:
+        """The alphas the next research cycle tunes: (a) the champion's enabled alphas, (b) its disabled alphas that the
+        evidence registry does not mark 'failed' (untested, passed), (c) RESEARCH_FAILED_PER_CYCLE of the failed
+        disabled ones, in a fixed rotation by name that continues after the last one taken (kv ROTATION_KEY, so a
+        restart resumes it), which revisits each failed alpha every ceil(failed / k) cycles. Tuning every alpha every
+        cycle spent most of the worker's time on alphas that already failed out of sample. `advance` records the
+        rotation's progress (at submission, so an alpha that crashes the worker does not block the rotation)."""
+        champ = self.app.params
+        tunable = research_alphas(champ)
+        enabled = [a for a in tunable if champ.enabled.get(a, False)]
+        off = [a for a in tunable if not champ.enabled.get(a, False)]
+        failed = sorted(a for a in off if evidence.verdict(a) == "failed")
+        fresh = [a for a in off if a not in failed]
+        k = max(0, min(int(self.s.research_failed_per_cycle), len(failed)))
+        last = str(self.store.get(self.ROTATION_KEY, "") or "")
+        start = next((i for i, a in enumerate(failed) if a > last), 0)
+        rotated = [failed[(start + i) % len(failed)] for i in range(k)]
+        if advance and rotated:
+            self.store.set(self.ROTATION_KEY, rotated[-1])
+        return {"enabled": enabled, "untested": fresh, "failed": rotated, "failed_total": len(failed),
+                "alphas": enabled + fresh + rotated}
 
     async def _await_context_fill(self) -> None:
         """Wait for the app's start-up fill of the live context store (app._fill_context_gaps). The worker loads the
@@ -420,11 +487,20 @@ class ResearchManager:
             loop = asyncio.get_running_loop()
             settings_dict = self.worker_settings()
             symbols_dict = {k: asdict(v) for k, v in self.app.symbols.items() if k in self.app.universe}
-            await self.app.emit("research_started", {"message": "퀀트 리서치 사이클 시작 (워크포워드 최적화)"})
+            sel = self.research_selection(advance=True)
+            if not sel["alphas"]:
+                self.running = False
+                await self.app.emit("research_done", {"message": "리서치 건너뜀: 조정할 알파 없음", "notify": False})
+                return None
+            await self.app.emit("research_started", {"message": "퀀트 리서치 사이클 시작 (워크포워드 최적화: "
+                                                                + describe_selection(sel) + ")"})
+            t_wall = time.monotonic()
             result = await loop.run_in_executor(self.pool, run_research_cycle, str(self.s.db_path), settings_dict,
                                                 self.app.params.to_dict(), symbols_dict, self.s.research_lookback_days,
-                                                self.s.research_candidates, now % 100_000, None,
+                                                self.s.research_candidates, now % 100_000, sel["alphas"],
                                                 self.store.get("advisor.seeds", {}) or {}, self.s.research_folds)
+            self.last_cycle_ms = int((time.monotonic() - t_wall) * 1000)
+            self.store.set("research.last_cycle_ms", self.last_cycle_ms)
         except Exception as e:  # noqa: BLE001
             if self.stopped:  # the worker was terminated by shutdown(): not a failure
                 self.running = False
@@ -442,6 +518,7 @@ class ResearchManager:
         if "error" in result:
             await self.app.emit("research_done", {"message": f"리서치 건너뜀: {result['error']}", "result": result})
             return result
+        result["selection_detail"] = sel
         self.last_summary = result
         self.store.set("research.last_summary", result)
         self.store.save_research_run(now, "all", result)
@@ -635,11 +712,11 @@ class ResearchManager:
         if champ_n >= self.s.promotion_min_trades:
             ts = "/".join(f"{(FAILED_REL_T_AT if failed else REL_T_AT)[c]:g}" for c in sched)
             bar = promotion_bar(self.s, "relative", failed)
-            note = f"상대 경로: 판정점 {days}일에 챔피언 대비 일별 차이 t≥{ts}, 청산일 {bar['min_days']}일 이상"
+            note = f"상대 경로: 판정점 {days}일에 챔피언 대비 일별 차이 HAC t≥{ts}, 청산일 {bar['min_days']}일 이상"
         else:
             ts = "/".join(f"{(FAILED_ABS_T_AT if failed else ABS_T_AT)[c]:g}" for c in sched)
             bar = promotion_bar(self.s, "absolute", failed)
-            note = (f"승격 기준: 절대 경로 판정점 {days}일에 t_day≥{ts}, n≥{bar['min_trades']}·청산일 "
+            note = (f"승격 기준: 절대 경로 판정점 {days}일에 HAC t_day≥{ts}, n≥{bar['min_trades']}·청산일 "
                     f"{bar['min_days']}일, PF≥{bar['min_pf_r']:g}, 낙폭≤{bar['max_dd_r']:g}R×√(n/{ABS_MIN_TRADES})")
         return note + (f"; OOS 탈락 알파 {', '.join(failed)} 강화 기준" if failed else "") + \
             f"; {sched[-1]}일까지 승격되지 않으면 종료"
@@ -681,10 +758,11 @@ class ResearchManager:
                     d.update(verdict="retire", rule="change conflicts with the current champion: " + "; ".join(blockers),
                              blockers=blockers)
             self.last_decisions[slot.name] = d
-            log.info("challenger %s (%s) %s path, checkpoint %s: %s (%s) n=%d days=%d avgR %+.3f t_day %+.2f%s",
-                     slot.name, slot.params.version, d["path"], d["checkpoint"], d["verdict"], d["rule"],
-                     d["challenger"]["n"], d["challenger"]["days"], d["challenger"]["avg_r"], d["challenger"]["t_day"],
-                     f" paired t {d['paired']['t']:+.2f}" if "paired" in d else "")
+            log.info("challenger %s (%s) %s path, checkpoint %s: %s (%s) n=%d days=%d avgR %+.3f HAC t_day %+.2f "
+                     "(lag-0 %+.2f)%s", slot.name, slot.params.version, d["path"], d["checkpoint"], d["verdict"],
+                     d["rule"], d["challenger"]["n"], d["challenger"]["days"], d["challenger"]["avg_r"],
+                     d["challenger"]["t_hac"], d["challenger"]["t_day"],
+                     f" HAC paired t {d['paired']['t']:+.2f}" if "paired" in d else "")
             if d["verdict"] == "promote":
                 await self.app.promote(slot, d)
                 break  # the other challengers are judged against the new champion at the next check
@@ -698,8 +776,8 @@ class ResearchManager:
                 elif d["rule"].startswith("trial over"):
                     label = f"시험 기간 종료 ({d['checkpoint']}일 판정점까지 승격 기준 미달)"
                 else:
-                    label = "챔피언 대비 열위 (일별 차이 t ≤ -1)" if d.get("retire_path") == "relative" else \
-                        "절대 기준 열위 (t_day ≤ -1)"
+                    label = "챔피언 대비 열위 (HAC 일별 차이 t ≤ -1)" if d.get("retire_path") == "relative" else \
+                        "절대 기준 열위 (HAC t_day ≤ -1)"
                 await self.app.retire_challenger(slot, reason=f"{label}\n{describe_decision(d)}", decision=d)
 
     async def check_conflicts(self) -> list[ChallengerSlot]:

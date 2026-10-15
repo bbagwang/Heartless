@@ -38,6 +38,27 @@ GOOD_64 = GOOD_32 * 2  # 128 trades, 64 days, t_day ~5.3
 # checkpoint's calibrated t threshold. The P4 conditions themselves are kept; these tests judge at the 60-day checkpoint
 # (not the last, so a record that misses the bar is held rather than retired at the end of its trial).
 AT60 = 60.05  # days after the start: just past the 60-day checkpoint
+# E2: the path statistics are HAC t values (Newey-West over 5 calendar days). A strictly periodic record (GOOD_16 repeats
+# every 4 days) is strong evidence for it; the records that must land BETWEEN two thresholds are taken from a fixed
+# irregular 60-day pattern shifted by the smallest step that lands there (_between), so they follow a recalibration
+MID_60 = ([[0.5, -0.5], [1.5, 1.5], [-0.5, -1.0], [-0.5, 0.5], [0.5, -0.5], [1.5, 1.0], [-1.0, 1.0], [1.0, -1.0],
+           [1.0, -0.5], [0.5, -0.5], [1.5, 0.5], [-1.0, -0.5], [-1.0, -1.0], [1.0, 1.0], [-0.5, -1.0], [1.5, 1.0],
+           [1.5, -0.5], [0.5, -1.0], [1.0, -0.5], [0.5, 1.0], [1.0, 1.5], [1.0, 0.5], [-1.0, 1.0], [0.5, 1.0],
+           [-0.5, 1.0], [-1.0, 1.0], [-0.5, -1.0], [0.5, -1.0], [-0.5, -0.5], [0.5, 0.5]] * 2)
+Z_60 = [1 if a + b > 0.4 else -1 for a, b in MID_60]  # an irregular +-1 day sequence
+G, B = [0.8, -0.3], [0.0, -0.3]
+# +0.5R/day better than CHAMP (below) on 42 days, 0.3R/day worse on 18, interleaved (no runs of good or bad days)
+NOISY = ([G] * 2 + [B] + [G] * 3 + [B] + [G] * 2 + [B]) * 6
+LOSING_30 = ([[-1.0, 0.3]] * 2 + [[1.0, -0.2]]) * 10  # 60 trades, 30 days, mean -0.1R, losing without long runs
+
+
+def _between(make, stat, lo: float, hi: float) -> list:
+    """The first record make(c), c = 0, 0.005, 0.01, ..., whose statistic lies in [lo, hi)."""
+    for i in range(600):
+        days = make(i / 200)
+        if lo <= stat(days) < hi:
+            return days
+    raise AssertionError(f"no record with a statistic in [{lo}, {hi})")
 
 
 def _judge(ch_days, champ_days=(), new_alphas=("discovered",), now_day=None):
@@ -49,11 +70,12 @@ def _judge(ch_days, champ_days=(), new_alphas=("discovered",), now_day=None):
 # --- absolute path ------------------------------------------------------------------------------------------------
 def test_absolute_path_promotes_a_challenger_that_clears_the_bar():
     rec = r_stats(_trades(GOOD_64[:60]))
-    assert rec["n"] == 120 and rec["days"] == 60 and rec["t_day"] >= R.ABS_T_AT[60] and rec["pf_r"] >= 1.15
+    assert rec["n"] == 120 and rec["days"] == 60 and rec["t_hac"] >= R.ABS_T_AT[60] and rec["pf_r"] >= 1.15
     d = _judge(GOOD_64, now_day=AT60)  # the champion closed nothing: e.g. no alpha enabled
     assert d["path"] == "absolute" and d["verdict"] == "promote" and all(d["checks"].values())
-    assert d["bar"] == {"min_trades": 30, "min_days": 14, "min_avg_r": 0.0, "min_t_day": R.ABS_T_AT[60], "min_pf_r": 1.15,
-                        "max_dd_r": 10.0, "checkpoint": 60, "checkpoints": [14, 30, 60, 90]}
+    assert d["bar"] == {"min_trades": 30, "min_days": 14, "min_avg_r": 0.0, "min_t_hac": R.ABS_T_AT[60],
+                        "min_t_day": R.ABS_T_AT[60], "min_pf_r": 1.15, "max_dd_r": 10.0, "checkpoint": 60,
+                        "checkpoints": [14, 30, 60, 90], "hac_lag": R.PROMOTION_HAC_LAG}
     assert d["challenger"]["n"] == 120 and d["champion"]["n"] == 0 and d["failed_alphas"] == []
     assert d["checkpoint"] == 60 and d["next_checkpoint"] == 90
     text = R.describe_decision(d)
@@ -67,7 +89,7 @@ def test_absolute_path_is_used_while_the_champion_trades_too_little():
 
 @pytest.mark.parametrize("days, failing", [
     ([[1.0, -0.4, 1.0, -0.4, -1.0, 0.5, 1.0, -0.4]] * 4 + [[1.0]] * 9 + [[]] * 50, "days >= 14"),  # 41 trades, 13 days
-    ([[0.4, -0.3]] * 30 + [[-0.6, 0.5]] * 30, "t_day >= 2.37"),  # mean +0.0R... weak
+    ([[0.4, -0.3]] * 30 + [[-0.6, 0.5]] * 30, "HAC t_day >="),  # mean +0.0R... weak
     (GOOD_16 * 3 + [[-6.0, -6.0, -6.0, -6.0]] + GOOD_16[:11], "DD <="),  # a 24R hole: over 10R x sqrt(122/30)
 ])
 def test_absolute_path_holds_when_any_condition_fails(days, failing):
@@ -94,13 +116,11 @@ def test_failed_out_of_sample_alpha_needs_its_own_schedule_and_bar():
     d = _judge(GOOD_64, new_alphas=["squeeze_breakout", "discovered"], now_day=AT60)
     assert d["verdict"] == "promote" and d["failed_alphas"] == ["squeeze_breakout"]
     assert d["bar"]["min_t_day"] == R.FAILED_ABS_T_AT[60]
-    # t_day between the two 60-day thresholds: enough for an untested alpha, not for a failed one
-    mid = ([[0.5, -0.5], [1.5, 1.5], [-0.5, -1.0], [-0.5, 0.5], [0.5, -0.5], [1.5, 1.0], [-1.0, 1.0], [1.0, -1.0],
-            [1.0, -0.5], [0.5, -0.5], [1.5, 0.5], [-1.0, -0.5], [-1.0, -1.0], [1.0, 1.0], [-0.5, -1.0], [1.5, 1.0],
-            [1.5, -0.5], [0.5, -1.0], [1.0, -0.5], [0.5, 1.0], [1.0, 1.5], [1.0, 0.5], [-1.0, 1.0], [0.5, 1.0],
-            [-0.5, 1.0], [-1.0, 1.0], [-0.5, -1.0], [0.5, -1.0], [-0.5, -0.5], [0.5, 0.5]] * 2)
+    # HAC t_day between the two 60-day thresholds: enough for an untested alpha, not for a failed one
+    mid = _between(lambda c: [[round(a + c, 3), round(b + c, 3)] for a, b in MID_60],
+                   lambda days: r_stats(_trades(days))["t_hac"], R.ABS_T_AT[60], R.FAILED_ABS_T_AT[60])
     rec = r_stats(_trades(mid))
-    assert rec["days"] == 60 and R.ABS_T_AT[60] <= rec["t_day"] < R.FAILED_ABS_T_AT[60] and rec["pf_r"] >= 1.15, rec
+    assert rec["days"] == 60 and R.ABS_T_AT[60] <= rec["t_hac"] < R.FAILED_ABS_T_AT[60] and rec["pf_r"] >= 1.15, rec
     assert _judge(mid, new_alphas=["discovered"], now_day=AT60)["verdict"] == "promote"
     assert _judge(mid, new_alphas=["momentum_burst"], now_day=AT60)["verdict"] == "hold"
 
@@ -111,7 +131,7 @@ CHAMP = [[0.3, -0.3]] * 60  # 120 trades over 60 days, mean 0
 
 def test_relative_path_promotes_on_the_paired_daily_difference():
     # +0.5R/day better on 42 days, 0.3R/day worse on 18: the paired t over the 60 calendar days of the checkpoint
-    noisy = ([[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6) * 3
+    noisy = NOISY
     d = _judge(noisy, CHAMP, now_day=AT60)
     assert d["path"] == "relative" and d["verdict"] == "promote", d["checks"]
     assert d["paired"]["days"] == 60 and d["paired"]["t"] >= R.REL_T_AT[60]
@@ -140,19 +160,21 @@ def test_relative_path_holds_on_weak_difference_mean_or_drawdown():
 def test_relative_path_also_raises_the_bar_for_an_alpha_that_failed_out_of_sample():
     # once the champion trades, the relative path is the usual one: a challenger re-enabling an alpha that lost over
     # three years out of sample faces the failed-alpha schedule and thresholds there too
-    noisy = ([[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6) * 3
+    noisy = NOISY
     assert _judge(noisy, CHAMP, now_day=AT60)["verdict"] == "promote"
     d = _judge(noisy[:16], CHAMP[:16], new_alphas=["squeeze_breakout"])  # day 16: before its first checkpoint
     assert d["path"] == "relative" and d["failed_alphas"] == ["squeeze_breakout"] and d["verdict"] == "hold"
     assert d["bar"]["min_days"] == 30 and d["bar"]["min_paired_t"] == R.FAILED_REL_T_AT[30] and d["checkpoint"] is None
     assert "OOS 탈락 알파 squeeze_breakout" in R.describe_decision(d)
     assert f"차이 t≥{R.FAILED_REL_T_AT[30]:g}" in R.describe_decision(d)
-    mid = [[1.5, -0.3], [-0.3, -0.3]] * 30  # 60 days, paired t between the two 60-day thresholds
+    # 60 days, paired HAC t between the two 60-day thresholds: the champion's trades plus one irregular extra trade
+    mid = _between(lambda c: [[0.3, -0.3, round(c + 0.3 * z, 3)] for z in Z_60],
+                   lambda days: _judge(days, CHAMP, now_day=AT60)["paired"]["t"], R.REL_T_AT[60], R.FAILED_REL_T_AT[60])
     dm = _judge(mid, CHAMP, now_day=AT60)
     assert R.REL_T_AT[60] <= dm["paired"]["t"] < R.FAILED_REL_T_AT[60] and dm["verdict"] == "promote"
     d = _judge(mid, CHAMP, new_alphas=["squeeze_breakout"], now_day=AT60)
     assert d["verdict"] == "hold" and d["checks"][f"paired t >= {R.FAILED_REL_T_AT[60]:g}"] is False
-    strong = ([[0.8, -0.3]] * 14 + [[0.0, -0.3]] * 6) * 3  # paired t well above both
+    strong = NOISY  # paired t well above both
     d = _judge(strong, CHAMP, new_alphas=["squeeze_breakout"], now_day=AT60)
     assert d["verdict"] == "promote" and d["paired"]["t"] >= R.FAILED_REL_T_AT[60]
 
@@ -171,9 +193,9 @@ def test_early_drop_keeps_working():
 
 
 def test_absolute_retirement_after_twice_the_minimum_trades_and_days():
-    losing = [[-1.0, 0.3]] * 20 + [[1.0, -0.2]] * 10  # 60 trades, 30 days, mean -0.1R, t_day ~ -1.5
+    losing = LOSING_30  # 60 trades, 30 days, mean -0.1R, HAC t_day far below -1
     rec = r_stats(_trades(losing))
-    assert rec["t_day"] <= -1.0 and rec["avg_r"] > -0.5
+    assert rec["t_hac"] <= -1.0 and rec["avg_r"] > -0.5
     d = _judge(losing)
     assert d["verdict"] == "retire" and d["path"] == "absolute" and "t_day <= -1" in d["rule"]
     assert _judge(losing[:27])["verdict"] == "hold"  # 54 trades, 27 days: under 2 x 30 trades / 2 x 14 days
@@ -254,7 +276,7 @@ def test_manager_only_counts_alphas_beyond_the_champion_and_retires_with_inputs(
     s1 = _slot(app, "challenger-1", ["squeeze_breakout"], start)
     s2 = _slot(app, "challenger-2", ["discovered"], start)
     _store_trades(app, _trades(GOOD_64, "challenger-1", start))  # the normal schedule: promoted at its 60-day checkpoint
-    _store_trades(app, _trades([[-1.0, 0.3]] * 20 + [[1.0, -0.2]] * 10, "challenger-2", start))
+    _store_trades(app, _trades(LOSING_30, "challenger-2", start))
     rm = ResearchManager(app)
     assert rm.new_alphas(s1.params) == [] and rm.slot_new_alphas(s1) == [] and rm.trial_days(s1) == 90
     asyncio.run(rm.evaluate_challengers(force=True))

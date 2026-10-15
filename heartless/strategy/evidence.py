@@ -11,6 +11,12 @@ document it comes from. The self-improvement loop reads it in three places (docs
 An alpha without an entry is 'untested' (e.g. the rule runner `discovered`). Each entry carries the fingerprint of
 the parameter schema it was judged with; once the alpha's schema changes in code (a redesign), the evidence describes
 a design that no longer exists and the alpha counts as 'untested' again until it is re-judged.
+
+Each entry also says at which stage its verdict was reached (`stage`, E2): 'oos' for an out-of-sample judgement (P1,
+P2 VALID, the sealed 2025 test) and 'train' for a P2 family whose shipped design failed the TRAIN gate and therefore
+never reached the VALID window (xs_rank_mom, funding_carry_xs; their numbers are TRAIN numbers, in `window` instead of
+`oos_window`). A TRAIN-gate failure is as much a failure for promotion purposes: without it, a challenger switching
+such an alpha on faced the normal bar, weaker than that of the alphas that at least cleared TRAIN.
 """
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ from functools import lru_cache
 from importlib import resources
 
 VERDICTS = ("failed", "passed", "untested")
+STAGES = ("oos", "train")
 
 
 @lru_cache(maxsize=1)
@@ -30,6 +37,8 @@ def registry() -> dict:
     for name, e in data.get("alphas", {}).items():
         if e.get("verdict") not in VERDICTS:
             raise ValueError(f"evidence.json: alpha {name} has verdict {e.get('verdict')!r}, expected one of {VERDICTS}")
+        if e.get("stage", "oos") not in STAGES:
+            raise ValueError(f"evidence.json: alpha {name} has stage {e.get('stage')!r}, expected one of {STAGES}")
     return data
 
 
@@ -61,6 +70,13 @@ def verdict(alpha: str) -> str:
     return e["verdict"] if e else "untested"
 
 
+def stage(alpha: str) -> str | None:
+    """Where the verdict of `alpha` was reached: 'oos' (an out-of-sample judgement; also an entry written before the
+    field existed) or 'train' (a TRAIN-gate failure); None without a current entry."""
+    e = entry(alpha)
+    return e.get("stage", "oos") if e else None
+
+
 def failed(alphas) -> list[str]:
     """The alphas of `alphas` whose out-of-sample verdict is 'failed', in the given order."""
     return [a for a in alphas if verdict(a) == "failed"]
@@ -85,6 +101,11 @@ def short(alpha: str) -> str:
     e = entry(alpha)
     if e is None:
         return "OOS 미검증"
-    label = {"failed": "OOS 탈락", "passed": "OOS 통과", "untested": "OOS 미검증"}[e["verdict"]]
-    return (f"{label} ({e.get('oos_window', '?')}: n={e.get('n', 0)}, 평균 {float(e.get('avg_r') or 0):+.3f}R, "
+    if e.get("stage", "oos") == "train":
+        label = {"failed": "TRAIN 관문 탈락", "passed": "TRAIN 관문 통과", "untested": "OOS 미검증"}[e["verdict"]]
+        window = e.get("window", "?")
+    else:
+        label = {"failed": "OOS 탈락", "passed": "OOS 통과", "untested": "OOS 미검증"}[e["verdict"]]
+        window = e.get("oos_window", "?")
+    return (f"{label} ({window}: n={e.get('n', 0)}, 평균 {float(e.get('avg_r') or 0):+.3f}R, "
             f"t_day {float(e.get('t_day') or 0):+.2f})")
