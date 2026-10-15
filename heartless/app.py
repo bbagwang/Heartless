@@ -311,7 +311,8 @@ class Heartless:
         fts = "/".join(f"{R.FAILED_ABS_T_AT[c]:g}" for c in R.FAILED_CHECKPOINTS)
         criteria = (f"챌린저가 실시간 페이퍼에서 절대 기준을 넘으면 승격되어 그 알파로 거래를 시작합니다. 판정은 시작 후 "
                     f"{sched}일 판정점에서만 합니다: 거래 {bar['min_trades']}건 이상·청산일 {bar['min_days']}일 이상, 평균R > 0, "
-                    f"일 단위 t ≥ {ts}, PF ≥ {bar['min_pf_r']:g}, 최대낙폭 ≤ {bar['max_dd_r']:g}R×√(n/{R.ABS_MIN_TRADES}) "
+                    f"일 단위 HAC(뉴이-웨스트 {R.PROMOTION_HAC_LAG}일) t ≥ {ts}, PF ≥ {bar['min_pf_r']:g}, "
+                    f"최대낙폭 ≤ {bar['max_dd_r']:g}R×√(n/{R.ABS_MIN_TRADES}) "
                     f"(OOS 탈락 알파를 켜는 챌린저는 {fsched}일 판정점·청산일 {failed_days}일·t ≥ {fts}). "
                     f"마지막 판정점까지 승격되지 않으면 종료")
         judged = [a for a in self.params.alphas if evidence.entry(a) is not None]
@@ -340,6 +341,12 @@ class Heartless:
         else:
             lines += [NO_ALPHA_TEXT, "거래 시작 조건: " + ls["criteria"]]
         lines += [ls["evidence"], ls["kill_switch"]]
+        pf = self.portfolio_status()
+        lines.append(f"포트폴리오 할당기 켜짐: 위험 예산 총 {pf['max_total_risk_pct']:g}%·같은 방향 "
+                     f"{pf['max_same_direction_risk_pct']:g}%(BTC 베타 가중) (docs/PORTFOLIO.md)"
+                     if pf["enabled"] else
+                     f"포트폴리오 할당기 꺼짐(출하 기본): 개수 한도 최대 {pf['max_positions']}개·같은 방향 "
+                     f"{pf['max_same_direction']}개 안에서 봉 처리 순서대로 진입 (docs/PORTFOLIO.md)")
         if self.mode_notice:
             lines.append(self.mode_notice)
         if self.store.get("paused", False):
@@ -2004,7 +2011,8 @@ class Heartless:
                 "today": st_today, "health": self.health, "research": {"last_cycle": self.research.last_cycle_ts,
                                                                          "running": self.research.running,
                                                                          "failures": self.research.research_failures, "last_error": self.research.last_error,
-                                                                         "next_due": self.research.last_cycle_ts + self.s.research_interval_minutes * 60_000},
+                                                                         "next_due": self.research.last_cycle_ts + self.research.interval_ms()},
+                "portfolio": self.portfolio_status(),
                 "challengers": [self._challenger_status(c) for c in self.challengers],
                 "graduation": self.research.graduation_status() if self.mode != "live" else None,
                 "alphas": self.bandit.snapshot(), "regimes": {s: r[0].value for s, r in self.regimes.items()},
@@ -2012,6 +2020,27 @@ class Heartless:
                 "learning": self.learning_status(), "exec_quality": self.exec_quality(),
                 "kill_switch": [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in st.items()}
                                 for st in self.killswitch.champion_state()]}
+
+    def portfolio_status(self) -> dict:
+        """The P3 portfolio allocator for /status, the daily report and the start message: whether the primary engine
+        batches entries (PORTFOLIO_ALLOCATOR; off by default, docs/PORTFOLIO.md), the budgets and count caps, and while
+        it is on that engine's open risk against the budgets and the entries they rejected since it started."""
+        from heartless.execution.allocator import SAME_REASON, TOTAL_REASON
+
+        prim = self.primary_engine
+        alloc = getattr(prim, "allocator", None) if prim is not None else None
+        out: dict[str, Any] = {"enabled": alloc is not None if prim is not None else bool(self.s.portfolio_allocator),
+                               "max_total_risk_pct": self.s.max_total_risk_pct,
+                               "max_same_direction_risk_pct": self.s.max_same_direction_risk_pct,
+                               "max_positions": self.s.max_positions, "max_same_direction": self.s.max_same_direction,
+                               "beta_lookback_days": self.s.beta_lookback_days}
+        if alloc is not None:
+            out["exposure"] = {k: round(v, 4) for k, v in
+                               alloc.exposure(prim.open_positions(), prim.stats.equity).items()}
+            out["rejected"] = {"total": prim.stats.skipped.get(TOTAL_REASON, 0),
+                               "same": prim.stats.skipped.get(SAME_REASON, 0)}
+            out["queued"] = prim.queued_entries
+        return out
 
     def _challenger_status(self, c: ChallengerSlot) -> dict:
         row = {"name": c.name, "version": c.params.version, "source": c.source, "started": c.started,
@@ -2162,7 +2191,8 @@ class Heartless:
             out.append({"name": c.name, "source": c.source, "version": c.params.version, "started": c.started,
                         "checkpoints": sched, "passed": passed, "next_checkpoint": nxt,
                         "next_at": c.started + nxt * MS_DAY if nxt is not None else None, "path": path,
-                        "current": cur, "stat": stat, "need": bar.get("min_paired_t", bar.get("min_t_day")),
+                        "current": cur, "stat": stat, "hac_lag": bar.get("hac_lag"),
+                        "need": bar.get("min_paired_t", bar.get("min_t_hac", bar.get("min_t_day"))),
                         "min_trades": bar["min_trades"], "min_days": bar["min_days"], "failed_alphas": failed,
                         "verdict": d.get("verdict"), "rule": d.get("rule"), "checkpoint": d.get("checkpoint"),
                         "diff": self.research.slot_diff(c)})
@@ -2238,8 +2268,9 @@ class Heartless:
                              "seconds": last.get("seconds"), "symbols": len(last.get("symbols") or []),
                              "evaluated": len(alphas), "improved": improved, "outcome": outcome,
                              "failures": self.research.research_failures, "last_error": self.research.last_error,
-                             "next_due": (self.research.last_cycle_ts + self.s.research_interval_minutes * 60_000)
-                             if self.research.last_cycle_ts else None},
+                             "selection": R.describe_selection(last["selection_detail"])
+                             if last.get("selection_detail") else "",
+                             "next_due": self.research.next_due_ts()},
                 "discovery": {"last": disc.get("ts"), "tested": disc.get("tested", 0), "t_bar": disc.get("t_bar"),
                               "passed": len(disc.get("passed") or []), "seconds": disc.get("seconds"),
                               "outcome": disc_outcome,

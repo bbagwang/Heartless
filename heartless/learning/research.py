@@ -430,8 +430,15 @@ class ResearchManager:
         worker spends at most half of its time on research even when the champion enables more alphas than the
         default interval was measured with, which leaves the daily discovery (run only while the worker is idle)
         its turn."""
-        gap = max(self.s.research_interval_minutes * 60_000, 2 * self.last_cycle_ms)
-        return (now - self.last_cycle_ts) >= gap
+        return (now - self.last_cycle_ts) >= self.interval_ms()
+
+    def interval_ms(self) -> int:
+        """The gap due() waits after a cycle's start: RESEARCH_INTERVAL_MINUTES, or twice the last cycle's length."""
+        return max(self.s.research_interval_minutes * 60_000, 2 * self.last_cycle_ms)
+
+    def next_due_ts(self) -> int | None:
+        """When the next cycle becomes due (status UIs); None before the first cycle, which is due at once."""
+        return self.last_cycle_ts + self.interval_ms() if self.last_cycle_ts else None
 
     # --- which alphas a cycle tunes (E2) ---------------------------------------------------------
     ROTATION_KEY = "research.failed_rotation"

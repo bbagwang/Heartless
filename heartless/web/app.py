@@ -235,6 +235,7 @@ class WebServer:
         """Everything the research page shows, as plain data (also served as /api/learning): the alpha overview and the
         evidence registry, champion version history, challenger checkpoints, the kill switch, recent research and
         discovery cycles, the seal ledger and the primary engine's equity curve. Read-only."""
+        from heartless.learning import research as R
         from heartless.learning import seal
         from heartless.strategy import evidence
 
@@ -262,8 +263,11 @@ class WebServer:
                              "best_n": (best.get("test") or {}).get("n", 0),
                              "best_avg_r": (best.get("test") or {}).get("avg_r", 0.0),
                              "improved": not best.get("is_base") and best.get("score", -1e9) > base.get("score", -1e9)}
+            sel = sm.get("selection_detail")
             runs.append({"ts": r.get("ts"), "seconds": sm.get("seconds"), "symbols": len(sm.get("symbols") or []),
-                         "window": sm.get("window"), "alphas": alphas})
+                         "window": sm.get("window"), "alphas": alphas,
+                         # E2: which alphas the cycle tuned (enabled, untested, the failed-alpha rotation)
+                         "selection": R.describe_selection(sel) if sel else ""})
         cycles = []
         for ev in app.store.load_events(40, topic="research_done"):
             msg = ev.get("message") if isinstance(ev.get("message"), dict) else {"message": ev.get("message")}
@@ -283,6 +287,7 @@ class WebServer:
         if rows and (not curve or curve[-1][0] != rows[-1][0]):
             curve.append([rows[-1][0], rows[-1][2]])
         return {"generated": now, "mode": app.mode, "champion": app.params.version, "engine": prim,
+                "portfolio": app.portfolio_status() if hasattr(app, "portfolio_status") else None,
                 "overview": overview, "judgements": evidence.registry().get("judgements", {}),
                 "versions": versions, "challengers": app.challenger_outlook(),
                 "kill_switch": {"settings": (overview.get("learning") or {}).get("kill_switch", ""),
@@ -436,7 +441,7 @@ def _evidence_cells(e: dict | None) -> list[str]:
 
 
 def _research_body(d: dict, tz: str) -> str:
-    from heartless.notify.formatter import ROLE_KO, VERDICT_KO, evidence_stage
+    from heartless.notify.formatter import ROLE_KO, VERDICT_KO, evidence_stage, fmt_portfolio, outlook_stat
 
     ov = d.get("overview") or {}
     ls = ov.get("learning") or {}
@@ -448,6 +453,9 @@ def _research_body(d: dict, tz: str) -> str:
     if ls.get("no_alpha") and ls.get("criteria"):
         summary.append(f'<p class="small">거래 시작 조건: {_e(ls["criteria"])}</p>')
     summary.append(f'<p class="small muted">{_e(ls.get("evidence"))} · {_e(ls.get("kill_switch"))}</p>')
+    pf = fmt_portfolio({"portfolio": d.get("portfolio")})
+    if pf:  # Telegram HTML: only <code> tags, plain text once they are dropped
+        summary.append(f'<p class="small">{_e(pf.replace("<code>", "").replace("</code>", ""))}</p>')
     out.append('<div class="card"><h2>지금 상태</h2>' + "".join(summary) + "</div>")
     # equity
     eq = d.get("equity") or []
@@ -506,7 +514,7 @@ def _research_body(d: dict, tz: str) -> str:
             chips.append(f'<span class="chip {css}">{_e(x)}일</span>')
         nxt = (f'{_e(c["next_checkpoint"])}일 ({_e(fmt_ts(c.get("next_at"), tz, "%m-%d"))})' if c.get("next_checkpoint") is not None
                else "판정점 모두 지남")
-        stat = "차이 t" if c.get("path") == "relative" else "t_day"
+        stat = outlook_stat(c)
         crow.append([f'<code>{_e(c.get("name"))}</code><div class="muted small">{_e(c.get("source"))} · <code>{_e(c.get("version"))}</code></div>',
                      _e(fmt_ts(c.get("started"), tz, "%m-%d %H:%M")), "".join(chips), nxt,
                      "상대" if c.get("path") == "relative" else "절대",
@@ -544,8 +552,9 @@ def _research_body(d: dict, tz: str) -> str:
     for r in rs.get("runs") or []:
         al = r.get("alphas") or {}
         imp = [a for a, x in al.items() if x.get("improved")]
+        sel = f'<div class="muted small">{_e(r["selection"])}</div>' if r.get("selection") else ""
         rrows.append([_e(fmt_ts(r.get("ts"), tz, "%m-%d %H:%M")), _e(f'{(r.get("seconds") or 0) / 60:.0f}분'), _e(r.get("symbols", 0)),
-                      _e(len(al)), _e(", ".join(imp) or "없음")])
+                      _e(len(al)) + sel, _e(", ".join(imp) or "없음")])
     crows = [[_e(fmt_ts(c.get("ts"), tz, "%m-%d %H:%M")), f'<span class="note">{_e(c.get("message"))}</span>'] for c in rs.get("cycles") or []]
     disc = d.get("discovery") or {}
     tested = int(disc.get("tested") or 0)

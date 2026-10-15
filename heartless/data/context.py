@@ -854,7 +854,7 @@ def prepare(db_path: str, cfg: dict, start: int, end: int) -> str | None:
         raise ContextMismatch(f"CONTEXT_DB {ctx_path} is the candle database; the market context needs its own file "
                               f"(default <data_dir>/{DB_NAME})")
     Path(ctx_path).parent.mkdir(parents=True, exist_ok=True)
-    src = Store(db_path)
+    src = Store(db_path, readonly=True)  # the source candle database is only read (E2: no schema, no -wal / -shm)
     dst = Store(ctx_path)
     try:
         ok = ensure(src, dst, int(start), int(end), cfg.get("universe") or DEFAULT_UNIVERSE,

@@ -722,10 +722,13 @@ def format_report(s: dict) -> str:
         lines.append(f"  promotion {r['time']} {r['version']}")
     for r in learn.get("challenger_decisions", []):
         ch = r.get("challenger") or {}
-        paired = f" paired t {r['paired']['t']:+.2f}" if r.get("paired") else ""
+        # the judge's statistics: HAC t (E2) where the record has one, else the lag-0 day-clustered t
+        hac = "HAC " if "t_hac" in ch else ""
+        paired = f" {hac}paired t {r['paired']['t']:+.2f}" if r.get("paired") else ""
         cp = f" @{r['checkpoint']}d" if r.get("checkpoint") is not None else " (before the first checkpoint)"
         lines.append(f"  decision {r['time']} {r['slot']} {r['version']} [{r['source']}] {r['path']}{cp} -> {r['verdict']} "
-                     f"({r['rule']}): n={ch.get('n')} days={ch.get('days')} t_day {ch.get('t_day', 0):+.2f}{paired}, "
+                     f"({r['rule']}): n={ch.get('n')} days={ch.get('days')} {hac}t_day "
+                     f"{ch.get('t_hac', ch.get('t_day', 0)):+.2f}{paired}, "
                      f"champion n={r.get('champion_n')}" + (f", failed-alpha bar {r['failed_alphas']}"
                                                             if r.get("failed_alphas") else ""))
     for r in learn.get("kill_switch_trips", []):

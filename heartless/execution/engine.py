@@ -201,7 +201,11 @@ class TradingEngine:
                 self._log_decision(ctx, None, "ensemble", self._ensemble_pass_reason(ctx.symbol))
             return
         if self.allocator is not None:
-            self._batch.append(Candidate(decision, view, ctx))
+            cand = Candidate(decision, view, ctx)
+            if self.decision_log is not None:
+                # this close's signals for the record flush_entries writes once the batch is decided
+                cand.extra["signals"] = list(self.ensemble.last_signals.get(ctx.symbol) or [])
+            self._batch.append(cand)
             return
         equity = await self.equity()
         allowed, why = self.risk.can_open(decision, self.open_positions(), now, equity)
@@ -213,12 +217,31 @@ class TradingEngine:
         before, skipped = self.positions.get(ctx.symbol), dict(self.stats.skipped)
         await self._open(decision, view, ctx, equity)
         if self.decision_log is not None:
-            pos = self.positions.get(ctx.symbol)
-            if pos is not None and pos is not before and pos.status is not PositionStatus.CANCELLED:
-                self._log_decision(ctx, decision, "opened", pos.entry_style)
-            else:  # _open counts each skip it makes in stats.skipped: the counter that moved names the reason
-                moved = [k for k, v in self.stats.skipped.items() if v != skipped.get(k, 0)]
-                self._log_decision(ctx, decision, "execution", moved[0] if moved else "entry not placed")
+            self._log_outcome(ctx, decision, before, skipped)
+
+    def _log_outcome(self, ctx: Context, decision: Decision, before: Position | None, skipped: dict[str, int],
+                     signals: list | None = None, allocation: dict | None = None) -> None:
+        """Record what an entry attempt ended in: 'opened' when a new position stands, else 'execution' with the skip
+        counter _plan_entry / _open moved (each skip is counted in stats.skipped)."""
+        pos = self.positions.get(ctx.symbol)
+        if pos is not None and pos is not before and pos.status is not PositionStatus.CANCELLED:
+            self._log_decision(ctx, decision, "opened", pos.entry_style, signals, allocation)
+        else:
+            moved = [k for k, v in self.stats.skipped.items() if v != skipped.get(k, 0)]
+            self._log_decision(ctx, decision, "execution", moved[0] if moved else "entry not placed", signals,
+                               allocation)
+
+    def _log_candidate(self, c: Candidate, stage: str, why: str, **extra) -> None:
+        """Record one allocator batch candidate's outcome (flush_entries): the decision log entry of the FIFO path plus
+        its place in the batch (`allocation`: rank / batch size, what it was ranked by and its BTC beta)."""
+        self._log_decision(c.ctx, c.decision, stage, why, c.extra.get("signals"), self._allocation(c, **extra))
+
+    def _allocation(self, c: Candidate, **extra) -> dict:
+        rank, of = c.extra.get("rank", (0, 0))
+        out = {"rank": rank, "of": of, "by": c.source, "value": round(float(c.value), 4),
+               "beta": round(float(self.allocator.beta.beta(c.symbol)), 2) if self.allocator is not None else 1.0}
+        out.update(extra)
+        return out
 
     def _ensemble_pass_reason(self, symbol: str) -> str:
         """Why Ensemble.decide passed on the symbol's signals without recomputing its scores (the bandit weight is a
@@ -227,10 +250,13 @@ class TradingEngine:
         sides = {s.side for s in self.ensemble.last_signals.get(symbol) or []}
         return "threshold" if len(sides) <= 1 else "conflict or threshold"
 
-    def _log_decision(self, ctx: Context, decision: Decision | None, stage: str, why: str) -> None:
-        """Append a compact record of one entry decision (stage: 'ensemble' | 'risk' | 'execution' rejected it, or
-        'opened'). Plain values only: it is read by Telegram, the web JSON and tests."""
-        sigs = self.ensemble.last_signals.get(ctx.symbol) or []
+    def _log_decision(self, ctx: Context, decision: Decision | None, stage: str, why: str, signals: list | None = None,
+                      allocation: dict | None = None) -> None:
+        """Append a compact record of one entry decision (stage: 'ensemble' | 'risk' | 'allocator' | 'execution'
+        rejected it, or 'opened'). Plain values only: it is read by Telegram, the web JSON and tests. `signals`: the
+        decision's signals when they are no longer the ensemble's latest (an allocator batch is decided after the
+        close); `allocation`: the candidate's place in its batch (portfolio allocator on)."""
+        sigs = signals if signals is not None else (self.ensemble.last_signals.get(ctx.symbol) or [])
         rec = {"ts": self.clock(), "engine": self.name, "symbol": ctx.symbol,
                "regime": getattr(ctx.regime, "value", ctx.regime),
                "stage": stage, "why": why, "threshold": self.params.ensemble.get("entry_threshold"),
@@ -239,6 +265,8 @@ class TradingEngine:
         if decision is not None:
             rec["decision"] = {"side": decision.side.value, "alphas": list(decision.alphas),
                                "score": round(float(decision.score), 3), "expected_r": round(float(decision.expected_r), 2)}
+        if allocation is not None:
+            rec["allocation"] = allocation
         self.decision_log.setdefault(ctx.symbol, deque(maxlen=DECISION_LOG_PER_SYMBOL)).append(rec)
 
     async def on_equity_tick(self) -> None:
@@ -440,31 +468,65 @@ class TradingEngine:
         entries sent. Callers run it once every symbol's bar at the close has been processed (Backtester: each
         timeline step; app: when the batch is complete)."""
         batch, self._batch = self._batch, []
+        if not batch or self.allocator is None:
+            return 0
+        # E3 decision record (persisted engines only; backtests keep none and take exactly the unlogged path)
+        log_ = self.decision_log is not None
         # entries switched off after the close was queued (the live -> paper flatten sets entries_enabled False, then
         # closes everything and checks nothing is left): the FIFO path reads the flag right before it opens, so a
         # queued candidate must not open after it either
-        if not batch or self.allocator is None or not self.entries_enabled:
+        if not self.entries_enabled:
+            if log_:
+                for c in batch:
+                    self._log_candidate(c, "risk", "entries disabled")
             return 0
         now = self.clock()
         equity = await self.equity()
         if self.meta is not None:
             for c in batch:  # the meta model's expected R ranks; computed once and reused by the plan
                 c.meta = self._meta_eval(c.view, c.ctx, c.decision)
+        ranked = self.allocator.rank(batch, self.bandit)
+        if log_:
+            for i, c in enumerate(ranked):
+                c.extra["rank"] = (i + 1, len(ranked))
         sent = 0
-        for c in self.allocator.rank(batch, self.bandit):
-            if not self.entries_enabled:
-                break  # switched off while an earlier candidate's order was being sent
+        for i, c in enumerate(ranked):
+            if not self.entries_enabled:  # switched off while an earlier candidate's order was being sent
+                if log_:
+                    for rest in ranked[i:]:
+                        self._log_candidate(rest, "risk", "entries disabled")
+                break
+            stage = "risk"
             allowed, why = self.risk.can_open(c.decision, self.open_positions(), now, equity)
             if allowed:
+                skipped = dict(self.stats.skipped) if log_ else {}
                 plan = await self._plan_entry(c.decision, c.view, c.ctx, equity, c.meta)
-                if plan is None:
-                    continue  # spread / meta veto / size / stop: counted by _plan_entry
+                if plan is None:  # spread / meta veto / size / stop: counted by _plan_entry
+                    if log_:
+                        self._log_outcome(c.ctx, c.decision, self.positions.get(c.symbol), skipped,
+                                          c.extra.get("signals"), self._allocation(c))
+                    continue
                 allowed, why = self.allocator.check(plan.symbol, plan.side, plan.size.risk_amount,
                                                     self.open_positions(), equity)
                 if allowed:
+                    before = self.positions.get(plan.symbol)
                     await self._place_entry(plan)
                     sent += 1
+                    if log_:
+                        self._log_outcome(c.ctx, c.decision, before, skipped, c.extra.get("signals"),
+                                          self._allocation(c))
                     continue
+                stage = "allocator"
+                if log_:  # the budget it did not fit: open risk before it, and what it would have added
+                    ex = self.allocator.exposure(self.open_positions(), equity)
+                    self._log_candidate(c, stage, why, **{
+                        "total_pct": round(ex["total_pct"], 3), "long_pct": round(ex["long_pct"], 3),
+                        "short_pct": round(ex["short_pct"], 3),
+                        "add_pct": round(plan.size.risk_amount / equity * 100.0, 3) if equity > 0 else 0.0,
+                        "max_total_pct": self.s.max_total_risk_pct,
+                        "max_same_pct": self.s.max_same_direction_risk_pct})
+            elif log_:
+                self._log_candidate(c, stage, why)
             key = why.split(":")[0]
             self.stats.skipped[key] = self.stats.skipped.get(key, 0) + 1
         return sent

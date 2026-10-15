@@ -80,6 +80,9 @@ def fmt_status(st: dict, tz: str) -> str:
     ]
     if prim.get("halted"):
         lines.append(f"🚫 {esc(prim.get('halt_reason', ''))}")
+    pf = fmt_portfolio(st)
+    if pf:
+        lines.append(pf)
     lines += fmt_learning(st)
     xq = fmt_exec_quality(st)
     if xq:
@@ -176,6 +179,9 @@ def fmt_daily(today: dict, week: dict, st: dict, tz: str, insight: dict | None =
     if ba:
         lines.append("오늘 알파별: " + ", ".join(f"{esc(a)} {fmt_usd(s['net'])}" for a, s in ba.items()))
     lines.append(f"열린 포지션 {len(prim.get('positions', []))} · 챔피언 <code>{esc(st['params_version'])}</code> · 챌린저 {len(st.get('challengers', []))}")
+    pf = fmt_portfolio(st)
+    if pf:
+        lines.append(pf)
     if insight is None:
         lines += fmt_learning(st)
     else:
@@ -193,6 +199,22 @@ def fmt_daily(today: dict, week: dict, st: dict, tz: str, insight: dict | None =
     if st.get("graduation") and st["graduation"].get("ok"):
         lines.append("🎓 페이퍼 성과가 졸업 기준을 충족했습니다. /golive 로 실거래 전환 가능")
     return "\n".join(lines)
+
+
+def fmt_portfolio(st: dict) -> str:
+    """One line on the P3 portfolio allocator (Heartless.portfolio_status): off = FIFO under the count caps; on = the
+    primary engine's open risk against the budgets and the entries the budgets rejected since the engine started."""
+    p = st.get("portfolio")
+    if not p:
+        return ""
+    caps = f"최대 {p.get('max_positions', 0)}개·같은 방향 {p.get('max_same_direction', 0)}개"
+    if not p.get("enabled"):
+        return (f"포트폴리오 할당기 꺼짐(<code>PORTFOLIO_ALLOCATOR=false</code>, 출하 기본): 봉 처리 순서대로 개수 한도({caps}) "
+                f"안에서 진입")
+    ex, rj = p.get("exposure") or {}, p.get("rejected") or {}
+    return (f"포트폴리오 할당기 켜짐: 열린 위험 총 {ex.get('total_pct', 0.0):.2f}%/{p.get('max_total_risk_pct', 0):g}% · "
+            f"롱 {ex.get('long_pct', 0.0):.2f}% · 숏 {ex.get('short_pct', 0.0):.2f}%/{p.get('max_same_direction_risk_pct', 0):g}%"
+            f"(BTC 베타 가중), 개수 상한 {caps} · 예산 거절 누적 총 {rj.get('total', 0)}·같은 방향 {rj.get('same', 0)}")
 
 
 def fmt_learning(st: dict, headline: bool = True, challengers: bool = True, kill_switch: bool = True) -> list[str]:
@@ -213,8 +235,11 @@ def fmt_learning(st: dict, headline: bool = True, challengers: bool = True, kill
             continue
         ch, bar = d.get("challenger") or {}, d.get("bar") or {}
         path = "상대" if d.get("path") == "relative" else "절대"
-        extra = (f", 차이 t {d['paired']['t']:+.2f}/{bar.get('min_paired_t', 0):g}" if d.get("paired")
-                 else f", t_day {ch.get('t_day', 0):+.2f}/{bar.get('min_t_day', 0):g}")
+        # since E2 the judge's statistics are HAC t values (bar.hac_lag); a decision stored before shows its lag-0 t
+        hac = f"HAC({bar['hac_lag']}일) " if bar.get("hac_lag") else ""
+        t_rec = ch.get("t_hac", ch.get("t_day", 0)) if hac else ch.get("t_day", 0)
+        extra = (f", {hac}차이 t {d['paired']['t']:+.2f}/{bar.get('min_paired_t', 0):g}" if d.get("paired")
+                 else f", {hac}t_day {t_rec:+.2f}/{bar.get('min_t_hac', bar.get('min_t_day', 0)):g}")
         cp, nxt = d.get("checkpoint"), d.get("next_checkpoint")
         when = (f"{cp}일 판정점" if cp is not None else "첫 판정점 전") + (f", 다음 {nxt}일" if nxt else "")
         out.append(f"  <code>{esc(c['name'])}</code> [{esc(c.get('source', ''))}] {path} 경로 ({when}): "
@@ -280,6 +305,9 @@ RISK_KO = {"paused": "일시정지 중", "halted": "손실 한도로 신규 진�
            "gross leverage cap": "총 레버리지 한도", "entries disabled": "모드 전환 중 진입 꺼짐"}
 EXEC_KO = {"spread": "스프레드 과다(12bp 초과)", "meta veto": "메타 모델 거부", "size": "주문 수량 0(최소 수량 미달)",
            "stop": "손절가가 이미 현재가를 넘음", "entry not placed": "주문 미접수(거래소 거절 등)"}
+# P3 portfolio allocator (PORTFOLIO_ALLOCATOR): its budget rejections and what it ranked a batch candidate by
+ALLOC_KO = {"total risk budget": "총 위험 예산 초과", "same-direction risk budget": "같은 방향 위험 예산 초과(BTC 베타 가중)"}
+RANK_KO = {"meta": "메타 기대R", "evidence": "증거 기대R", "bandit": "밴딧 점수"}
 
 
 def _span(window: str | None) -> str:
@@ -304,6 +332,8 @@ def evidence_stage(e: dict | None) -> str:
         return "미검증"
     if e.get("sealed2025"):
         return "2025 확인 시험"
+    if e.get("stage") == "train":  # evidence.json 'stage' (E2): the verdict was reached at the TRAIN gate
+        return "P2 TRAIN"
     if e.get("valid"):
         return "P2 VALID"
     if e.get("judgement") == "p2" or e.get("train"):
@@ -375,15 +405,32 @@ def decision_reason(d: dict) -> str:
         return "거절: " + RISK_KO.get(code, why) + (f" ({detail})" if detail else "")
     if stage == "execution":
         return "거절: " + EXEC_KO.get(why, why)
+    if stage == "allocator":
+        return "거절(할당기): " + ALLOC_KO.get(why, why)
     return why
+
+
+def allocation_note(a: dict | None) -> str:
+    """The batch place of an allocator decision (TradingEngine.decision_log 'allocation'), and for a budget rejection
+    the open risk it did not fit into."""
+    if not a:
+        return ""
+    out = (f"할당 {a.get('rank', 0)}/{a.get('of', 0)}위({RANK_KO.get(a.get('by'), a.get('by') or '-')} "
+           f"{_num(a.get('value'), '+.3f')}, β {_num(a.get('beta'), '.2f')})")
+    if "total_pct" in a:
+        out += (f", 열린 위험 총 {_num(a.get('total_pct'), '.2f')}%/{_num(a.get('max_total_pct'), 'g')}% · 롱 "
+                f"{_num(a.get('long_pct'), '.2f')}% · 숏 {_num(a.get('short_pct'), '.2f')}%/"
+                f"{_num(a.get('max_same_pct'), 'g')}%, 이 진입 +{_num(a.get('add_pct'), '.2f')}%")
+    return out
 
 
 def fmt_decision(d: dict, tz: str) -> str:
     sigs = ", ".join(f"{s.get('alpha')} {s.get('side')} {_num(s.get('confidence'), '.2f')}" for s in d.get("signals") or [])
     dec = d.get("decision") or {}
     score = f" 점수 {_num(dec.get('score'), '.2f')}/{_num(d.get('threshold'), 'g')}" if dec else ""
+    alloc = allocation_note(d.get("allocation"))
     return (f"• {fmt_ts(d.get('ts'), tz, '%m-%d %H:%M')} <code>{esc(d.get('engine'))}</code> [{esc(d.get('regime'))}] "
-            f"신호 {esc(sigs or '-')}{score} → {esc(decision_reason(d))}")
+            f"신호 {esc(sigs or '-')}{score} → {esc(decision_reason(d))}" + (f" · {esc(alloc)}" if alloc else ""))
 
 
 def fmt_why(w: dict, tz: str, tick: float | None = None) -> str:
@@ -487,11 +534,18 @@ def fmt_alpha_overview(ov: dict) -> str:
     return "\n".join(lines)
 
 
+def outlook_stat(c: dict) -> str:
+    """Name of the statistic a challenger is judged on (Heartless.challenger_outlook): a Newey-West (HAC) t over
+    `hac_lag` calendar days since E2, the paired daily difference on the relative path."""
+    hac = f"HAC({c['hac_lag']}일) " if c.get("hac_lag") else ""
+    return f"{hac}차이 t" if c.get("path") == "relative" else f"{hac}t_day"
+
+
 def fmt_outlook(c: dict, tz: str) -> str:
     """One challenger's standing: path, current record and statistic against the next checkpoint's bar."""
     cur = c.get("current") or {}
     path = "상대" if c.get("path") == "relative" else "절대"
-    stat = "차이 t" if c.get("path") == "relative" else "t_day"
+    stat = outlook_stat(c)
     nxt = c.get("next_checkpoint")
     when = (f"다음 판정점 {nxt}일({fmt_ts(c.get('next_at'), tz, '%m-%d')})" if nxt is not None
             else "판정점 모두 지남")
@@ -525,6 +579,8 @@ def fmt_insight(ins: dict, st: dict, tz: str) -> list[str]:
                 + (f"({esc(', '.join(r['improved']))})" if r.get("improved") else "")
                 + (f" · 다음 {fmt_ts(r['next_due'], tz, '%m-%d %H:%M')}" if r.get("next_due") else ""))
         out.append(line)
+        if r.get("selection"):
+            out.append("  조정 대상: " + esc(r["selection"]))
         if r.get("outcome"):
             out.append("  " + esc(str(r["outcome"]).split("\n")[0][:160]))
     else:
