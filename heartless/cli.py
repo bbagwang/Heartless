@@ -134,12 +134,17 @@ def main(argv: list[str] | None = None) -> None:
     add_replay_parser(sub)
     sub.add_parser("doctor", help="check configuration and connectivity")
     sub.add_parser("params", help="print the champion parameters")
+    from heartless.learning.forward import add_forward_parser, main_cli as forward_main  # F4, ROADMAP 7.9
+
+    add_forward_parser(sub)
     args = parser.parse_args(argv)
     args.argv = ["heartless", *argv] if argv is not None else list(sys.argv)
     cmd = args.cmd or "run"
     settings = load_settings()
     setup_logging(settings.log_level, settings.data_dir)
-    if cmd == "run":
+    if cmd == "forward":
+        forward_main(settings, args)
+    elif cmd == "run":
         _run(settings)
     elif cmd == "backtest":
         asyncio.run(_backtest(settings, args))
