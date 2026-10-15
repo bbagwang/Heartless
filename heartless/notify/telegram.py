@@ -21,8 +21,9 @@ from heartless.util.timeutil import fmt_ts, now_ms
 log = logging.getLogger(__name__)
 
 COMMANDS = [
-    ("status", "현재 상태"), ("positions", "열린 포지션"), ("pnl", "손익 (today|week|month|all)"),
-    ("alphas", "알파 신뢰도"), ("research", "마지막 리서치 결과"), ("challengers", "챌린저 현황"),
+    ("status", "현재 상태"), ("positions", "열린 포지션"), ("why", "진입·미진입 근거: /why BTCUSDT"),
+    ("pnl", "손익 (today|week|month|all)"),
+    ("alphas", "알파별 켜짐·증거·운영 성적·킬 스위치"), ("research", "마지막 리서치 결과"), ("challengers", "챌린저 현황"),
     ("params", "현재 파라미터"), ("trades", "최근 거래"), ("universe", "거래 종목"), ("health", "시스템 상태"),
     ("pause", "신규 진입 중지"), ("resume", "거래 재개"), ("close", "포지션 청산: /close BTCUSDT | all"),
     ("mode", "모드 전환: /mode paper|live"), ("golive", "실거래 전환"), ("kill", "전량 청산 + 정지"),
@@ -216,9 +217,14 @@ class TelegramBot:
         elif cmd == "/pnl":
             period = args[0] if args and args[0] in ("today", "week", "month", "all") else "today"
             self.send(F.fmt_pnl(app.pnl_report(period), tz))
+        elif cmd == "/why":
+            self.send(self._why_text(args[0] if args else None))
         elif cmd == "/alphas":
-            ks = app.killswitch.champion_state() if getattr(app, "killswitch", None) is not None else None
-            self.send(F.fmt_alphas(app.bandit.snapshot(), app.params, ks))
+            if hasattr(app, "alpha_overview"):
+                self.send(F.fmt_alpha_overview(app.alpha_overview()))
+            else:  # minimal apps (tests, older harnesses): the bandit view
+                ks = app.killswitch.champion_state() if getattr(app, "killswitch", None) is not None else None
+                self.send(F.fmt_alphas(app.bandit.snapshot(), app.params, ks))
         elif cmd == "/research":
             self.send(F.fmt_research(app.research.last_summary, tz) + "\n\n" + F.fmt_discovery(app.store.get("discovery.last"), tz))
         elif cmd == "/optimize":
@@ -384,7 +390,13 @@ class TelegramBot:
                       f"순익 {p['net']:+.1f} USDT, 승률 {p['win_rate']:.0f}%\n실거래로 전환할까요?",
                       keyboard=[[{"text": "🔴 라이브 전환", "callback_data": "golive"}, {"text": "나중에", "callback_data": "cancel"}]])
         elif topic == "daily_report":
-            self.send(F.fmt_daily(p["today"], p["week"], p["status"], tz))
+            insight = None
+            if hasattr(app, "report_insight"):
+                try:
+                    insight = app.report_insight()
+                except Exception:  # noqa: BLE001 - the PnL lines must still go out
+                    log.exception("daily report insight failed")
+            self.send(F.fmt_daily(p["today"], p["week"], p["status"], tz, insight=insight))
         elif topic in ("mode_changed", "control", "universe", "reconcile", "challenger_retired"):
             self.send(F.esc(p.get("message", "")))
         elif topic == "started":
@@ -393,6 +405,19 @@ class TelegramBot:
             self.send(f"🧠 <b>AI 리뷰</b>\n{F.esc(p.get('message', ''))}")
 
     # --- text helpers --------------------------------------------------------------------------
+    def _why_text(self, arg: str | None) -> str:
+        """/why <SYMBOL> ('btc' means BTCUSDT); without a symbol: usage and the symbols with an open position."""
+        app = self.app
+        if not arg:
+            prim = app.primary_engine
+            held = [p.symbol for p in prim.open_positions()] if prim else []
+            return ("사용법: /why BTCUSDT (포지션이 있으면 진입 근거·손절·목표·리스크·알파 증거, 없으면 최근 판단과 거절 사유)"
+                    + (f"\n포지션 보유: {F.esc(', '.join(held))}" if held else ""))
+        sym = "".join(ch for ch in arg.upper() if ch.isalnum())[:20]
+        if sym and sym not in app.symbols and not sym.endswith("USDT"):
+            sym += "USDT"
+        return F.fmt_why(app.why(sym), self.s.timezone, self._ticks().get(sym))
+
     def _position_keyboard(self, st: dict) -> list[list[dict]] | None:
         prim = st["engines"].get(st["primary"], {}) if st.get("primary") else {}
         rows = prim.get("positions", [])

@@ -2063,3 +2063,185 @@ class Heartless:
                     await self.emit("advisor_review", {"message": text, "seeds": seeds})
             except Exception:  # noqa: BLE001
                 log.exception("advisor review failed")
+
+    # --- read-only views for the owner's UIs (Telegram /why /alphas, the daily report, the dashboard research page) ---
+    def killed_alphas(self, limit: int = 20) -> list[dict]:
+        """Kill-switch trips that switched an alpha off in the champion, newest first: the version they created, when,
+        the rule and record that tripped, and whether the alpha is still off (only a promotion switches it back on)."""
+        out = []
+        for row in self.store.params_versions_since(0, source="kill-switch")[:limit]:
+            for d in (row.get("metrics") or {}).get("decisions") or []:
+                if d.get("alpha"):
+                    out.append({"alpha": d["alpha"], "version": row.get("id"), "at": int(row.get("created") or 0),
+                                "engine": d.get("engine"), "rule": d.get("rule"), "n": d.get("n", 0),
+                                "sum_r": d.get("sum_r", 0.0), "still_off": not self.params.enabled.get(d["alpha"], False)})
+        return out
+
+    def why(self, symbol: str) -> dict:
+        """What /why shows for one symbol: the primary engine's open position (its signal's reasons and tags, levels,
+        risk, R so far, expected R, the alpha's evidence, live record and kill-switch state), other engines' positions
+        in it, the latest entry decisions of every engine (TradingEngine.decision_log, memory only) and what blocks a
+        new entry on the primary engine right now."""
+        sym = symbol.upper()
+        now = now_ms()
+        prim = self.primary_engine
+        mark = self.marks().get(sym)
+        out: dict[str, Any] = {"symbol": sym, "engine": prim.name if prim else None, "mode": self.mode,
+                               "known": sym in self.symbols, "in_universe": sym in self.universe,
+                               "active": self.enabled_alphas(), "mark": mark,
+                               "regime": self.regimes[sym][0].value if sym in self.regimes else None,
+                               "position": None, "others": [], "decisions": [], "blockers": [],
+                               "killed": [k for k in self.killed_alphas() if k["still_off"]]}
+        live = (PositionStatus.PENDING, PositionStatus.OPEN, PositionStatus.CLOSING)
+        for name, eng in self.engines.items():
+            p = eng.positions.get(sym)
+            if p is None or p.status not in live:
+                continue
+            m = mark or p.extra.get("last_mark") or p.entry_price
+            if prim is None or name != prim.name:
+                out["others"].append({"engine": name, "side": p.side.value, "status": p.status.value, "alpha": p.alpha,
+                                      "r_now": p.r_now(m)})
+                continue
+            q = p.original_qty or p.qty
+            out["position"] = {
+                "side": p.side.value, "status": p.status.value, "alpha": p.alpha, "alphas": list(p.alphas),
+                "reason": p.reason, "tags": {k: v for k, v in (p.extra.get("tags") or {}).items() if k != "ref_price"},
+                "regime": p.regime, "confidence": p.confidence, "timeframe": p.timeframe, "entry": p.entry_price,
+                "entry_time": p.entry_time, "mark": m, "stop": p.stop, "initial_stop": p.initial_stop, "tp1": p.tp1,
+                "tp1_done": p.tp1_done, "tp": p.take_profit, "trail_atr_mult": p.trail_atr_mult,
+                "max_hold_bars": p.max_hold_bars, "bars_held": p.bars_held, "qty": p.qty, "notional": p.notional,
+                "leverage": p.leverage, "risk": p.risk_amount, "r_unit": p.r_unit, "r_now": p.r_now(m),
+                "stop_r": (p.stop - p.entry_price) * p.side.sign / p.r_unit if p.r_unit else 0.0,
+                "unrealized": p.unrealized(m) if p.status is PositionStatus.OPEN else 0.0, "realized": p.realized,
+                "expected_r": p.expected_profit / (p.r_unit * q) if p.r_unit and q else None,
+                "params_version": p.params_version, "evidence": evidence.entry(p.alpha),
+                "evidence_stale": evidence.entry(p.alpha) is None and p.alpha in evidence.registry().get("alphas", {}),
+                "live": {"engine": name, **r_stats(self.store.load_trades(engine=name, alpha=p.alpha))},
+                "kill_switch": next((k for k in self.killswitch.champion_state()
+                                     if k.get("engine") == name and k.get("alpha") == p.alpha), None)}
+        order = ([prim.name] if prim else []) + [n for n in self.engines if not prim or n != prim.name]
+        for name in order:
+            log_ = getattr(self.engines[name], "decision_log", None) or {}
+            out["decisions"] += list(reversed(log_.get(sym, ())))
+        if prim is not None:
+            if not prim.entries_enabled:
+                out["blockers"].append({"code": "entries disabled"})
+            blocked = prim.risk.entries_blocked(now)
+            if blocked:
+                out["blockers"].append({"code": blocked.split(":")[0], "detail": blocked.partition(":")[2]})
+            until = prim.risk.state.symbol_cooldown.get(sym, 0)
+            if until > now:
+                out["blockers"].append({"code": "cooldown", "until": until})
+            if len(prim.open_positions()) >= self.s.max_positions:
+                out["blockers"].append({"code": "max positions", "detail": str(self.s.max_positions)})
+        return out
+
+    def challenger_outlook(self) -> list[dict]:
+        """Per challenger: its checkpoint schedule, the next checkpoint and its date, and the current record against
+        that checkpoint's bar on the path the champion's record selects now (the retirement statistic of the latest
+        hourly decision, or before the first one judge_challenger's own: a re-derivation here would drift from the
+        statistic the bar is calibrated for whenever the judge changes)."""
+        now = now_ms()
+        out = []
+        for c in self.challengers:
+            d = self.research.last_decisions.get(c.name) or {}
+            failed = evidence.failed(self.research.slot_new_alphas(c))
+            sched = list(R.checkpoints(failed))
+            passed = [x for x in sched if now >= c.started + x * MS_DAY]
+            nxt = next((x for x in sched if x not in passed), None)
+            if d:
+                path, cur, stat = d.get("retire_path") or d.get("path"), d.get("current") or {}, d.get("retire_stat")
+            else:
+                ch = [t for t in self.store.load_trades(engine=c.name, since=c.started)
+                      if (t.get("entry_time") or 0) >= c.started]
+                champ = [t for t in self.store.load_trades(engine="paper", since=c.started)
+                         if (t.get("entry_time") or 0) >= c.started]
+                j = R.judge_challenger(ch, champ, self.s, c.started, now, self.research.slot_new_alphas(c))
+                path, cur, stat = j["retire_path"], j["current"], j["retire_stat"]
+            bar = R.promotion_bar(self.s, path or "absolute", failed, nxt if nxt is not None else sched[-1])
+            out.append({"name": c.name, "source": c.source, "version": c.params.version, "started": c.started,
+                        "checkpoints": sched, "passed": passed, "next_checkpoint": nxt,
+                        "next_at": c.started + nxt * MS_DAY if nxt is not None else None, "path": path,
+                        "current": cur, "stat": stat, "need": bar.get("min_paired_t", bar.get("min_t_day")),
+                        "min_trades": bar["min_trades"], "min_days": bar["min_days"], "failed_alphas": failed,
+                        "verdict": d.get("verdict"), "rule": d.get("rule"), "checkpoint": d.get("checkpoint"),
+                        "diff": self.research.slot_diff(c)})
+        return out
+
+    def alpha_overview(self) -> dict:
+        """One row per registered alpha for /alphas and the research page: switched on in the champion, the challengers
+        that change or trade it, its evidence (verdict, stage, numbers), its live record on the primary engine and its
+        kill-switch state; plus the learning status that explains a champion without any alpha."""
+        prim = self.primary_engine.name if self.primary_engine else "paper"
+        ks = {k["alpha"]: k for k in self.killswitch.champion_state() if k.get("engine") == prim}
+        killed: dict[str, dict] = {}
+        for k in self.killed_alphas():
+            killed.setdefault(k["alpha"], k)
+        trust = {r["alpha"]: r.get("trust") for r in self.bandit.snapshot()}
+        trades: dict[str, list[dict]] = {}
+        for t in self.store.load_trades(engine=prim):
+            trades.setdefault(t.get("alpha") or "?", []).append(t)
+        judged = evidence.registry().get("alphas", {})
+        rows = []
+        for a in self.params.alphas:
+            chs = []
+            for c in self.challengers:
+                diff = self.research.slot_diff(c)
+                if a in (diff.get("enabled") or {}):
+                    role = "on" if diff["enabled"][a] else "off"
+                elif a in (diff.get("alphas") or {}):
+                    role = "tuned"
+                elif c.params.enabled.get(a, False):
+                    role = "trades"
+                else:
+                    continue
+                chs.append({"name": c.name, "role": role})
+            e = evidence.entry(a)
+            rows.append({"alpha": a, "enabled": bool(self.params.enabled.get(a, False)), "challengers": chs,
+                         "verdict": evidence.verdict(a), "evidence": e, "evidence_stale": e is None and a in judged,
+                         "live": r_stats(trades.get(a, [])), "kill_switch": ks.get(a), "killed": killed.get(a),
+                         "trust": trust.get(a)})
+        return {"engine": prim, "champion": self.params.version, "rows": rows, "learning": self.learning_status()}
+
+    def report_insight(self) -> dict:
+        """What the daily report adds to the PnL lines: per-alpha performance on the primary engine (7 days and all
+        time), the latest research and discovery cycles, and every challenger's outlook (challenger_outlook)."""
+        now = now_ms()
+        prim = self.primary_engine.name if self.primary_engine else "paper"
+        groups: dict[str, list[dict]] = {}
+        for t in self.store.load_trades(engine=prim):
+            groups.setdefault(t.get("alpha") or "?", []).append(t)
+        perf = []
+        for a in sorted(set(groups) | set(self.enabled_alphas())):
+            ts = groups.get(a, [])
+            wk = [t for t in ts if (t.get("exit_time") or 0) >= now - 7 * MS_DAY]
+            perf.append({"alpha": a, "enabled": bool(self.params.enabled.get(a, False)), "week": r_stats(wk),
+                         "week_net": sum(float(t.get("pnl") or 0.0) for t in wk), "all": r_stats(ts),
+                         "all_net": sum(float(t.get("pnl") or 0.0) for t in ts)})
+        last = self.research.last_summary or {}
+        alphas = last.get("alphas") or {}
+        improved = [a for a, r in alphas.items()
+                    if not (r.get("best") or {}).get("is_base") and (r.get("best") or {}).get("score", -1e9) >
+                    (r.get("base") or {}).get("score", -1e9)]
+        outcome = disc_outcome = ""
+        for ev in self.store.load_events(30, topic="research_done"):
+            msg = ev.get("message") if isinstance(ev.get("message"), dict) else {}
+            text = str(msg.get("message") or "")
+            if not disc_outcome and text.startswith("알파 발굴"):
+                disc_outcome = text
+            elif not outcome and "summary" in msg:
+                outcome = text
+        disc = self.store.get("discovery.last") or {}
+        disc_last = int(self.store.get("discovery.last_cycle", 0) or 0)
+        return {"engine": prim, "alphas": perf,
+                "research": {"last": self.research.last_cycle_ts or None, "running": self.research.running,
+                             "seconds": last.get("seconds"), "symbols": len(last.get("symbols") or []),
+                             "evaluated": len(alphas), "improved": improved, "outcome": outcome,
+                             "failures": self.research.research_failures, "last_error": self.research.last_error,
+                             "next_due": (self.research.last_cycle_ts + self.s.research_interval_minutes * 60_000)
+                             if self.research.last_cycle_ts else None},
+                "discovery": {"last": disc.get("ts"), "tested": disc.get("tested", 0), "t_bar": disc.get("t_bar"),
+                              "passed": len(disc.get("passed") or []), "seconds": disc.get("seconds"),
+                              "outcome": disc_outcome,
+                              "next_due": disc_last + self.s.discovery_interval_hours * 3_600_000 if disc_last else None},
+                "challengers": self.challenger_outlook()}
