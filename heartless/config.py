@@ -42,7 +42,10 @@ class Settings(BaseSettings):
     history_days: int = Field(default=21, alias="HISTORY_DAYS")
     # bulk history from the public data.binance.vision archive (no API weight); REST only fills the recent tail
     archive_backfill: bool = Field(default=True, alias="ARCHIVE_BACKFILL")
-    always_include: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT", alias="ALWAYS_INCLUDE")
+    # Data subscription, not a trading guarantee (F0, docs/UNIVERSE.md): symbols whose market data the bot always
+    # subscribes, BTC as the regime / market-context reference every alpha reads. They trade only when they pass the
+    # same eligibility rules as every other symbol (heartless/data/universe.py); was BTCUSDT,ETHUSDT,SOLUSDT.
+    always_include: str = Field(default="BTCUSDT", alias="ALWAYS_INCLUDE")
 
     # --- risk (defaults are deliberately conservative; the optimizer never touches these) -----
     risk_per_trade_pct: float = Field(default=0.5, alias="RISK_PER_TRADE_PCT")  # % of equity lost at stop
@@ -136,6 +139,17 @@ class Settings(BaseSettings):
     max_same_direction_risk_pct: float = Field(default=1.5, alias="MAX_SAME_DIRECTION_RISK_PCT")  # 3 x 0.5% at beta 1
     beta_lookback_days: int = Field(default=30, alias="BETA_LOOKBACK_DAYS")  # BTC beta from this many days of 1h returns
 
+    # --- F0: coin-agnostic universes (docs/UNIVERSE.md, heartless/data/universe.py) -------------------------------
+    # live eligibility besides UNIVERSE_MIN_QUOTE_VOLUME: listing age, tick size against the price, quoted spread
+    universe_min_age_days: int = Field(default=30, alias="UNIVERSE_MIN_AGE_DAYS")
+    universe_max_tick_bps: float = Field(default=10.0, alias="UNIVERSE_MAX_TICK_BPS")
+    universe_max_spread_bps: float = Field(default=5.0, alias="UNIVERSE_MAX_SPREAD_BPS")
+    # SQLite file of the exchange-wide symbol inventory and the 1h futures / spot datasets (empty: <data_dir>/universe.db)
+    universe_db: str = Field(default="", alias="UNIVERSE_DB")
+    # market-context cross-section: 0 = every CONTEXT_UNIVERSE symbol with data that hour (the fixed list, default);
+    # N > 0 = only the N of them with the largest trailing 24h quote volume at that hour
+    context_top_n: int = Field(default=0, alias="CONTEXT_TOP_N")
+
     @field_validator("telegram_owner_id", mode="before")
     @classmethod
     def _blank_owner_id_is_none(cls, v):
@@ -168,6 +182,11 @@ class Settings(BaseSettings):
     @property
     def context_db_path(self) -> Path:
         return Path(self.context_db) if self.context_db else self.data_dir / "context.db"
+
+    # F0: the universe database is research data of its own (inventory, 1h blocks), never the candle database
+    @property
+    def universe_db_path(self) -> Path:
+        return Path(self.universe_db) if self.universe_db else self.data_dir / "universe.db"
 
 
 def load_settings(**overrides) -> Settings:

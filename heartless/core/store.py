@@ -563,3 +563,113 @@ class Store:
         arr = np.concatenate(parts) if parts else np.zeros((0, 5))
         arr[:, 4] = np.nan_to_num(arr[:, 4], nan=0.0)
         return arr[:, 0].astype(np.int64), arr[:, 1].copy(), arr[:, 2].copy(), arr[:, 3].copy(), arr[:, 4].copy()
+
+    # --- F0: exchange-wide symbol inventory and 1h research datasets (heartless/data/symbols_inventory.py) -------------
+    # Created on first write (like market_context), so opening a database only to read it never changes its schema.
+    # symbol_inventory: one row per USD-M archive symbol (kind, quote, asset, archive months, spot market, first / last
+    # hour with trades). klines_1h / spot_klines_1h: one compressed block per (symbol, calendar month) holding that
+    # month's hourly bars (symbols_inventory.encode_month), with the summary the universe ranking reads (rows, first /
+    # last hour with trades, median daily quote volume) as plain columns. A block with n = 0 is a month the archive
+    # listed but did not serve (not re-requested until a rebuild).
+    _F0_TABLES = ("klines_1h", "spot_klines_1h")
+    _F0_INVENTORY_DDL = ("CREATE TABLE IF NOT EXISTS symbol_inventory (symbol TEXT PRIMARY KEY, kind TEXT, quote TEXT, "
+                         "base TEXT, asset TEXT, multiplier REAL, first_month TEXT, last_month TEXT, months INTEGER, "
+                         "missing_months TEXT, spot_symbol TEXT, spot_first_month TEXT, spot_last_month TEXT, "
+                         "spot_months INTEGER, first_trade INTEGER, last_trade INTEGER, updated INTEGER)")
+    _F0_BLOCK_DDL = ("CREATE TABLE IF NOT EXISTS {t} (symbol TEXT NOT NULL, month INTEGER NOT NULL, n INTEGER, "
+                     "first_ts INTEGER, last_ts INTEGER, first_trade INTEGER, last_trade INTEGER, med_dqv REAL, "
+                     "days_traded INTEGER, data BLOB, PRIMARY KEY (symbol, month))")
+    _F0_INVENTORY_COLS = ("symbol", "kind", "quote", "base", "asset", "multiplier", "first_month", "last_month", "months",
+                          "missing_months", "spot_symbol", "spot_first_month", "spot_last_month", "spot_months",
+                          "first_trade", "last_trade", "updated")
+
+    def f0_has(self, table: str) -> bool:
+        return bool(self.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)))
+
+    def save_symbol_inventory(self, rows: Iterable[dict]) -> int:
+        """Insert or replace inventory rows (dicts with the column names; missing_months as a list). The first / last
+        trade hours of a symbol already known from its 1h blocks are kept when a row arrives without them."""
+        cols = self._F0_INVENTORY_COLS
+        data = []
+        for r in rows:
+            d = dict(r)
+            d["missing_months"] = json.dumps(list(d.get("missing_months") or []))
+            data.append(tuple(d.get(c) for c in cols))
+        if not data:
+            return 0
+        self.execute(self._F0_INVENTORY_DDL)
+        upd = ",".join(f"{c}=excluded.{c}" for c in cols[1:] if c not in ("first_trade", "last_trade"))
+        self.executemany(f"INSERT INTO symbol_inventory({','.join(cols)}) VALUES({','.join('?' for _ in cols)}) "
+                         f"ON CONFLICT(symbol) DO UPDATE SET {upd}, "
+                         "first_trade=COALESCE(excluded.first_trade, symbol_inventory.first_trade), "
+                         "last_trade=COALESCE(excluded.last_trade, symbol_inventory.last_trade)", data)
+        return len(data)
+
+    def load_symbol_inventory(self, kind: str | None = None, quote: str | None = None) -> list[dict]:
+        if not self.f0_has("symbol_inventory"):
+            return []
+        sql, params = "SELECT * FROM symbol_inventory WHERE 1=1", []
+        if kind is not None:
+            sql += " AND kind=?"
+            params.append(kind)
+        if quote is not None:
+            sql += " AND quote=?"
+            params.append(quote)
+        out = []
+        for r in self.query(sql + " ORDER BY symbol", params):
+            d = dict(r)
+            d["missing_months"] = json.loads(d["missing_months"] or "[]")
+            out.append(d)
+        return out
+
+    def refresh_inventory_trades(self, table: str = "klines_1h") -> None:
+        """Copy every symbol's first / last hour with trades from its stored 1h blocks into the inventory."""
+        if not (self.f0_has("symbol_inventory") and self.f0_has(table)):
+            return
+        self.execute(f"UPDATE symbol_inventory SET first_trade=(SELECT MIN(first_trade) FROM {table} k WHERE "
+                     f"k.symbol=symbol_inventory.symbol), last_trade=(SELECT MAX(last_trade) FROM {table} k WHERE "
+                     f"k.symbol=symbol_inventory.symbol) WHERE symbol IN (SELECT DISTINCT symbol FROM {table})")
+
+    def save_kline_blocks(self, table: str, rows: Iterable[tuple]) -> int:
+        """(symbol, month, n, first_ts, last_ts, first_trade, last_trade, med_dqv, days_traded, data) rows."""
+        if table not in self._F0_TABLES:
+            raise ValueError(f"unknown block table {table}")
+        rows = list(rows)
+        if rows:
+            self.execute(self._F0_BLOCK_DDL.format(t=table))
+            # the monthly ranking reads every symbol's block of one month
+            self.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_month ON {table}(month)")
+            self.executemany(f"INSERT OR REPLACE INTO {table}(symbol,month,n,first_ts,last_ts,first_trade,last_trade,"
+                             f"med_dqv,days_traded,data) VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
+        return len(rows)
+
+    def kline_block_index(self, table: str, symbol: str | None = None, month: int | None = None) -> list[dict]:
+        """The summary columns of stored blocks (no data), by symbol and month."""
+        if table not in self._F0_TABLES or not self.f0_has(table):
+            return []
+        sql, params = (f"SELECT symbol, month, n, first_ts, last_ts, first_trade, last_trade, med_dqv, days_traded, "
+                       f"LENGTH(data) bytes FROM {table} WHERE 1=1"), []
+        if symbol is not None:
+            sql += " AND symbol=?"
+            params.append(symbol)
+        if month is not None:
+            sql += " AND month=?"
+            params.append(int(month))
+        return [dict(r) for r in self.query(sql + " ORDER BY symbol, month", params)]
+
+    def load_kline_blocks(self, table: str, symbol: str, start: int | None = None,
+                          end: int | None = None) -> list[tuple[int, bytes]]:
+        """(month, data) of a symbol's stored blocks with n > 0 whose month starts in [start, end] (ms), ascending."""
+        if table not in self._F0_TABLES or not self.f0_has(table):
+            return []
+        rows = self.query(f"SELECT month, data FROM {table} WHERE symbol=? AND n>0 AND month>=? AND month<=? "
+                          f"ORDER BY month", (symbol, -(2**62) if start is None else int(start),
+                                              2**62 if end is None else int(end)))
+        return [(int(r["month"]), bytes(r["data"])) for r in rows]
+
+    def kline_block_stats(self, table: str) -> dict:
+        if table not in self._F0_TABLES or not self.f0_has(table):
+            return {"blocks": 0, "symbols": 0, "rows": 0, "bytes": 0, "empty": 0}
+        r = self.query(f"SELECT COUNT(*) b, COUNT(DISTINCT symbol) s, COALESCE(SUM(n),0) n, "
+                       f"COALESCE(SUM(LENGTH(data)),0) z, SUM(n=0) e FROM {table}")[0]
+        return {"blocks": r["b"], "symbols": r["s"], "rows": r["n"], "bytes": r["z"], "empty": r["e"] or 0}

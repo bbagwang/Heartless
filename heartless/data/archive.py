@@ -14,6 +14,7 @@ import csv
 import hashlib
 import io
 import logging
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,10 @@ ARCHIVE_BASES = (
     "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision",
 )
 UM = "data/futures/um"
+# F0: bucket listings (the symbol inventory). The CDN hostname serves objects only; listing needs the S3 endpoint.
+LIST_BASES = ("https://s3-ap-northeast-1.amazonaws.com/data.binance.vision",)
+SPOT = "data/spot"
+_S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 
 
 @dataclass(slots=True)
@@ -85,6 +90,16 @@ def plan_kline_files(symbol: str, start_ms: int, end_ms: int, now_ms: int, inter
                     _ms(cur + timedelta(days=1)) - 1))
         cur = cur + timedelta(days=1)
     return out
+
+
+def monthly_kline_path(symbol: str, month: str, interval: str = "1h", market: str = "um") -> str:
+    """Archive path of one monthly kline file ("YYYY-MM"); market "um" (USD-M futures) or "spot" (F0 datasets)."""
+    root = f"{UM}/monthly/klines" if market == "um" else f"{SPOT}/monthly/klines"
+    return f"{root}/{symbol}/{interval}/{symbol}-{interval}-{month}.zip"
+
+
+def monthly_funding_path(symbol: str, month: str) -> str:
+    return f"{UM}/monthly/fundingRate/{symbol}/{symbol}-fundingRate-{month}.zip"
 
 
 def _rows_from_zip(blob: bytes) -> list[list[str]]:
@@ -201,6 +216,55 @@ class BinanceArchive:
         if last_err is not None:
             raise last_err
         return None
+
+    async def list_prefix(self, prefix: str, delimiter: str | None = "/",
+                          bases: tuple[str, ...] = LIST_BASES) -> tuple[list[str], list[tuple[str, int]]]:
+        """List the bucket under `prefix` (S3 ListObjectsV2, every page via its continuation token): the common
+        prefixes below it (the "directories" when `delimiter` is "/") and the (key, size) of the objects directly in
+        it. F0 inventory: which symbols and monthly files exist, without probing paths one by one."""
+        prefixes: list[str] = []
+        keys: list[tuple[str, int]] = []
+        last_err: Exception | None = None
+        for base in bases:
+            token: str | None = None
+            prefixes, keys = [], []
+            try:
+                while True:
+                    params = {"list-type": "2", "prefix": prefix}
+                    if delimiter:
+                        params["delimiter"] = delimiter
+                    if token:
+                        params["continuation-token"] = token
+                    root = await self._list_page(base, params)
+                    prefixes += [e.text for e in root.iter(f"{_S3_NS}Prefix") if e.text and e.text != prefix]
+                    for c in root.iter(f"{_S3_NS}Contents"):
+                        keys.append((c.findtext(f"{_S3_NS}Key") or "", int(c.findtext(f"{_S3_NS}Size") or 0)))
+                    if root.findtext(f"{_S3_NS}IsTruncated") != "true":
+                        return prefixes, keys
+                    token = root.findtext(f"{_S3_NS}NextContinuationToken")
+                    if not token:
+                        return prefixes, keys
+            except (httpx.HTTPError, ET.ParseError) as e:
+                last_err = e
+                continue
+        raise last_err if last_err is not None else RuntimeError("no listing endpoint")
+
+    async def _list_page(self, base: str, params: dict) -> ET.Element:
+        async with self._sem:
+            for attempt in range(4):
+                try:
+                    r = await self._client.get(base, params=params)
+                except (httpx.TransportError, httpx.TimeoutException):
+                    if attempt == 3:
+                        raise
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                if r.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                r.raise_for_status()
+                return ET.fromstring(r.content)
+        raise RuntimeError("unreachable")
 
     async def _checksum_ok(self, base: str, path: str, blob: bytes) -> bool:
         try:

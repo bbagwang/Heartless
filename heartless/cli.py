@@ -77,8 +77,9 @@ def main(argv: list[str] | None = None) -> None:
     lb.add_argument("--json", action="store_true")
     lb.add_argument("--trades-out", default=None)
     # P2a research options
-    lb.add_argument("--universe", default=None, choices=["core", "extended", "all"],
-                    help="symbol set instead of --symbols: core (12), extended (core + 8 research symbols), all stored")
+    lb.add_argument("--universe", default=None, type=_universe_name,
+                    help="symbol set instead of --symbols: core (12), extended (core + 8 research symbols), all stored, "
+                         "or topN (F0: every symbol top-N by liquidity in a month of the window; docs/UNIVERSE.md)")
     lb.add_argument("--tag", default=None, metavar="FAMILY",
                     help="append this run to the P2 trial ledger docs/results/p2_trials.jsonl under FAMILY")
     dc = sub.add_parser("discover", help="mine rule-based alphas on stored history (TRAIN) and validate them (VALID)")
@@ -92,7 +93,8 @@ def main(argv: list[str] | None = None) -> None:
     dc.add_argument("--tag", default=None, metavar="FAMILY",
                     help="append the search (rules evaluated) to the P2 trial ledger; the t bar then also counts the "
                          "family's earlier trials")
-    dc.add_argument("--universe", default=None, choices=["core", "extended", "all"], help="symbol set instead of --symbols")
+    dc.add_argument("--universe", default=None, type=_universe_name,
+                    help="symbol set instead of --symbols (core, extended, all, topN over --train and --valid)")
     dc.add_argument("--symbols", default=None)
     dc.add_argument("--beam", type=int, default=30)
     dc.add_argument("--depth", type=int, default=3)
@@ -110,6 +112,16 @@ def main(argv: list[str] | None = None) -> None:
     cx.add_argument("--rebuild", action="store_true",
                     help="recompute everything, also a store built from another source / universe (default: resume, "
                          "skip built years, refuse a foreign store)")
+    un = sub.add_parser("universe", help="F0: exchange-wide symbol inventory, 1h / spot datasets, research universe")
+    un.add_argument("action", choices=["inventory", "build", "show", "resolve", "status"])
+    un.add_argument("--start", default=None, help="ISO date (build default 2022-01-01; resolve: window start)")
+    un.add_argument("--end", default=None, help="ISO date, exclusive")
+    un.add_argument("--spot", action="store_true", help="build: spot 1h klines of the perpetuals with a spot market")
+    un.add_argument("--symbols", default=None, help="build: only these (comma separated)")
+    un.add_argument("--rebuild", action="store_true", help="build: download stored months again")
+    un.add_argument("--month", default=None, help="show: the ranked month, YYYY-MM")
+    un.add_argument("--top", type=int, default=40)
+    un.add_argument("--out", default=None, help="write the report / resolution JSON here")
     tr = sub.add_parser("trials", help="P2 trial ledger: evaluated configurations per family and the t_day bar")
     tr.add_argument("--family", default=None)
     tr.add_argument("--ledger", default=None, help="ledger path (default docs/results/p2_trials.jsonl)")
@@ -136,9 +148,17 @@ def main(argv: list[str] | None = None) -> None:
     elif cmd == "lab":
         from heartless.learning.lab import main_cli
 
+        top = _top_universe(settings, args, "lab")
         main_cli(settings, args)
+        _note_top_universe(args, top)
     elif cmd == "discover":
+        top = _top_universe(settings, args, "discover")
         _discover(settings, args)
+        _note_top_universe(args, top)
+    elif cmd == "universe":
+        from heartless.data.symbols_inventory import main_cli as universe_main
+
+        universe_main(settings, args)
     elif cmd == "context":
         _context(settings, args)
     elif cmd == "trials":
@@ -160,6 +180,63 @@ def main(argv: list[str] | None = None) -> None:
             store = Store(settings.db_path)
 
         print(ResearchManager(_Stub()).load_champion().json())
+
+
+def _universe_name(text: str) -> str:
+    from heartless.data.universe import parse_top
+
+    name = text.strip().lower()
+    if name not in ("core", "extended", "all") and parse_top(name) is None:
+        raise argparse.ArgumentTypeError(f"{text!r}: core, extended, all or topN (e.g. top40)")
+    return name
+
+
+def _top_universe(settings, args, cmd: str) -> dict | None:
+    """lab / discover --universe topN (F0): resolve the research universe of the run's window from the 1h universe
+    database and register the symbols that have stored 1m candles under that name in lab.UNIVERSES for this run. The
+    others are reported as skipped (never silently dropped) and recorded in the --out JSON (_note_top_universe)."""
+    from heartless.data import universe as U
+    from heartless.learning import lab
+
+    n = U.parse_top(getattr(args, "universe", None))
+    if n is None:
+        return None
+    try:
+        if cmd == "lab":
+            if args.years:
+                start, end, _ = lab.year_window(args.years)
+            elif args.start and args.end:
+                start, end = lab.parse_when(args.start), lab.parse_when(args.end, end=True)
+            else:
+                raise ValueError(f"--universe {args.universe} needs the window: --years or --start and --end")
+        else:
+            if not args.train:
+                raise ValueError(f"--universe {args.universe} needs --train (and resolves over --valid too)")
+            windows = [_window_arg(args.train)] + ([_window_arg(args.valid)] if args.valid else [])
+            start, end = min(w[0] for w in windows), max(w[1] for w in windows)
+        res = U.resolve_for_run(settings.universe_db_path, settings.db_path, start, end, n)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    lab.UNIVERSES[args.universe] = res["symbols"]
+    print(f"universe {args.universe}: {len(res['research'])} symbols were top {n} in a month of the window; "
+          f"{len(res['symbols'])} have stored 1m candles; skipped {len(res['skipped'])} without 1m candles"
+          + (f": {', '.join(res['skipped'])}" if res["skipped"] else ""), file=sys.stderr, flush=True)
+    if not res["symbols"]:
+        print("error: none of them has stored 1m candles in this database", file=sys.stderr)
+        sys.exit(2)
+    return res
+
+
+def _note_top_universe(args, res: dict | None) -> None:
+    out = getattr(args, "out", None)
+    if res is None or not out or not os.path.exists(out):
+        return
+    with open(out) as f:
+        doc = json.load(f)
+    doc["universe_resolution"] = {k: res[k] for k in ("rule", "research", "symbols", "skipped", "unranked")}
+    with open(out, "w") as f:
+        json.dump(doc, f, default=str, indent=1)
 
 
 def _run(settings) -> None:
@@ -588,7 +665,8 @@ def _discover(settings, args) -> None:
     context = None
     if getattr(args, "context", False):
         context = {"db": str(settings.context_db_path), "universe": settings.context_universe_list,
-                   "build": bool(settings.context_auto_build), "progress": lambda m: print(m, file=sys.stderr, flush=True)}
+                   "build": bool(settings.context_auto_build), "top_n": settings.context_top_n,
+                   "progress": lambda m: print(m, file=sys.stderr, flush=True)}
     n_prior, conf = 0, None
     if tag:
         from heartless.learning import trials
@@ -675,7 +753,7 @@ def _context(settings, args) -> None:
         if args.action == "status":
             meta = dst.get("context.meta") or {}
             st = dst.market_context_stats()
-            ok, status, stable, why = C.usable(src, dst, universe)
+            ok, status, stable, why = C.usable(src, dst, universe, settings.context_top_n)
             verdict = {"same": "usable (same source, universe and definition)",
                        "extended": f"usable up to {_iso(stable)} UTC, newer source history is built on the next run "
                                    f"({why})",
@@ -695,7 +773,7 @@ def _context(settings, args) -> None:
         start = parse_when(args.start) if args.start else None
         end = parse_when(args.end, end=True) if args.end else None
         t0 = time.time()
-        stats = C.build(src, dst, start, end, universe, rebuild=args.rebuild,
+        stats = C.build(src, dst, start, end, universe, rebuild=args.rebuild, top_n=settings.context_top_n,
                         progress=lambda m: print(m, file=sys.stderr, flush=True))
         built = [u for u in stats["units"] if not u.get("skipped")]
         print(f"context: {stats['hours']} hours / {stats['rows']} rows built in {len(built)} year(s), "
