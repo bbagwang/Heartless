@@ -1,0 +1,911 @@
+{
+ "purpose": "Wave F pre-registration: research universe, windows, opportunity classes, gates, maker-execution, shock (regime-switch) and FORWARD-seal protocols, hypothesis pipeline, operating rules and execution order",
+ "pre_registration": "docs/ROADMAP.md section 7 and its section-6 entry of 2026-10-15; the ROADMAP text prevails, a difference is a defect fixed in this file and logged in ROADMAP section 6",
+ "registered_utc_date": "2026-10-15",
+ "state_at_registration": {
+  "f0": [
+   "bd6323c",
+   "f3fdb3f (review)"
+  ],
+  "f7": [
+   "1f07ccd",
+   "17b1a91 (review)"
+  ],
+  "enabled_alphas_shipped": 0,
+  "sealed_periods": [],
+  "spent_periods": [
+   "2025"
+  ],
+  "wave_f_hypotheses_evaluated": 0,
+  "measured_while_writing": "top-40 member and member-month counts only (no performance numbers)"
+ },
+ "windows": {
+  "TRAIN-F": {
+   "start": "2022-01-13",
+   "end_inclusive": "2025-12-31",
+   "lab": "--start 2022-01-13 --end 2026-01-01",
+   "use": "exploration and TRAIN gates of every class; class researchers see only this"
+  },
+  "TRAIN-A": {
+   "start": "2022-01-13",
+   "end_inclusive": "2023-12-31",
+   "use": "pairs_neutral and regime_switch: choose configurations"
+  },
+  "TRAIN-B": {
+   "start": "2024-01-01",
+   "end_inclusive": "2025-12-31",
+   "use": "pairs_neutral and regime_switch: TRAIN gate on the chosen configurations only (<= 2, regime_switch 1)"
+  },
+  "VALID-F": {
+   "start": "2026-01-13",
+   "end_inclusive": "2026-09-30",
+   "lab": "--start 2026-01-13 --end 2026-10-01",
+   "use": "one confirmation per candidate, only for code that never saw 2026; run by the gatekeeper"
+  },
+  "spent_recent_tail": {
+   "start": "2026-10-01",
+   "end_inclusive": "2026-10-06",
+   "use": "not used for gates"
+  },
+  "FORWARD": {
+   "start": "2026-10-07",
+   "use": "30-day sealed blocks (forward_seal) confirming code that saw 2026"
+  }
+ },
+ "code_saw_2026": {
+  "definition": "the alpha/strategy module (or a module it inherits parameters from) was evaluated by lab, backtest, research cycle, replay or discover on a window overlapping 2026-01-01..2026-10-06, or its design/parameters were chosen from 2026 results; shared infrastructure (engine, backtester) does not count",
+  "registered_alphas": "all 16 (discovered included): the 9 originals were designed on 2026, the 4 P2 candidates were VALID-run on 2026, xs_rank_mom / funding_carry_xs / discovered could be evaluated by 2026 replay research cycles",
+  "llm_proposals": "treated as having seen 2026 (the model's training data may cover 2026 markets)",
+  "residual_contamination": "researchers know the P2 VALID (2026) results; recorded as a limitation"
+ },
+ "research_universe": {
+  "rule": "per month m: top 40 USDT perpetuals by the median daily quote volume of month m-1 (stablecoins excluded, listed >= 30 days at the start of m, a relisting counts from its new first trade), delisted symbols included (--universe top40, docs/UNIVERSE.md section 3)",
+  "point_in_time": "only entries in months the symbol was a member count (universe.member_trades); a position held when membership lapses follows its exit rules",
+  "delisting": "forced close at the symbol's last traded hour at that hour's close, slippage 5x nominal (stress 10x); entries are not blocked in advance (announcement dates are not in the data; blocking would use future information)",
+  "fixed_lists": "no gate is judged on core 12 / extended 20 as the universe; those symbols are used like any other in their member months, and the fixed list itself serves evaluator equivalence checks only",
+  "members_without_1m_in_longhist": {
+   "TRAIN-F": {
+    "symbols": 206,
+    "member_months": 1130
+   },
+   "VALID-F": {
+    "symbols": 89,
+    "member_months": 223
+   },
+   "TRAIN-F_all_members": {
+    "symbols": 226,
+    "member_months": 1920
+   },
+   "VALID-F_all_members": {
+    "symbols": 107,
+    "member_months": 360
+   }
+  }
+ },
+ "costs": {
+  "perp": {
+   "taker_bps": 5.0,
+   "maker_bps": 2.0,
+   "slippage_bps": 1.5
+  },
+  "spot": {
+   "taker_bps": 10.0,
+   "maker_bps": 10.0,
+   "slippage_bps": 3.0
+  },
+  "stress": {
+   "fee_mult": 1.5,
+   "slippage_mult": 2.0
+  },
+  "funding": "charged only to positions open at the settlement time s (entered before s, closed after s), on the stored settlement schedule of each symbol (1, 2, 4 and 8 hour intervals occur)",
+  "time_convention": "'the close at t' is the last instant (t - 1 ms) of the 1h bar [t - 1h, t): a position closed at the close at s neither pays nor receives the s settlement, and the s rate is usable from the close at s + 1h",
+  "fills": "decisions use information up to the bar close; market fills at the far side of the synthetic book built from that close plus slippage (as the lab's PaperAccount)"
+ },
+ "statistics": {
+  "directional": "R units; avg_r, PF, t_day = day-clustered t of trades grouped by UTC exit day (lab.group_stats); years by entry time",
+  "neutral": "percent of capital C; daily net PnL marking both legs at each UTC day end (zero days included); t = mean / (sd / sqrt(days)); annualized net return = daily mean x 365; max drawdown on the daily equity curve; calendar years and quarters; weekly-block t kept for information (daily carry PnL is autocorrelated)"
+ },
+ "evaluators": {
+  "lab": {
+   "what": "1m engine with PaperAccount fills",
+   "classes": [
+    "maker_exec",
+    "discovery_f",
+    "1m-decision alphas"
+   ],
+   "data": "top-40 member 1m candles (F-data-1m)"
+  },
+  "hourly_directional": {
+   "module": "heartless/learning/hourly.py (F-pre-A)",
+   "classes": [
+    "liq_cascade",
+    "event_funding",
+    "ai_hypothesis with >= 1h decisions"
+   ],
+   "data": "universe.db 1h klines + funding, OI 1h and premium index 1h (F-data-h)",
+   "exits": "stop, target, time exit only (no breakeven, no trailing); stop first when stop and target fall in the same hour"
+  },
+  "two_leg_neutral": {
+   "module": "F-pre-A shared frame, class rules by the class researcher",
+   "classes": [
+    "carry_neutral",
+    "pairs_neutral"
+   ],
+   "data": "universe.db perp and spot 1h, funding"
+  },
+  "decision_equivalence_before_confirmation": "a 1h-class candidate is ported to an engine alpha module whose decisions (hour, side) match the evaluator on >= 99% over TRAIN on the 20 long-history symbols"
+ },
+ "ledger_and_procedure": {
+  "ledger": "docs/results/p2_trials.jsonl (one append-only ledger for all waves)",
+  "recording": "every evaluator records each evaluated configuration itself (lab/discover --tag, hourly/neutral evaluators as 'screen' lines)",
+  "n": "distinct configurations of the family (discovery: rules searched); maker_exec adds the source family's N",
+  "config_hash": "must include the execution mode 'exec' (F-pre-A); stress, VALID and FORWARD reruns of a configuration do not grow N",
+  "researchers": "see TRAIN only; do not read VALID/FORWARD result files or confirmation sections before their candidates are frozen; an unrecorded evaluation is a protocol violation",
+  "gatekeeper": "separate agent: recomputes TRAIN gates from result files, audits look-ahead (decisions on views cut at the decision bar vs full views, as tests/test_p2_gate.py), runs each confirmation once"
+ },
+ "gates": {
+  "train_directional": {
+   "t_day_ge": "max(3, sqrt(2 ln N_family))",
+   "avg_r_ge": 0.05,
+   "years": [
+    2022,
+    2023,
+    2024,
+    2025
+   ],
+   "years_avg_r_positive_ge": 3,
+   "stress_avg_r_gt": 0.0
+  },
+  "train_regime_switch": {
+   "on": "TRAIN-B",
+   "t_day_ge": "max(3, sqrt(2 ln N_family))",
+   "avg_r_ge": 0.05,
+   "years": [
+    2024,
+    2025
+   ],
+   "years_avg_r_positive_ge": 2,
+   "stress_avg_r_gt": 0.0,
+   "filtered_avg_r_gt_unfiltered_union_avg_r": true
+  },
+  "train_neutral": {
+   "t_daily_net_ge": "max(3, sqrt(2 ln N_family))",
+   "annualized_net_return_gt": 0.02,
+   "annualized_net_return_note": "after all fees and slippage: the draft's 'costs + 2%' (gross must beat costs by 2 points a year)",
+   "max_drawdown_lt": 0.03,
+   "every_year_net_positive": true,
+   "stress_annualized_net_return_gt": 0.0,
+   "forced_liquidations": 0
+  },
+  "valid_directional": {
+   "avg_r_gt": 0.0,
+   "t_day_ge": 1.0
+  },
+  "valid_neutral": {
+   "t_daily_net_ge": 1.0,
+   "every_quarter_net_positive": true,
+   "quarters": [
+    [
+     "2026-01-13",
+     "2026-03-31"
+    ],
+    [
+     "2026-04-01",
+     "2026-06-30"
+    ],
+    [
+     "2026-07-01",
+     "2026-09-30"
+    ]
+   ]
+  },
+  "forward_directional": {
+   "avg_r_gt": 0.0,
+   "t_day_ge": 1.0,
+   "over": "the registered span"
+  },
+  "forward_neutral": {
+   "t_daily_net_ge": 1.0,
+   "span_net_positive": true,
+   "span_blocks": 3,
+   "over": "the registered span (3 blocks, one quarter)"
+  },
+  "stress_in_confirmation": "reported, not gating (as the P2 VALID gate)",
+  "power_note": "a zero-edge candidate passes a confirmation with probability about 0.16 (t >= 1.0 one-sided); the TRAIN gate carries the overfitting control",
+  "on_pass_directional": "enabled_by_default=True (maker_exec: the execution mode becomes the shipped default too); evidence.json verdict 'passed' with TRAIN and confirmation numbers, execution mode and source document; kill-switch expected R = min(TRAIN avg_r, confirmation avg_r); live only after graduation + /golive",
+  "on_pass_neutral": "the strategy engine runs in paper by default; evidence.json strategy entry (kind 'neutral') verdict 'passed'; kill switch = CUSUM of daily net return in TRAIN daily-sd units (k 0.25, h 8, expectation min(TRAIN, confirmation) daily mean) or trailing 30-day net < -1% of strategy capital; live only after graduation + /golive (carry also needs the key's spot trading and universal transfer permissions, auto-detected)",
+  "on_pass_regime_switch": "the per-regime enable table ships on (ensemble per-regime bandit weights 0/1)",
+  "on_pass_ai_hypothesis": "never shipped automatically: paper challenger only (failed-alpha checkpoints 30/60/90 days), one Telegram notice with an approval button; without the owner's approval it stays a challenger (no champion promotion, no shipped default, no live)",
+  "on_fail": "stays off / not shipped; a candidate that reached its confirmation gets evidence verdict 'failed'; configurations stopped at TRAIN stay in the ledger and docs/RESEARCH_F.md only; the same config hash is never confirmed again; a modified variant is a new configuration (TRAIN gate with the grown N, then a confirmation within the family's candidate cap)"
+ },
+ "classes": {
+  "carry_neutral": {
+   "package": "F2",
+   "ledger_tag": "carry_neutral",
+   "kind": "neutral",
+   "source": "spot long + perp short collecting funding (delta neutral); no price forecast; the reverse leg (perp long + spot short) needs spot borrowing and is not traded",
+   "data": "universe.db perp and spot 1h, funding (symbols_inventory.basis_series)",
+   "universe": "top-40 members of month m that have a spot USDT market passing the pairing check (docs/results/f0_spot_coverage.json) and a prior-month median daily spot quote volume >= 5,000,000 USDT",
+   "evaluator": "two_leg_neutral",
+   "decision": "for each settlement time s of the symbol, at the first close after it (the close at s + 1h), the s rate known; inputs: settled funding up to s, basis at the decision, both markets' 1h history; no predicted funding (not in the archive)",
+   "rule": "enter when the annualized mean of the last k settled rates (by the symbol's interval) >= A_in and basis >= -0.5% (no entry when the perp trades more than 0.5% below spot: a basis returning to 0 loses); exit when it is <= A_out; more candidates than slots: highest annualized value first; at most 8 positions",
+   "grid": {
+    "k": [
+     3,
+     9
+    ],
+    "A_in": [
+     0.1,
+     0.2,
+     0.3
+    ],
+    "A_out": [
+     0.0,
+     "A_in/2"
+    ],
+    "size": 12
+   },
+   "sizing": "capital C = spot wallet + futures wallet; each leg notional 0.075 C per symbol (0.6 C / 8); perp isolated 2x (margin = notional / 2), maintenance margin rate fixed at 1.5%; rebalance when the perp close >= 130% of entry (sell spot and cut the perp by the same fraction to restore margin = notional / 2, costs included); a 1h high reaching the liquidation price before the rebalance counts as a forced liquidation losing the whole margin",
+   "round_trip_cost_nominal_bps": 39,
+   "config_cap": 24,
+   "confirmation_candidates_cap": 2,
+   "train": {
+    "window": "TRAIN-F",
+    "gate": "train_neutral",
+    "years": [
+     2022,
+     2023,
+     2024,
+     2025
+    ]
+   },
+   "confirmation": {
+    "window": "VALID-F",
+    "gate": "valid_neutral"
+   },
+   "on_pass": "build the live carry engine (spot orders, wallet transfers, two-leg reconcile), run it in paper by default; live needs the key's spot trading + universal transfer permissions (auto-detected at start; otherwise one line in the start message) + graduation + /golive; leverage <= 2"
+  },
+  "maker_exec": {
+   "package": "F1",
+   "ledger_tag": "maker_exec",
+   "kind": "directional",
+   "source": "the 15 registered alphas (discovered excluded) re-evaluated with maker execution",
+   "params": "shipped defaults, vol_breakout_dbox with its judged comp_q=1.0; no re-tuning in this class",
+   "data": "1m candles, funding, 5m metrics of top-40 member months (F-data-1m)",
+   "universe": "top40 (member windows)",
+   "evaluator": "lab",
+   "grid": {
+    "alphas": 15,
+    "exec": [
+     "maker_m1",
+     "maker_m2"
+    ],
+    "size": 30
+   },
+   "n_for_gate": "N(maker_exec) + N of the alpha's P2 family: ts_trend 27, positioning_flow 21, vol_breakout 23, discovery_daily 105068, xs_rank 20, funding_carry 7; the 9 P1 alphas add 0",
+   "config_cap": 30,
+   "confirmation_candidates_cap": 2,
+   "train": {
+    "window": "TRAIN-F",
+    "gate": "train_directional"
+   },
+   "confirmation": {
+    "window": "FORWARD",
+    "gate": "forward_directional",
+    "reason": "all 15 alphas saw 2026"
+   },
+   "data_condition": "F-data-1m; if the disk is short, rolling-year mode (download one year of 1m, run all 30 configurations nominal + stress, store the trade lists, delete, next year); possible because the grid is fixed",
+   "on_pass": "the alpha runs with maker execution; ORDERBOOK_STREAM on while it is enabled, post-only at the best quote"
+  },
+  "pairs_neutral": {
+   "package": "F2 (second agent)",
+   "ledger_tag": "pairs_neutral",
+   "kind": "neutral",
+   "source": "mean reversion of the spread of two perpetuals tied to the same factor; market exposure hedged by the two legs",
+   "data": "universe.db perp 1h, funding",
+   "universe": "pairs of two top-40 members of month m",
+   "evaluator": "two_leg_neutral",
+   "formation": "at each month start, data before m only: pairs with 90 days of 1h closes; rho = correlation of 1h log returns, beta = OLS slope of log prices clipped to [0.5, 2], spread = log p1 - beta log p2, AR(1) half-life; keep rho >= rho_min and half-life 6..168 h, top K by rho, a symbol in at most 2 pairs",
+   "trading": "beta fixed in month m; z = (spread - mean of prior 720 h) / sd of prior 720 h; enter |z| >= z_in (high spread: short p1, long p2), exit |z| <= 0.5, stop |z| >= z_in + 1.5, exit after max hold H; at most 5 open pairs",
+   "sizing": "first leg 0.1 C, second leg 0.1 C x beta, each leg isolated 2x; perp costs on both legs, funding on both legs",
+   "grid": {
+    "rho_min": [
+     0.7,
+     0.8
+    ],
+    "z_in": [
+     2.0,
+     2.5
+    ],
+    "K": [
+     5,
+     10
+    ],
+    "H_hours": [
+     72,
+     168
+    ],
+    "size": 16
+   },
+   "procedure": "evaluate the whole grid on TRAIN-A (first formation 2022-03-01 when 90 days of history exist); evaluate at most the 2 configurations with the highest TRAIN-A t on TRAIN-B; the gate is judged on TRAIN-B; N counts A and B",
+   "config_cap": 24,
+   "confirmation_candidates_cap": 2,
+   "train": {
+    "window": "TRAIN-B (selection on TRAIN-A)",
+    "gate": "train_neutral",
+    "years": [
+     2024,
+     2025
+    ]
+   },
+   "confirmation": {
+    "window": "VALID-F",
+    "gate": "valid_neutral"
+   }
+  },
+  "liq_cascade": {
+   "package": "F-4 research",
+   "ledger_tag": "liq_cascade",
+   "kind": "directional",
+   "source": "overshoot after forced-liquidation cascades and its partial reversal over the following hours",
+   "data": "universe.db 1h OHLC, quote volume, taker-buy share; OI 1h (F-data-h) for proxy B",
+   "universe": "top40 (member windows)",
+   "evaluator": "hourly_directional",
+   "event_long": "at hour close T: r_1h <= -k x sd of 1h log returns over the prior 720 h; quote volume >= v x median 1h quote volume over the prior 720 h; taker-buy share <= 0.40; proxy B also: OI change over the hour <= -x%",
+   "event_short": "mirror (taker-buy share >= 0.60)",
+   "trade": "enter at the T close; stop = event bar low - 0.5 x 1h ATR(14) (mirror for shorts); no target; unconditional exit after h hours (time_exit); skip when the stop distance > 10%; one position per symbol",
+   "grid": {
+    "proxy_A": {
+     "k": [
+      3,
+      4
+     ],
+     "v": [
+      3,
+      5
+     ],
+     "h_hours": [
+      6,
+      24
+     ],
+     "sides": [
+      "long only",
+      "both"
+     ],
+     "size": 16
+    },
+    "proxy_B": "x in {2%, 4%} on the 4 proxy-A configurations with the highest TRAIN t_day (<= 8)"
+   },
+   "shock_exempt": true,
+   "force_order_stream": "collected only (F5); after >= 6 blocks a new TRAIN on it is pre-registered; Wave F candidates of this class use the proxy only",
+   "config_cap": 24,
+   "confirmation_candidates_cap": 2,
+   "train": {
+    "window": "TRAIN-F",
+    "gate": "train_directional"
+   },
+   "confirmation": {
+    "window": "VALID-F",
+    "gate": "valid_directional"
+   }
+  },
+  "event_funding": {
+   "package": "F-4 research",
+   "ledger_tag": "event_funding",
+   "kind": "directional",
+   "source": "price pressure around funding settlements (the paying side cuts before s and re-opens after)",
+   "not_reused": "funding_fade module and parameters (failed P1)",
+   "data": "universe.db 1h, settled funding; premium index 1h (F-data-h) for E1",
+   "universe": "top40 (member windows)",
+   "evaluator": "hourly_directional",
+   "settlements": "s from the stored settlement records; rates normalized to 8 h (f x 8 / interval hours)",
+   "E1": "at the close at s - j h (j in {1, 2}): if |f_hat| >= f_min enter against the paying side (f_hat > 0: short); exit at the close at s (just before the settlement, no funding exchanged); f_hat = P + clamp(0.01% - P, -0.05%, +0.05%), P = mean 1h premium index over the current settlement interval",
+   "E2": "at the close at s + 1h: if |f_s| >= f_min enter in the paying side's direction (f_s > 0: long); exit at the close at s + 1h + h (h in {3, 6}), never past the close at the next settlement",
+   "stop": "1.5 x 1h ATR(14), no target",
+   "grid": {
+    "E1": {
+     "j": [
+      1,
+      2
+     ],
+     "f_min": [
+      0.0003,
+      0.0005,
+      0.001
+     ]
+    },
+    "E2": {
+     "h_hours": [
+      3,
+      6
+     ],
+     "f_min": [
+      0.0003,
+      0.0005,
+      0.001
+     ]
+    },
+    "size": 12,
+    "order": "E2 first until the premium index data exists; 1m variants only after F-data-1m, same family N"
+   },
+   "config_cap": 24,
+   "confirmation_candidates_cap": 2,
+   "train": {
+    "window": "TRAIN-F",
+    "gate": "train_directional"
+   },
+   "confirmation": {
+    "window": "VALID-F",
+    "gate": "valid_directional"
+   }
+  },
+  "regime_switch": {
+   "package": "F-7 research",
+   "ledger_tag": "regime_switch",
+   "kind": "directional (meta)",
+   "start_condition": ">= 2 directional Wave F candidates passed their TRAIN gate; otherwise recorded as 'no components' and skipped",
+   "regimes": {
+    "volatility": "BTC 30-day realized vol in the low / mid / high tercile of its prior 365 days",
+    "trend": "BTC daily close above / below its 50-day EMA",
+    "shock": "shock state of shock_protocol"
+   },
+   "enable_table": "per component: off in regime r if its TRAIN-A trades in r (regime at entry) number >= n_min with avg_r <= 0; on otherwise",
+   "evaluation": "filter the components' TRAIN-B trade lists by regime at entry and the enable table (independent per-symbol accounts, as the lab)",
+   "grid": {
+    "resolution": [
+     "volatility 3 + shock",
+     "trend 2 + shock",
+     "volatility x trend 6 + shock"
+    ],
+    "n_min": [
+     30,
+     60
+    ],
+    "min_regime_duration": [
+     "none",
+     "24h"
+    ],
+    "size": 12
+   },
+   "config_cap": 12,
+   "confirmation_candidates_cap": 1,
+   "train": {
+    "window": "TRAIN-B (table from TRAIN-A)",
+    "gate": "train_regime_switch"
+   },
+   "confirmation": {
+    "window": "FORWARD",
+    "gate": "forward_directional",
+    "how": "filter the components' confirmation trade lists of the same blocks"
+   }
+  },
+  "discovery_f": {
+   "package": "F3a",
+   "ledger_tag": "discovery_f",
+   "kind": "directional",
+   "source": "rule discovery on a versioned, expanded feature set",
+   "feature_set": "existing features (vwap_z first-bar fix of F-pre-B included) + historical F5 features (basis z, premium index, proxy liquidation events, time to the next settlement); live-only features (book imbalance, forceOrder) only after >= 6 blocks are collected",
+   "command": "discover --universe top40 --train 2022-01-13:2025-01-01 --valid 2025-01-01:2026-01-01 --grid 1h,1d --templates all --context --tag discovery_f",
+   "n": "rules searched, summed over versions",
+   "cadence": "one discovery run per feature-set version, at most one version a month",
+   "candidates": "at most 2 self-validated rules per version, ported to standalone alpha files, lab TRAIN gate on TRAIN-F",
+   "data": "1m (F-data-1m)",
+   "universe": "top40 resolved on --train only",
+   "evaluator": "discover + lab",
+   "config_cap": "one discovery run per version",
+   "confirmation_candidates_cap": "2 per quarter",
+   "train": {
+    "window": "TRAIN-F",
+    "gate": "train_directional"
+   },
+   "confirmation": {
+    "window": "VALID-F",
+    "gate": "valid_directional",
+    "exception": "FORWARD when the rule matches a P2 VALID-tested rule (same features and direction, thresholds within +-10%)"
+   }
+  },
+  "ai_hypothesis": {
+   "package": "F3b",
+   "ledger_tag": "ai_hypothesis",
+   "kind": "directional",
+   "active": "only when ANTHROPIC_API_KEY is set (the owner supplies Binance keys only, so off by default)",
+   "cadence": "at most one proposal a week, at most 4 configurations per proposal; family N sums all proposals",
+   "inputs": "these rules, the alpha interface, ledger summary, per-class TRAIN summaries; never VALID or FORWARD results",
+   "sandbox": "code under <data dir>/proposals/; separate process, no network, no file writes, allow-listed imports (math, numpy, heartless.strategy.base, heartless.data.features ...), CPU 30 min, memory 1.5 GB",
+   "frames": "decisions of 1h or longer while 1m member data is missing",
+   "pipeline": [
+    "static checks",
+    "import",
+    "invariants: symbol rename, prices x1000 / x0.001 / x1024, same decisions on views cut at the decision bar",
+    "ledger record",
+    "TRAIN gate (evaluator matching the decision frame)",
+    "FORWARD registration (>= 2 blocks)"
+   ],
+   "not_counted": "proposals failing the invariants were never evaluated on data: not in N, kept in a separate log",
+   "config_cap": "4 per proposal",
+   "confirmation_candidates_cap": "1 per FORWARD block",
+   "train": {
+    "window": "TRAIN-F",
+    "gate": "train_directional"
+   },
+   "confirmation": {
+    "window": "FORWARD",
+    "gate": "forward_directional",
+    "min_blocks": 2
+   },
+   "owner_line": "never beyond a paper challenger without the owner's approval button; the bot does not ask questions"
+  }
+ },
+ "maker_execution": {
+  "setting": "engine params['exec'][alpha] in {taker (default), maker_m1, maker_m2}; not an alpha ParamSpec (that would change every parameter-schema fingerprint and make all evidence entries 'untested'); part of the trial config hash",
+  "maker_m1": "market signals become a post-only limit at the decision bar close; cancel after 1 decision bar (max 60 min); no re-quote, no market fallback",
+  "maker_m2": "retest limit at close -/+ 0.25 x signal ATR (long below, short above); cancel after 3 decision bars (max 240 min); drop the signal when the limit is beyond the stop",
+  "limit_signals": "alphas that already emit a limit keep their limit price; only the validity rule above applies (no re-quote)",
+  "sizing": "quantity recomputed from the limit price and the stop (0.5% risk per trade, P0b rule)",
+  "fill_model": {
+   "trade_through": "a resting buy fills only when the 1m low trades below the limit by at least half the synthetic spread (sell mirrored); a touch does not fill (PaperAccount rule)",
+   "eligible_from": "the 1m bar after placement",
+   "volume": "no fill in a 1m bar whose quote volume < 20 x the order notional",
+   "price_fee": "fill at the limit, maker fee 2 bp, no slippage; exits (stops etc.) stay taker",
+   "stress": "trade-through by the full synthetic spread, fees x1.5, taker slippage x2"
+  },
+  "gates": "the same directional gates (TRAIN-F, then FORWARD)"
+ },
+ "shock_protocol": {
+  "code": "heartless/strategy/shock.py, the same code in backtest, lab, replay and live (F-pre-B); offline = online equivalence test",
+  "fixed": "definitions are fixed and never tuned on performance",
+  "detection": {
+   "S0": "BTC 5-minute move >= 3% -> 15 minutes without new entries (existing live rule, added to the backtester); every minute",
+   "S1": "|BTC 1h log return| >= 4 x sd of the prior 720 hourly returns; hourly",
+   "S2": "BTC 24h realized vol (sqrt of the sum of squared 1h returns) >= 2.5 x median of the same statistic over the prior 30 days; hourly",
+   "S3": "mean 24h correlation of 1h returns with BTC over the 40 perpetuals with the highest prior-24h quote volume (the context top_n member definition) >= 0.80 and >= its prior 30-day mean + 0.25; hourly"
+  },
+  "shock_state": "starts at the hour close where any of S1-S3 fires; ends after 24 h without a firing",
+  "responses": {
+   "entry_halt": "for 2 hours from the hour close of an S1-S3 firing no new entries (every decision frame), resting entry limits cancelled; open positions keep their stops, targets and time limits; shock_exempt alphas (liq_cascade) excluded; on by default",
+   "regime_table": "the shock-regime enable table, only when a regime_switch candidate passed",
+   "kill_switch": "CUSUM alarm h 8 -> 6 for 30 days after the latest firing (k and the 30-trade sum unchanged); on by default",
+   "revalidation_window": "research cycle window 120 -> 45 days from the start of a shock state until 45 days after the last firing; research proposal rules and challenger checkpoints/thresholds unchanged"
+  },
+  "unchanged": [
+   "TRAIN / VALID / FORWARD gates",
+   "challenger checkpoints and t thresholds",
+   "graduation criteria"
+  ],
+  "reporting": "after F-pre-B, lab results include the entry halt and S0; F-pre-B reports only the number of shock hours and blocked decisions in TRAIN-F (no performance numbers)"
+ },
+ "forward_seal": {
+  "origin_utc": "2026-10-07T00:00:00Z",
+  "block_days": 30,
+  "rule": "FWD-k starts at origin + 30 (k-1) days, end exclusive",
+  "blocks": [
+   {
+    "id": "FWD-01",
+    "start": "2026-10-07",
+    "last_day": "2026-11-05",
+    "start_ms": 1791331200000,
+    "end_ms_exclusive": 1793923200000,
+    "registrable": false
+   },
+   {
+    "id": "FWD-02",
+    "start": "2026-11-06",
+    "last_day": "2026-12-05",
+    "start_ms": 1793923200000,
+    "end_ms_exclusive": 1796515200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-03",
+    "start": "2026-12-06",
+    "last_day": "2027-01-04",
+    "start_ms": 1796515200000,
+    "end_ms_exclusive": 1799107200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-04",
+    "start": "2027-01-05",
+    "last_day": "2027-02-03",
+    "start_ms": 1799107200000,
+    "end_ms_exclusive": 1801699200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-05",
+    "start": "2027-02-04",
+    "last_day": "2027-03-05",
+    "start_ms": 1801699200000,
+    "end_ms_exclusive": 1804291200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-06",
+    "start": "2027-03-06",
+    "last_day": "2027-04-04",
+    "start_ms": 1804291200000,
+    "end_ms_exclusive": 1806883200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-07",
+    "start": "2027-04-05",
+    "last_day": "2027-05-04",
+    "start_ms": 1806883200000,
+    "end_ms_exclusive": 1809475200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-08",
+    "start": "2027-05-05",
+    "last_day": "2027-06-03",
+    "start_ms": 1809475200000,
+    "end_ms_exclusive": 1812067200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-09",
+    "start": "2027-06-04",
+    "last_day": "2027-07-03",
+    "start_ms": 1812067200000,
+    "end_ms_exclusive": 1814659200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-10",
+    "start": "2027-07-04",
+    "last_day": "2027-08-02",
+    "start_ms": 1814659200000,
+    "end_ms_exclusive": 1817251200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-11",
+    "start": "2027-08-03",
+    "last_day": "2027-09-01",
+    "start_ms": 1817251200000,
+    "end_ms_exclusive": 1819843200000,
+    "registrable": true
+   },
+   {
+    "id": "FWD-12",
+    "start": "2027-09-02",
+    "last_day": "2027-10-01",
+    "start_ms": 1819843200000,
+    "end_ms_exclusive": 1822435200000,
+    "registrable": true
+   }
+  ],
+  "sealed_scope": "sealed from its start until opened (seal.py schedule, F4); lab, discover, backtest --start/--end, replay, hourly/neutral evaluators and screening scripts refuse overlapping windows; the live bot's automated loops (research cycle, discovery, challengers, kill switch) keep running on the operations DB because they make no pre-registered decision and their results are never used for confirmations",
+  "registration": {
+   "ledger": "docs/results/forward_registrations.jsonl (append-only)",
+   "fields": [
+    "candidate",
+    "family",
+    "config_hash",
+    "code_hash",
+    "evaluator",
+    "exact command",
+    "gate",
+    "blocks",
+    "registered_utc",
+    "commit"
+   ],
+   "deadline": "registered_utc before the start of the span's first block",
+   "how": "the gatekeeper registers after its audit with 'heartless forward register'; the bot's automated path (F3b) calls the same code; target = the earliest block starting >= 24 h later"
+  },
+  "span": {
+   "directional": "smallest number of blocks (1-3) whose expected trades (TRAIN trades per 30 days) >= 100, else 3",
+   "neutral": 3,
+   "ai_hypothesis_min": 2
+  },
+  "opening": "after the block ends and its data is complete (all needed member 1m or 1h bars and every funding settlement, from the archive including universe build month/day files, or the bot's stored records): 'heartless forward confirm FWD-k' runs every registration ending at that block once (nominal + stress), writes docs/results/fwd_<block>_<candidate>.json, appends one seal-ledger line (docs/results/seal_ledger.jsonl) listing the runs, and moves the block to SPENT; a block without registrations is opened empty the same way",
+  "multi_block": "earlier blocks open on schedule, but the span's candidate is evaluated once when its last block opens; a config hash with an open registration cannot be evaluated on windows overlapping its span (F4 refuses)",
+  "reruns": "only a run that produced no result, with the reason in the registration ledger",
+  "fwd_01": "started before this registration: nothing can be registered on it; it opens empty when complete; the first registrable block is FWD-02 (2026-11-06)",
+  "spent_blocks": "ordinary history; TRAIN-F is not extended (that needs a new registration)"
+ },
+ "operating_rules": {
+  "universe": "live universe = universe.live_selection (USDT perpetual, TRADING, no stablecoins, listed 30 days, 24h quote volume, tick <= 10 bp, book spread <= 5 bp) top UNIVERSE_SIZE, re-selected hourly; no hard-coded coins",
+  "always_include": "BTCUSDT by default, a data subscription for the regime/context reference, not a trading guarantee; separated from the traded list in the F6 rewiring",
+  "context": {
+   "research": "stores built with top_n = 40 over every research-universe member of the window",
+   "live": "F6 rewiring sets CONTEXT_TOP_N = 40 over every perpetual passing the live exchange filters; the fixed 20-symbol CONTEXT_UNIVERSE is retired"
+  },
+  "invariants": "alpha/strategy code never reads symbol names; a new alpha must pass the invariant tests (rename, price multiples) and the cut-at-decision test before its ledger record",
+  "latency_budget": {
+   "published_in": [
+    "/health",
+    "daily report",
+    "replay report"
+   ],
+   "feature_update_ms": {
+    "p50_lt": 1,
+    "p99_lt": 5
+   },
+   "close_to_decision_ms": {
+    "p99_lt": 1000
+   },
+   "close_to_sent_ms": {
+    "p99_lt": 1500
+   },
+   "sent_to_ack_ms_live": {
+    "p99_lt": 1000
+   },
+   "startup_checks_s": {
+    "lt": 3
+   },
+   "breach": "p99 over target 3 days in a row is flagged in the daily report; no automatic setting change"
+  },
+  "incremental_features": true,
+  "orderbook_stream": "on while an enabled alpha reads ctx.book or trades with maker execution",
+  "book_guard": "skip an entry when the spread >= 3 x its own prior-24h median and >= 5 bp, or depth within +-10 bp < 25% of its own prior-24h median; history uses the conservative bar_book_proxy (relative thresholds keep the meaning); same rule in backtest and live (F-pre-B)",
+  "data_budget": "new data hourly by default in universe.db; 1m only for member months (+ warm-up) of 1m-decision classes"
+ },
+ "prerequisites": [
+  {
+   "package": "F-pre-A research tools",
+   "files": [
+    "heartless/learning/lab.py",
+    "heartless/learning/discovery.py",
+    "heartless/learning/trials.py",
+    "new heartless/learning/hourly.py"
+   ],
+   "content": "member-window filtering in lab and discover; lab context top_n; ledger period labels TRAIN-F/A/B, VALID-F, FWD-k and 'exec' in the config hash; hourly and neutral evaluators (self-recording, delisting close, daily equity)",
+   "acceptance": "tests; evaluator equivalence with a deterministic non-signal reference alpha (long at every 24th hour close, 2 ATR stop, 12 h exit) on the 20 long-history symbols in 2024: >= 99% of trades matched with the lab, mean absolute per-trade R difference <= 0.02 R"
+  },
+  {
+   "package": "F-pre-B engine",
+   "files": [
+    "heartless/learning/backtester.py",
+    "heartless/execution/engine.py",
+    "heartless/strategy/base.py",
+    "new heartless/strategy/shock.py",
+    "heartless/data/indicators.py or heartless/data/features.py",
+    "heartless/exchange/paper.py"
+   ],
+   "content": "shock layer, execution modes, Context.book field and backtester proxy wiring, book guard, vwap_z first-bar fix, backtester delisting close, maker fill extras (next bar, 20x volume)",
+   "acceptance": "tests; with exec taker, shock layer off and book guard off the existing lab trade list is byte-identical (the F7 htf_trend hash); only counts of trades changed by the shock layer and the guard are reported"
+  },
+  {
+   "package": "F4 forward seal",
+   "files": [
+    "heartless/learning/seal.py",
+    "new heartless/learning/forward.py",
+    "heartless/cli.py (forward commands)"
+   ],
+   "content": "forward_seal in full",
+   "acceptance": "tests: sealed refusal, registration deadline, run-once, empty opening, live-loop exemption"
+  },
+  {
+   "package": "F6 deployment + F5 collection",
+   "files": [
+    "heartless/app.py",
+    "heartless/exchange/binance_ws.py",
+    "heartless/core/store.py",
+    "heartless/notify/formatter.py",
+    "heartless/replay/runner.py",
+    "Dockerfile / docker-compose.yml",
+    "README.md",
+    ".env.example"
+   ],
+   "content": "F0 leftovers (live selection, reference symbols data-only, CONTEXT_TOP_N), F7 leftovers (uvloop, daily-report latency line), shock layer in the app (replacing _btc_shock_check), 24/7 docker-compose, restart-recovery replay test, weekly report (per-alpha evidence, challenger checkpoints, kill switch, shocks); F5: hourly per-symbol forceOrder aggregates and hourly book summaries stored",
+   "acceptance": "full test suite; 3-day integration replay with 0 violations"
+  },
+  {
+   "package": "F-data-h",
+   "files": [
+    "heartless/data/symbols_inventory.py",
+    "heartless/data/archive.py",
+    "heartless/cli.py (universe build options)"
+   ],
+   "content": "OI 1h (from the 5m metrics archive) and premium index 1h for top-40 member months into universe.db, <= 250 MB",
+   "acceptance": "row counts; hourly values equal the long-history 5m OI on the 20 symbols"
+  },
+  {
+   "package": "F-data-1m",
+   "files": [
+    "heartless fetch (no code change)"
+   ],
+   "content": "1m candles of member months for 1m-decision classes: TRAIN-F 206 symbols / 1,130 symbol-months and VALID-F 89 / 223 not in the long-history DB; with 1-3 months of warm-up TRAIN-F 1,488-1,949 symbol-months (about 6.1 MB each, about 9-12 GB) and VALID-F 320-485 (about 2-3 GB, needed only for discovery_f confirmations)",
+   "acceptance": "free disk >= estimate + 3 GB before downloading; otherwise maker_exec in rolling-year mode (about 2.5-3.5 GB a year); otherwise recorded as blocked_data and no substitute universe is used"
+  }
+ ],
+ "execution_order": [
+  {
+   "wave": "F-1",
+   "parallel": [
+    "F-pre-A research tools",
+    "F-pre-B engine, shock layer, maker modes"
+   ]
+  },
+  {
+   "wave": "F-2",
+   "parallel": [
+    "F4 forward seal",
+    "F6 deployment + F5 forward collection"
+   ]
+  },
+  {
+   "wave": "F-3",
+   "parallel": [
+    "carry_neutral",
+    "pairs_neutral"
+   ],
+   "note": "1h data exists now"
+  },
+  {
+   "wave": "F-4",
+   "parallel": [
+    "F-data-h then liq_cascade",
+    "event_funding (E2 first)"
+   ]
+  },
+  {
+   "wave": "F-5",
+   "parallel": [
+    "gatekeeper: TRAIN recomputation and audit, VALID once each, FORWARD registrations"
+   ]
+  },
+  {
+   "wave": "F-6",
+   "parallel": [
+    "F-data-1m (disk condition) then maker_exec then discovery_f",
+    "F3b AI pipeline implementation (runs only with a key)"
+   ]
+  },
+  {
+   "wave": "F-7",
+   "parallel": [
+    "regime_switch (>= 2 directional TRAIN passes)"
+   ]
+  },
+  {
+   "wave": "continuous",
+   "parallel": [
+    "FORWARD confirmation session per block (F4 tool), decisions applied by the gatekeeper"
+   ]
+  }
+ ],
+ "order_rationale": "maker re-evaluation needs about 9-12 GB of 1m data with 1-2 GB free, so the 1h classes whose data exists go first; the FORWARD seal must exist before any FORWARD-bound candidate; deployment starts early because live data takes time to accumulate",
+ "concurrency": "at most 2 agents at once; the two tasks of a wave own disjoint files; full tests, review and commit at the end of each wave",
+ "deliverables": {
+  "class_researcher": [
+   "class evaluation code (new files)",
+   "ledger lines",
+   "docs/results/wf_<tag>_*.json",
+   "the class section of docs/RESEARCH_F.md",
+   "candidates ported to alpha/strategy modules, committed disabled by default"
+  ],
+  "gatekeeper": [
+   "docs/results/wf_decisions.json",
+   "confirmation result files",
+   "evidence.json and enabled_by_default updates",
+   "Wave F rows in ROADMAP section 5"
+  ]
+ },
+ "decision_principles": [
+  "no class passes: the bot keeps researching, discovering and running challengers in paper; an acceptable outcome",
+  "leverage: carry/neutral <= 2x; directional alphas keep the existing risk budget (0.5% per trade)",
+  "spot permission auto-detected: present -> a passed carry becomes a live candidate; absent -> carry stays paper with one line in the start message",
+  "live only via graduation + /golive",
+  "short of disk or data: the class waits; no substitute universe or shorter window"
+ ],
+ "will_not_do": [
+  "lower a gate",
+  "change criteria after seeing results",
+  "register after seeing a sealed block",
+  "judge a gate on a fixed symbol list",
+  "retry 1-5 minute scalping"
+ ],
+ "results": {
+  "registration": "docs/results/wave_f_registration.json",
+  "ledger": "docs/results/p2_trials.jsonl",
+  "forward_registrations": "docs/results/forward_registrations.jsonl",
+  "seal_ledger": "docs/results/seal_ledger.jsonl",
+  "class_results": "docs/results/wf_<tag>_*.json",
+  "decisions": "docs/results/wf_decisions.json",
+  "report": "docs/RESEARCH_F.md",
+  "evidence": "heartless/strategy/evidence.json"
+ }
+}
