@@ -401,7 +401,10 @@ class TradingEngine:
         entries sent. Callers run it once every symbol's bar at the close has been processed (Backtester: each
         timeline step; app: when the batch is complete)."""
         batch, self._batch = self._batch, []
-        if not batch or self.allocator is None:
+        # entries switched off after the close was queued (the live -> paper flatten sets entries_enabled False, then
+        # closes everything and checks nothing is left): the FIFO path reads the flag right before it opens, so a
+        # queued candidate must not open after it either
+        if not batch or self.allocator is None or not self.entries_enabled:
             return 0
         now = self.clock()
         equity = await self.equity()
@@ -410,6 +413,8 @@ class TradingEngine:
                 c.meta = self._meta_eval(c.view, c.ctx, c.decision)
         sent = 0
         for c in self.allocator.rank(batch, self.bandit):
+            if not self.entries_enabled:
+                break  # switched off while an earlier candidate's order was being sent
             allowed, why = self.risk.can_open(c.decision, self.open_positions(), now, equity)
             if allowed:
                 plan = await self._plan_entry(c.decision, c.view, c.ctx, equity, c.meta)

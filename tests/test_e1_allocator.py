@@ -377,3 +377,95 @@ def test_full_app_replay_with_the_allocator_passes_every_invariant(tmp_path):
         s = run_replay(cfg)
     assert s["passed"] and s["invariants"]["violations_total"] == 0, s["report"]
     assert flushed and sum(flushed) == s["trades"]["opened"]["paper"] >= 1
+
+
+# --- review fixes ---------------------------------------------------------------------------------------------------
+
+async def test_a_queued_batch_never_opens_once_entries_are_disabled():
+    """The live -> paper switch sets entries_enabled False, flattens and checks nothing is left: a batch queued before
+    the flag flipped must not open afterwards (FIFO reads the flag right before it opens)."""
+    eng, acc = _engine(True, {"DDDUSDT": 0.95, "CCCUSDT": 0.9})
+    await _bar_all(eng, acc)
+    assert eng.queued_entries == 4
+    eng.entries_enabled = False
+    assert await eng.flush_entries() == 0
+    assert eng.positions == {} and eng.queued_entries == 0
+    # switched off while the batch is being admitted: the candidates after the order in flight are dropped
+    eng.entries_enabled = True
+    await _bar_all(eng, acc)
+    orig = eng._place_entry
+
+    async def place_then_disable(plan):
+        await orig(plan)
+        eng.entries_enabled = False
+
+    eng._place_entry = place_then_disable  # type: ignore[method-assign]
+    assert await eng.flush_entries() == 1 and list(eng.positions) == ["DDDUSDT"]
+
+
+def test_beta_history_is_seeded_into_a_recreated_engine_of_the_same_name(tmp_path):
+    """The live engine after a paper -> live -> paper -> live round trip, or a fresh challenger in a reused slot, starts
+    with an empty estimator under a name that was seeded before: it must be seeded again (not sit at beta 1.0 for a
+    week), and each estimator asks the store once per symbol."""
+    from heartless.app import Heartless
+    from heartless.core.models import Candle
+    from heartless.core.store import Store
+    from heartless.util.timeutil import now_ms
+
+    st = Store(tmp_path / "b.db")
+    rb, pb = _walk(400, 11)
+    _, pa = _walk(400, 12, beta=2.0, base=rb)
+    h0 = (now_ms() // H - 401) * H
+    for sym, px in (("BTCUSDT", pb), ("ETHUSDT", pa)):
+        st.save_candles(sym, [Candle(h0 + i * H + 59 * MS_MINUTE, p, p, p, p, 1.0, p, 1, 0.5,
+                                     h0 + (i + 1) * H - 1) for i, p in enumerate(px)])
+    app = Heartless.__new__(Heartless)
+    app.store, app.views = st, {"ETHUSDT": None}
+    queries = []
+    orig_query = st.query
+    st.query = lambda sql, args=(): queries.append(args[0]) or orig_query(sql, args)  # type: ignore[method-assign]
+    for _ in range(2):  # the same name twice, a new engine (and estimator) each time
+        eng = SimpleNamespace(name="live", allocator=PortfolioAllocator(settings()))
+        app._prime_beta(eng)
+        app._prime_beta(eng)  # once per estimator and symbol
+        assert eng.allocator.beta.beta("ETHUSDT") == pytest.approx(2.0, abs=0.2)
+    assert sorted(queries) == ["BTCUSDT", "BTCUSDT", "ETHUSDT", "ETHUSDT"]
+    st.close()
+
+
+async def test_a_straggler_batch_is_planned_on_the_bar_it_was_decided_on(tmp_path, monkeypatch):
+    """A symbol's bar of close T is missing: the next close's first bar admits T's batch, and does so before that bar
+    moves its symbol's view, so every candidate of T is planned (meta vector, fallback price) on the bar of T."""
+    from heartless.app import Heartless
+    from heartless.strategy.ensemble import Ensemble
+    from tests.test_app_offline import SYMS as APP_SYMS, FakeRest, _bootstrap
+
+    from heartless.util.timeutil import now_ms
+
+    n_hist = 3000
+    start = (now_ms() - (n_hist + 400) * MS_MINUTE) // MS_MINUTE * MS_MINUTE
+    candles = {s: synth_candles(n_hist + 10, seed=i, start_ms=start, price=100 * (i + 1)) for i, s in enumerate(APP_SYMS)}
+    s = settings(HEARTLESS_DATA_DIR=str(tmp_path), HISTORY_DAYS=3, UNIVERSE_SIZE=3, ALWAYS_INCLUDE=",".join(APP_SYMS),
+                 WEB_ENABLED=False, TELEGRAM_BOT_TOKEN="", PORTFOLIO_ALLOCATOR=True)
+    app = Heartless(s)
+    app.rest = FakeRest(dict(candles))
+    await _bootstrap(app, candles, n_hist)
+    assert app.engines["paper"].allocator is not None
+    seen: list[tuple[str, int, int]] = []
+
+    async def record(self):
+        seen.extend((c.symbol, c.ctx.now, c.view.cursor_time) for c in self._batch)
+        self._batch = []
+        return 0
+
+    monkeypatch.setattr(TradingEngine, "flush_entries", record)
+    monkeypatch.setattr(Ensemble, "decide", lambda self, view, ctx: SimpleNamespace(symbol=ctx.symbol))
+    straggler = APP_SYMS[-1]
+    t = int(candles[APP_SYMS[0]].close_time[n_hist])
+    for sym in APP_SYMS:
+        if sym != straggler:  # its bar of close t never comes
+            await app._process_bar(sym, candles[sym].candle_at(n_hist))
+    assert seen == [] and app._batch_t == t
+    await app._process_bar(APP_SYMS[0], candles[APP_SYMS[0]].candle_at(n_hist + 1))  # close t + 1 minute
+    assert sorted(seen) == sorted((sym, t, t) for sym in APP_SYMS if sym != straggler)
+    app.store.close()

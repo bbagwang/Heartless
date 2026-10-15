@@ -83,6 +83,10 @@ class BetaEstimator:
         self.lo, self.hi = float(lo), float(hi)
         self._bars: dict[str, deque] = {}  # symbol -> deque[(hour open ms, close)], oldest first
         self._cache: dict[str, tuple[int, int, float]] = {}  # symbol -> (its last hour, BTC's last hour, beta)
+        # symbols whose stored history was already asked for (Heartless._prime_beta): kept on the estimator, not per
+        # engine name, because a re-created engine (live after a mode switch, a fresh challenger in a reused slot)
+        # starts with an empty estimator and must be seeded again
+        self.tried: set[str] = set()
 
     def observe(self, symbol: str, hour_open: int, close: float) -> None:
         if not (close > 0 and math.isfinite(close)):

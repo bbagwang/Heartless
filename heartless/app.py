@@ -100,11 +100,9 @@ class Heartless:
     _depth_tried: dict | None = None
     # why the live context store is not used (it records another candle database), "" while it is (integration)
     _ctx_off: str = ""
-    # P3 signal batching: close time of the open entry batch, the traded symbols whose bar at it was processed, and the
-    # (engine, symbol) pairs whose BTC-beta history was already seeded from the store
+    # P3 signal batching: close time of the open entry batch and the traded symbols whose bar at it was processed
     _batch_t: int | None = None
     _batch_seen: set | None = None
-    _beta_tried: set | None = None
 
     def __init__(self, settings: Settings):
         self.s = settings
@@ -1105,6 +1103,9 @@ class Heartless:
             if sym in self.context_only:
                 await self._process_context_bar(sym, c)
             return
+        # P3: a bar of a later close while an older close's batch is still open (a straggler): admit that batch first,
+        # before this bar moves the symbol's view (a queued candidate of it is planned on the bar it was decided on)
+        await self._entry_batch_roll(c.close_time)
         # gap detection: fetch missing bars if the stream skipped some
         missing: list[Candle] = []
         if ca.n and c.open_time - int(ca.open_time[ca.n - 1]) > MS_MINUTE and sym not in self._backfilling:
@@ -1146,7 +1147,6 @@ class Heartless:
             self.regimes[sym] = detect_regime(view)
         await self._ensure_context(c.close_time)  # the hour's market snapshot exists before any engine decides
         ctx = self._context(sym, c.close_time)
-        await self._entry_batch_roll(c.close_time)  # P3: an older close's open batch is admitted first
         for eng in list(self.engines.values()):
             try:
                 await eng.on_bar(view, ctx)
@@ -1291,15 +1291,12 @@ class Heartless:
         joint backtester seeds it from the history before its window the same way."""
         from heartless.execution.allocator import hourly_closes
 
-        if self._beta_tried is None:
-            self._beta_tried = set()
         beta = eng.allocator.beta
         now = now_ms()
         for sym in sorted(set(self.views) | {beta.btc}):
-            key = (eng.name, sym)
-            if key in self._beta_tried:
+            if sym in beta.tried:  # once per estimator: a re-created engine of the same name is seeded again
                 continue
-            self._beta_tried.add(key)
+            beta.tried.add(sym)
             try:
                 rows = self.store.query("SELECT open_time, close FROM candles WHERE symbol=? AND open_time>=? AND "
                                         "open_time<? AND open_time % 3600000 = 3540000 ORDER BY open_time",

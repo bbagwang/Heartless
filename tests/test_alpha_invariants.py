@@ -196,3 +196,18 @@ def check_brackets(signals: dict) -> None:
             assert math.isfinite(s.atr) and s.atr > 0
             assert s.max_hold_bars > 0 and s.timeframe in ("1m", "5m", "15m", "1h", "4h", "1d")
             assert s.side in (Side.LONG, Side.SHORT)
+
+
+def test_no_emitted_signal_sets_an_execution_opt_in(signals, long_run):
+    """E1 opt-ins stay off for every shipped alpha (their evidence was measured without them), checked on every signal
+    the two drives produced rather than on the source text, which an assignment such as `sig.time_exit = True` or a
+    keyword passed through a dict would slip past."""
+    from heartless.core.models import Signal
+
+    default = Signal(alpha="x", symbol=SYM, side=Side.LONG, confidence=0.5, reason="x", stop=1.0, take_profit=None,
+                     tp1=None)
+    keys = ("time_exit", "allow_renewal", "exit_on_opposite", "cooldown_bars", "avoid_funding")
+    emitted = [s for v in signals.values() for s, _ in v] + [s for v in long_run[0].values() for s, _, _ in v]
+    assert emitted
+    for s in emitted:
+        assert tuple(getattr(s, k) for k in keys) == tuple(getattr(default, k) for k in keys), (s.alpha, s)
