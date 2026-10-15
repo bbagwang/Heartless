@@ -215,11 +215,14 @@ def _vol24(grid: dict[str, np.ndarray], idx: np.ndarray, ok: np.ndarray) -> np.n
 
 def _top_mask(vol: np.ndarray, top_n: int) -> np.ndarray:
     """Per row, the top_n symbols by `vol` (finite values only; equal volumes go to the lower column, i.e. the name)."""
+    # A stable sort of -vol per row puts equal volumes in column order, so a symbol's position is the number of larger
+    # volumes plus the equal ones in lower columns: O(S log S) per row instead of S x S comparison matrices (a year of
+    # 120 symbols took 300 MB and 4 s that way, quadratic in the universe this mode exists to widen).
     v = np.where(np.isfinite(vol), vol, -np.inf)
-    col = np.arange(v.shape[1])
-    above = (v[:, None, :] > v[:, :, None]).sum(axis=2)
-    tie_before = ((v[:, None, :] == v[:, :, None]) & (col[None, None, :] < col[None, :, None])).sum(axis=2)
-    return np.isfinite(vol) & (above + tie_before < int(top_n))
+    order = np.argsort(-v, axis=1, kind="stable")
+    pos = np.empty_like(order)
+    np.put_along_axis(pos, order, np.broadcast_to(np.arange(v.shape[1]), v.shape), axis=1)
+    return np.isfinite(vol) & (pos < int(top_n))
 
 
 def members(grid: dict[str, np.ndarray], idx, top_n: int = 0) -> np.ndarray:

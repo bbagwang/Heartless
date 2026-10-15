@@ -49,7 +49,10 @@ heartless universe status
 ```
 
 - **저장 위치.** `UNIVERSE_DB`, 비어 있으면 `<데이터 폴더>/universe.db`입니다. 연구용 공용 빌드는 `data/longhist/universe.db`에 있습니다(`HEARTLESS_DATA_DIR=data/longhist`이면 기본값). 캔들 DB와는 별도 파일입니다.
-- **범위.** 인벤토리의 USDT 무기한마다, 아카이브에 있는 월 중 구간과 겹치는 달을 모두 받습니다. 첫 달의 순위에 직전 달이 필요하므로 `--start`의 직전 달(2021-12)도 받습니다. 상장폐지된 종목도 거래가 끝날 때까지 받습니다. 이어받기가 됩니다(받은 달은 건너뜀). 아카이브가 목록에는 있는데 내주지 않은 달은 `n = 0`으로 표시하고 다시 요청하지 않습니다(`--rebuild`로만).
+- **범위.** 인벤토리의 USDT 무기한마다, 아카이브에 있는 월 중 구간과 겹치는 달을 모두 받습니다. 첫 달의 순위에 직전 달이 필요하므로 `--start`의 직전 달(2021-12)도 받습니다. 상장폐지된 종목도 거래가 끝날 때까지 받습니다. 이어받기가 됩니다(받은 달은 건너뜀). 선물에서 목록에는 있는데 내주지 않은 달은 실패로 세고 저장하지 않으므로 다음 실행이 다시 받습니다(`archive.get`은 5xx 재시도가 다 실패해도 None을 돌려주므로, 빈 달로 저장하면 그 달이 영영 빠집니다). 현물은 목록에 빠진 달(거래 중단)이 있어 `n = 0`으로 표시합니다.
+- **잘린 월 파일 채우기 (리뷰 수정).** 일부 월 1시간봉 파일은 날짜가 통째로 빠져 있습니다. USDT 무기한 46종목의 2022-02 파일은 25일에 끝나고(SOLUSDT, XRPUSDT 등, BTC·ETH는 온전), 48종목의 2022-04 파일은 3일에 시작합니다. 일별 파일에는 그 날이 있습니다. 빠진 날은 순위 중앙값에서 거래대금 0인 날로 세어지고 시간 계열에 구멍이 생기므로, 빌드는 월 파일에 없는 날을 일별 파일(`data/futures/um/daily/klines/...`)로 채웁니다(`fill_days`). 상장 달의 첫 봉 이전과, 아카이브가 끝난(상장폐지) 종목의 마지막 파일 끝 이후는 요청하지 않습니다. 일별 파일도 없는 날(거래 중단, 상장폐지와 재상장 사이)은 그대로 빈 날입니다.
+  - 이전에 만든 저장소는 `heartless universe build --repair`로 고칩니다. 공용 빌드(`data/longhist/universe.db`)는 2026-10-15에 고쳤습니다: 선물 103개 심볼·월을 다시 받아 318일을 채웠습니다(17초, 3.3 MB). 현물은 11개월을 확인했고 채울 날이 없었습니다(실제 거래 중단). 채운 시간은 장기 DB 1분봉 집계와 종가·고가·저가가 모두 같습니다(SOL 2022-02 72시간, SOL·XRP 2022-04 각 48시간).
+  - 순위 영향: 2022-03 상위 40의 순서 17곳, 2022-05 순서 15곳이 바뀌었고, 2022-05 상위 40 구성원이 하나 바뀌었습니다(BCHUSDT ↔ VETUSDT). TRAIN top40 구성원 집합(181)은 같습니다.
 - **저장 형식.** (심볼, 달)마다 압축 블록 하나입니다(`klines_1h`, `spot_klines_1h`).
   - 가격은 정확히 저장합니다. 소수 문자열을 블록 공통 자릿수의 정수로 바꿔(값 = 정수 / 10^k, CSV를 float로 읽은 값과 같은 비트) 종가 차분, 직전 종가 대비 시가, 몸통 밖 고가·저가로 저장합니다.
   - 거래대금은 0.1% 해상도(로그 양자화, 시간당 1,000 USDT 이상에서 상대 오차 0.05% 이하), 테이커 매수 비중은 0.001 단위입니다. 순위·합계·비율에만 쓰이고, CSV 엔트로피의 대부분이 거래대금의 끝자리이기 때문입니다.
@@ -81,8 +84,12 @@ heartless universe status
 1. 대상: 인벤토리의 USDT 무기한(`kind = perpetual`, 견적 USDT). 스테이블코인 자산(USDC, FDUSD 등, 운영 규칙과 같은 목록)은 제외합니다. BTCDOMUSDT 같은 지수 계약은 운영과 같게 포함합니다.
 2. 달 m의 순위: **직전 달 m-1의 일별 거래대금 중앙값**으로 매깁니다. 데이터가 없는 날은 0으로 셉니다. 그래서 m-1 후반에 상장했거나 전반에 상장폐지된 종목은 낮게 나옵니다. 같은 값이면 이름순입니다.
 3. 상장 기간: m의 시작에 상장 30일 이상(운영 규칙과 같음). m-1에 거래대금이 없으면 순위에 넣지 않습니다.
+   - **재상장은 새 첫 거래부터 셉니다 (리뷰 수정).** 7일 이상 거래가 없다가 다시 거래되면 재상장으로 봅니다(`universe.relistings`, `RELIST_GAP_DAYS`). 거래소도 재상장 계약에 새 onboardDate를 주므로 운영 규칙과 같습니다. 이전에는 원래 상장일로 나이를 재서, PUMPUSDT(이전 계약 정산 뒤 2025-07-10 재상장)가 22일 된 상태로 2025-08 상위 40에 들었습니다(이제 MOODENGUSDT). 그 밖에 순위에서 빠진 달: BNXUSDT 2023-03, AERGOUSDT 2025-05, CVCUSDT 2025-06(상위 40 밖).
+   - 달을 넘는 공백은 블록 요약 열로, 달 안의 공백은 거래한 날 수가 공백을 허용하는 블록만 풀어서 찾습니다(전체 0.3초). 빌드 구간 전에 상장한 종목이 구간 첫 달에 평평한 파일로 시작해 나중에 거래되면 그것도 재상장입니다.
 4. 달 m에 쓰는 데이터는 m 이전 것뿐입니다. m 안의 데이터를 바꿔도 m의 순위는 바뀌지 않습니다(테스트로 확인).
 5. 어떤 기간의 연구 유니버스 = 그 기간의 달 가운데 **한 달이라도 상위 N에 든 모든 종목**입니다. 나중에 상장폐지된 종목도 포함되므로, 백테스트가 상장폐지를 만나고 랩이 그 효과를 보고할 수 있습니다.
+6. **주의: 합집합에는 미래 정보가 남습니다 (리뷰 발견).** lab과 discover는 구성원마다 기간 전체를 평가합니다. m-1의 거래대금 급증으로 m에 상위 N에 든 종목은 m-1과 그 이전에도 평가되므로, 평가하는 결과(급등·급락)로 종목을 고른 셈이 됩니다. 실측: TRAIN top40 구성원 181개 × 기간에서 구성원이었던 시간은 22%입니다(나머지에는 상장 전·상장폐지 뒤도 섞여 있음). 1분봉이 있는 20종목은 81%, VALID 2026 18종목은 84%입니다.
+   - 시점이 맞는 평가는 구성원이었던 시간에 진입한 거래만 세는 것입니다. `resolve_for_run`이 구성원마다 그 구간(`windows`)을 내고, `--out`의 `universe_resolution.windows`에 기록하며, `universe.member_trades(trades, windows)`가 그 거래만 남깁니다. lab·discover가 이 거르기를 스스로 하기 전까지(소유 파일 밖, 10절) topN 결과에는 이 편향이 섞여 있고, 실행할 때 표준 오류에 그 사실과 구성원 시간 비율을 출력합니다.
 
 ```bash
 heartless universe show --month 2024-03 --top 40          # 그 달의 순위표(직전 달 중앙값, 상장일, 마지막 거래, 현물)
@@ -91,8 +98,9 @@ HEARTLESS_DATA_DIR=data/longhist heartless lab --alpha X --years 2022,2023,2024 
 heartless discover --universe top40 --train 2022-01-13:2023-01-01 --valid 2023-01-01:2024-01-01 ...
 ```
 
-- `lab`·`discover`의 `--universe`는 `core`, `extended`, `all`에 더해 `topN`(예: `top40`)을 받습니다. 실행 기간(`--years`, `--start/--end`, discover는 `--train`과 `--valid`의 합)으로 연구 유니버스를 풉니다. 기간이 없으면 거부합니다.
-  - 1분봉 캔들 DB에 데이터가 있는 종목만 평가하고, **없는 종목은 건너뛰었다고 표시합니다.** 조용히 유니버스를 줄이지 않습니다. 표준 오류에 목록을 출력하고, `--out` JSON에 `universe_resolution`(규칙, 전체 구성원, 평가한 종목, 건너뛴 종목)을 남깁니다.
+- `lab`·`discover`의 `--universe`는 `core`, `extended`, `all`에 더해 `topN`(예: `top40`)을 받습니다. lab은 실행 기간(`--years`, `--start/--end`)으로 연구 유니버스를 풉니다. 기간이 없으면 거부합니다.
+  - **discover는 `--train` 기간으로만 풉니다 (리뷰 수정).** 이전에는 `--train`과 `--valid`의 합으로 풀어서, VALID 기간의 유동성(흔히 VALID에서 급등한 종목)이 TRAIN에서 발굴하고 VALID에서 검증할 종목을 골랐습니다. TRAIN 끝에서 얼린 유니버스는 VALID에 대해 시점이 맞습니다(VALID 안의 상장폐지는 포함, VALID에 새로 상장한 종목은 빠짐).
+  - 1분봉 캔들 DB에 **그 기간 안의** 데이터가 있는 종목만 평가하고, **없는 종목은 건너뛰었다고 표시합니다.** 기간 밖에만 1분봉이 있는 종목도 건너뜀으로 셉니다(이전에는 평가 목록에 들어가 lab 오류로만 나타남). 조용히 유니버스를 줄이지 않습니다. 표준 오류에 목록을 출력하고, `--out` JSON에 `universe_resolution`(규칙, 전체 구성원, 평가한 종목, 건너뛴 종목, 구성원 달, 구성원 구간, 구성원 시간 비율)을 남깁니다.
   - 순위를 낼 수 없는 달(직전 달 1시간봉이 없음)이 기간에 있으면 거부합니다.
 - 실측 (top40, 2026-10-15 빌드, 해석 0.4초):
 
@@ -164,7 +172,8 @@ heartless discover --universe top40 --train 2022-01-13:2023-01-01 --valid 2023-0
   - `UniverseSelection.reference`는 구독할 기준 종목입니다. 거래소 필터는 통과해야 하고, 유동성 규칙은 면제입니다.
   - `.trade`는 모든 규칙을 통과한 종목입니다. 기준 종목도 규칙을 통과해야 여기에 들어갑니다.
   - `.rejected`는 종목마다 처음 걸린 규칙입니다.
-- `select_universe()`는 지금의 `app.py`가 쓰는 목록 인터페이스입니다. `reference + trade`를 크기 안에서 돌려줍니다. 앱은 이 목록의 모든 종목을 거래하므로, 앱이 `reference`를 데이터 전용으로 구독하기 전까지는 규칙에 걸린 기준 종목도 거래됩니다. 기본값 BTCUSDT는 가장 유동적인 무기한이라 실제로는 걸리지 않습니다.
+- `select_universe()`는 지금의 `app.py`가 쓰는 목록 인터페이스입니다. `reference + trade`를 크기 안에서 돌려줍니다. 앱은 이 목록의 모든 종목을 거래하므로, 앱이 `reference`를 데이터 전용으로 구독하기 전까지는 규칙에 걸린 기준 종목도 거래됩니다. 기본값 BTCUSDT는 가장 유동적인 무기한이라 실제로는 걸리지 않지만, `ALWAYS_INCLUDE`를 직접 넓히면 걸린 종목이 거래됩니다(그때 경고 로그를 남김).
+  - 리뷰에서 이 목록에서 규칙에 걸린 기준 종목을 빼 보았으나 되돌렸습니다. `tests/test_fix_7_universe.py`(이 패키지 밖)가 `ALWAYS_INCLUDE`의 나이·거래대금 면제를 고정하고 있고, 앱은 BTC가 거래 목록에 있어야 레짐을 계산합니다. `app.py` 재배선 때 두 곳을 함께 바꿉니다(10절).
 - 설정에서 규칙을 모두 읽는 호출은 `universe.live_selection(settings, infos, tickers24h, book_tickers)`입니다.
 
 ## 7. 시장 컨텍스트 단면: `CONTEXT_TOP_N`
@@ -174,6 +183,7 @@ heartless discover --universe top40 --train 2022-01-13:2023-01-01 --valid 2023-0
   - 순위, z-점수, 시장 폭, 분산도, 펀딩 중앙값, OI 합계, `n`이 모두 그 N종목으로 계산됩니다. 구성원이 아닌 종목의 `ctx.market`에는 시장 전체 피처만 있습니다.
   - BTC 시장 피처(`btc_ret_*`, `btc_trend`)는 BTC가 구성원이 아니어도 계산합니다(고정 모드와 비트 단위로 같음, 테스트).
 - 오프라인 빌드와 온라인 추적기는 같은 코드(`context.members`, `compute(..., top_n)`)를 쓰고 결과가 비트 단위로 같습니다(`tests/test_f0_context.py`).
+- 상위 N 고르기는 시간마다 정렬 한 번입니다(리뷰 수정). 이전에는 종목 쌍마다 비교 행렬을 만들어 메모리와 시간이 종목 수의 제곱으로 늘었습니다(1년 단위 120종목 300 MB·3.9초 → 69 MB·0.26초, 400종목 150 MB·0.9초). 결과는 같은 정의(더 큰 거래대금 수 + 같은 값 중 이름이 앞선 수 < N)이고 테스트로 확인합니다.
 - 컨텍스트 저장소 메타데이터에 `top_n`을 기록합니다(0이면 기록하지 않으므로 기존 저장소는 그대로 유효). 모드가 다른 저장소는 빌드·`ensure`·`usable`이 이유를 밝히고 거부합니다.
 - 후보 집합은 여전히 `CONTEXT_UNIVERSE`입니다. 1분봉이 있는 종목이 늘면 이 목록을 넓히고 N으로 단면을 고르면 됩니다. 기본값을 바꾸는 일은 컨텍스트를 쓰는 연구 결과를 다시 봐야 하므로, Wave F 사전 등록에서 정합니다.
 
@@ -193,7 +203,9 @@ heartless discover --universe top40 --train 2022-01-13:2023-01-01 --valid 2023-0
 | 펀딩비(모든 무기한) | `load_hourly(...)["funding"]` (그 봉 시가에 정산된 값) |
 | 베이시스 | `symbols_inventory.basis_series(store, symbol, start_ms, end_ms)` |
 | 달별 순위·연구 유니버스 | `universe.month_ranking(store, "YYYY-MM")`, `universe.research_universe(store, start_ms, end_ms, top)` |
-| lab·discover | `--universe topN` (건너뛴 종목은 `universe_resolution`에 기록) |
+| lab·discover | `--universe topN` (건너뛴 종목·구성원 구간은 `universe_resolution`에 기록; discover는 TRAIN으로만 풂) |
+| 시점이 맞는 거래 | `universe.membership_windows(members, start, end)`, `universe.member_trades(trades, windows)` |
+| 재상장 | `universe.relistings(store)`, `universe.listed_as_of(row, month_start, relisted)` |
 | 운영 선택 | `universe.select_live_universe(...)`, `universe.live_selection(settings, ...)` |
 | 컨텍스트 단면 | `CONTEXT_TOP_N`, `context.build(..., top_n)`, `MarketContextTracker(..., top_n)`, `context.prepare(db, {"top_n": N, ...})` |
 
@@ -203,6 +215,8 @@ heartless discover --universe top40 --train 2022-01-13:2023-01-01 --valid 2023-0
   - `select_universe` 대신 `live_selection`을 쓰고, `rest.book_ticker()`(전 종목)로 스프레드 규칙을 켭니다.
   - `reference` 종목을 컨텍스트 전용 스트림으로 구독하고, BTC 레짐을 그 스트림에서 계산합니다(지금은 BTC가 거래 유니버스에 있어야 레짐이 계산됨).
   - `CONTEXT_TOP_N`을 `MarketContextTracker`와 운영 저장소 메타(`meta_for(..., top_n)`)에 넘깁니다.
+- `learning/lab.py`, `learning/discovery.py`: topN 유니버스에서 구성원 구간 밖의 거래(또는 표본)를 빼야 합니다(3절 6). lab은 `evaluate`의 거래 목록에 `universe.member_trades`를 적용하고 그 결과로 요약을 내면 됩니다. discover는 데이터셋 행을 구성원 구간으로 거릅니다. 그 전의 topN 결과는 구성원이 아니었던 달을 포함합니다.
+- `tests/test_fix_7_universe.py`와 `select_universe`: 앱 재배선 때 `ALWAYS_INCLUDE`의 나이·거래대금 면제를 없앱니다(6절).
 - `learning/lab.py`: 컨텍스트 설정 사전에 `"top_n": settings.context_top_n`을 넣습니다. 지금 lab은 항상 고정 모드로 컨텍스트를 요청하므로, `CONTEXT_TOP_N`으로 만든 저장소를 쓰려 하면 이유를 밝히고 거부합니다.
 - `replay/runner.py`: 리플레이의 `ALWAYS_INCLUDE`를 `BTCUSDT,ETHUSDT,SOLUSDT`로 고정해 거래 종목을 핀으로 박습니다. 리플레이 재현성 때문이며 동작은 그대로입니다.
 - `README.md`, `.env.example`: 새 설정(`UNIVERSE_MIN_AGE_DAYS`, `UNIVERSE_MAX_TICK_BPS`, `UNIVERSE_MAX_SPREAD_BPS`, `UNIVERSE_DB`, `CONTEXT_TOP_N`)과 `ALWAYS_INCLUDE` 기본값 변경을 반영합니다.

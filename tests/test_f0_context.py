@@ -95,3 +95,24 @@ def test_fixed_mode_is_unchanged_and_stores_of_the_two_modes_refuse_each_other(d
     assert not C.ensure(st, fixed, START + 30 * DAY, START + 31 * DAY, SYMS, auto_build=False, top_n=TOP)
     fixed.close()
     st.close()
+
+
+def test_top_mask_matches_the_pairwise_definition_with_ties_and_gaps():
+    """_top_mask sorts instead of comparing every pair (memory and time were quadratic in the number of symbols): the
+    same members as the definition "fewer than top_n larger volumes plus equal volumes in lower columns", ties and
+    non-finite volumes included."""
+    rng = np.random.default_rng(7)
+    vol = np.round(rng.lognormal(3, 1, (500, 37)))  # rounded: many exact ties
+    vol[rng.random(vol.shape) < 0.15] = np.nan
+    vol[:, 5] = vol[:, 9]  # equal columns
+    vol[3] = np.nan  # an hour without any history
+    vol[4] = 0.0  # all equal
+    v = np.where(np.isfinite(vol), vol, -np.inf)
+    col = np.arange(v.shape[1])
+    above = (v[:, None, :] > v[:, :, None]).sum(axis=2)
+    tie_before = ((v[:, None, :] == v[:, :, None]) & (col[None, None, :] < col[None, :, None])).sum(axis=2)
+    for top in (1, 3, 10, 36, 37, 50):
+        want = np.isfinite(vol) & (above + tie_before < top)
+        assert np.array_equal(C._top_mask(vol, top), want), top
+    assert C._top_mask(vol, 3)[4].tolist() == [True] * 3 + [False] * 34  # all equal: the lowest columns (names)
+    assert C._top_mask(np.zeros((0, 4)), 2).shape == (0, 4)

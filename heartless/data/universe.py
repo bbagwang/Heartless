@@ -5,7 +5,8 @@ stablecoin, with 24h quote volume >= UNIVERSE_MIN_QUOTE_VOLUME, a tick no coarse
 when book tickers are supplied, a spread of at most MAX_SPREAD_BPS; the most liquid `size` of them trade. ALWAYS_INCLUDE
 is a data subscription (BTC is the regime and market-context reference every alpha reads): those symbols are
 subscribed even when they fail a liquidity rule, and they trade only when they pass the same rules as every other
-symbol. select_universe() keeps the older list interface for app.py (see its docstring).
+symbol. select_universe() keeps the older list interface for app.py (see its docstring for the gap that remains
+until app.py subscribes the reference symbols as data only).
 
 Research (research_universe): the survivorship-free counterpart. For each calendar month m, the USDT perpetuals of
 the archive inventory (heartless/data/symbols_inventory.py, delisted ones included) are ranked by the median daily
@@ -135,14 +136,20 @@ def select_live_universe(infos: dict[str, SymbolInfo], tickers24h: list[dict], s
 
 def select_universe(infos: dict[str, SymbolInfo], tickers24h: list[dict], size: int, min_quote_volume: float,
                     always: list[str], min_age_days: float = MIN_AGE_DAYS, **rules) -> list[str]:
-    """List interface used by app.py: the subscribed symbols of select_live_universe, `always` (ALWAYS_INCLUDE) first,
-    capped at `size` (or the number of `always` symbols when larger).
+    """List interface used by app.py, which TRADES every symbol of this list: the subscribed symbols of
+    select_live_universe, `always` (ALWAYS_INCLUDE) first, capped at `size` (or the number of `always` symbols when
+    larger).
 
-    The app trades every symbol of this list, so until it subscribes `UniverseSelection.reference` as data only
-    (context-only streams, BTC regime from that stream), a reference symbol that fails a liquidity rule is still
-    traded; with the default ALWAYS_INCLUDE=BTCUSDT that never happens in practice (BTC is the most liquid perpetual).
+    Known gap (not changed here: tests/test_fix_7_universe.py keeps the older age / volume exemption of ALWAYS_INCLUDE,
+    and app.py has no data-only path for it yet): an `always` symbol that fails a liquidity or age rule is traded.
+    With the default ALWAYS_INCLUDE=BTCUSDT that never happens in practice (BTC is the most liquid perpetual); a custom
+    list can. The fix belongs with the app.py rewiring: subscribe `UniverseSelection.reference` as data only
+    (context-only streams, BTC regime from that stream) and trade `UniverseSelection.trade`.
     `rules`: book_tickers, max_spread_bps, max_tick_bps, now (select_live_universe)."""
     sel = select_live_universe(infos, tickers24h, size, min_quote_volume, always, min_age_days, **rules)
+    for s in sel.reference:
+        if s in sel.rejected:
+            log.warning("always-include %s is traded although it fails a live rule: %s", s, sel.rejected[s])
     chosen = sel.subscribed[:max(int(size), len(sel.reference))]
     log.info("universe selected (%d): %s", len(chosen), ",".join(chosen))
     return chosen
@@ -158,6 +165,10 @@ def live_selection(settings, infos: dict[str, SymbolInfo], tickers24h: list[dict
 
 # --- research universe (survivorship-free, from the archive inventory) ---------------------------------------------------
 RESEARCH_MIN_AGE_DAYS = MIN_AGE_DAYS  # the live listing-age rule, applied at the start of the ranked month
+# A week or more without a trade, then trading again: a relisting (AERGOUSDT 2025-04 and PUMPUSDT 2025-07 came back as
+# new contracts after their old ones settled; CVCUSDT returned in 2025-05 after 2.5 years). The exchange gives a
+# relisted contract a new onboardDate, so the listing-age rule counts from the new first trade, as live does.
+RELIST_GAP_DAYS = 7
 
 
 def _month_ms(month: str) -> int:
@@ -190,6 +201,53 @@ def listed_at(row: dict) -> int | None:
     return int(ft) if ft is not None and ft < m0 + 31 * MS_DAY else m0
 
 
+def relistings(store, inventory: list[dict] | dict[str, dict] | None = None,
+               gap_days: float = RELIST_GAP_DAYS) -> dict[str, list[int]]:
+    """Per symbol, the first traded hour after every stretch of at least `gap_days` without a trade in the stored 1h
+    blocks (ascending). The first trade of a symbol listed inside the stored months is its listing, not a relisting;
+    one listed before them counts from the start of its first stored month (flat files there, then trades: it came
+    back). Gaps across months come from the summary columns; a block decodes only when its traded days leave room for
+    a gap inside the month."""
+    import numpy as np
+
+    from heartless.data.symbols_inventory import FUT_TABLE, decode_month, month_str
+
+    inv = inventory if isinstance(inventory, dict) else {r["symbol"]: r for r in (
+        inventory if inventory is not None else store.load_symbol_inventory())}
+    gap = int(gap_days * MS_DAY)
+    out: dict[str, list[int]] = {}
+    last: dict[str, int | None] = {}
+    for b in store.kline_block_index(FUT_TABLE):  # ordered by symbol, month
+        sym = b["symbol"]
+        if sym not in last:  # the symbol's first stored month
+            first_month = (inv.get(sym) or {}).get("first_month")
+            last[sym] = int(b["month"]) if first_month and first_month < month_str(b["month"]) else None
+        if b["first_trade"] is None:
+            continue
+        ft, lt = int(b["first_trade"]), int(b["last_trade"])
+        if last[sym] is not None and ft - last[sym] >= gap:
+            out.setdefault(sym, []).append(ft)
+        # a gap of G days between two traded hours leaves at least G - 1 whole calendar days without a trade
+        if (lt // MS_DAY - ft // MS_DAY + 1) - int(b["days_traded"] or 0) >= gap_days - 1:
+            blk = store.load_kline_blocks(FUT_TABLE, sym, b["month"], b["month"])
+            if blk:
+                d = decode_month(blk[0][1])
+                t = d["open_time"][d["quote_volume"] > 0]
+                out.setdefault(sym, []).extend(int(t[i + 1]) for i in np.flatnonzero(np.diff(t) >= gap))
+        last[sym] = lt
+    return {s: sorted(v) for s, v in out.items() if v}
+
+
+def listed_as_of(row: dict, month_start: int, relisted: dict[str, list[int]] | None = None) -> int | None:
+    """Listing time of an inventory row as the start of a month sees it: its latest relisting before the month when
+    there is one (relistings()), else listed_at(row)."""
+    base = listed_at(row)
+    back = [t for t in (relisted or {}).get(row.get("symbol"), ()) if t < month_start]
+    if back and base is not None:
+        return max(base, back[-1])
+    return base
+
+
 def eligible_research(row: dict) -> str | None:
     """Instrument rules of the research universe (the live ones that the archive can tell): a USDT perpetual (not a
     delivery contract or an archive copy of a settled one) whose asset is not a stablecoin."""
@@ -202,22 +260,24 @@ def eligible_research(row: dict) -> str | None:
     return None
 
 
-def month_ranking(store, month: str, inventory: list[dict] | None = None,
-                  min_age_days: float = RESEARCH_MIN_AGE_DAYS) -> list[dict]:
+def month_ranking(store, month: str, inventory: list[dict] | None = None, min_age_days: float = RESEARCH_MIN_AGE_DAYS,
+                  relisted: dict[str, list[int]] | None = None) -> list[dict]:
     """Every eligible symbol ranked for calendar month `month` by the median daily quote volume of the previous month
     (days without bars count as 0; heartless/data/symbols_inventory.encode_month), most liquid first, ties by name.
-    Only data before the month is used: the previous month's volumes and the listing time. Symbols listed less than
-    `min_age_days` before the month starts, or without volume in the previous month, are not ranked."""
+    Only data before the month is used: the previous month's volumes and the listing time (a relisting counts from its
+    new first trade, listed_as_of). Symbols listed less than `min_age_days` before the month starts, or without volume
+    in the previous month, are not ranked. `relisted`: relistings(store) when the caller has it."""
     from heartless.data.symbols_inventory import FUT_TABLE
 
     inv = {r["symbol"]: r for r in (inventory if inventory is not None else store.load_symbol_inventory())}
+    relisted = relistings(store, inv) if relisted is None else relisted
     m0 = _month_ms(month)
     ranked = []
     for b in store.kline_block_index(FUT_TABLE, month=_month_ms(prev_month(month))):
         row = inv.get(b["symbol"])
         if row is None or eligible_research(row) is not None or not b["n"] or not (b["med_dqv"] or 0) > 0:
             continue
-        listed = listed_at(row)
+        listed = listed_as_of(row, m0, relisted)
         if listed is None or m0 - listed < min_age_days * MS_DAY:
             continue
         ranked.append({"symbol": b["symbol"], "med_dqv": float(b["med_dqv"]), "days_traded": b["days_traded"],
@@ -234,11 +294,12 @@ def research_universe(store, start: int, end: int, top: int = 40) -> dict:
     its last hour with trades. Months the stored 1h data cannot rank (the previous month is not built) are listed in
     "unranked" instead of being silently dropped."""
     inv = store.load_symbol_inventory()
+    relisted = relistings(store, inv)
     per_month: dict[str, list[str]] = {}
     unranked: list[str] = []
     members: dict[str, list[str]] = {}
     for mo in months_of(start, end):
-        ranked = month_ranking(store, mo, inv)
+        ranked = month_ranking(store, mo, inv, relisted=relisted)
         if not ranked:
             unranked.append(mo)
             continue
@@ -261,19 +322,22 @@ def parse_top(name: str | None) -> int | None:
     return int(tail)
 
 
-def stored_candle_symbols(candle_db, symbols: list[str]) -> set[str]:
-    """Which of `symbols` have 1m candles in the candle database, read through a read-only connection (one indexed
-    lookup per symbol; the long-history database is never opened for writing)."""
+def stored_candle_symbols(candle_db, symbols: list[str], start: int | None = None, end: int | None = None) -> set[str]:
+    """Which of `symbols` have 1m candles in the candle database inside [start, end] (anywhere when not given), read
+    through a read-only connection (one indexed lookup per symbol; the long-history database is never opened for
+    writing). A member whose candles all lie outside the run's window would only come back as a lab error."""
     import sqlite3
     from pathlib import Path
 
     if not Path(candle_db).exists():
         return set()
     con = sqlite3.connect(f"file:{Path(candle_db).resolve()}?mode=ro", uri=True)
+    lo, hi = -(2**62) if start is None else int(start), 2**62 if end is None else int(end)
     try:
         have = set()
         for s in symbols:
-            if con.execute("SELECT 1 FROM candles WHERE symbol=? LIMIT 1", (s,)).fetchone():
+            if con.execute("SELECT 1 FROM candles WHERE symbol=? AND open_time BETWEEN ? AND ? LIMIT 1",
+                           (s, lo, hi)).fetchone():
                 have.add(s)
         return have
     except sqlite3.OperationalError:  # no candles table
@@ -282,11 +346,42 @@ def stored_candle_symbols(candle_db, symbols: list[str]) -> set[str]:
         con.close()
 
 
+def membership_windows(members: dict[str, list[str]], start: int | None = None,
+                       end: int | None = None) -> dict[str, list[tuple[int, int]]]:
+    """Each member's months as contiguous [first ms, last ms] spans, clipped to [start, end]: the hours in which the
+    point-in-time rule had the symbol in the universe."""
+    from heartless.data.symbols_inventory import _next_month_ms
+
+    out: dict[str, list[tuple[int, int]]] = {}
+    for sym, months in members.items():
+        spans: list[tuple[int, int]] = []
+        for mo in sorted(set(months)):
+            a, b = _month_ms(mo), _next_month_ms(mo) - 1
+            if spans and spans[-1][1] == a - 1:
+                spans[-1] = (spans[-1][0], b)
+            else:
+                spans.append((a, b))
+        clipped = [(max(a, start if start is not None else a), min(b, end if end is not None else b)) for a, b in spans]
+        out[sym] = [(a, b) for a, b in clipped if a <= b]
+    return out
+
+
+def member_trades(trades: list[dict], windows: dict[str, list[tuple[int, int]]]) -> list[dict]:
+    """The trades entered while their symbol was a member (entry_time inside one of its membership_windows).
+
+    Why: a topN universe is the union of every month's members, and lab / discover evaluate each of them over the whole
+    window. A symbol that became top N because of a surge in month m-1 is then also evaluated in m-1 and before, i.e.
+    selected on the outcome it is evaluated on. Only the trades this keeps are free of that look-ahead."""
+    return [t for t in trades
+            if any(a <= int(t.get("entry_time") or 0) <= b for a, b in windows.get(t.get("symbol"), ()))]
+
+
 def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> dict:
     """The topN research universe of [start, end] for a lab / discovery run over `candle_db`: "research" = every
-    member (research_universe), "symbols" = those with stored 1m candles (what the run evaluates), "skipped" = the
-    members without 1m candles, to be reported (fetch them with `heartless fetch --start ... --symbols ...`).
-    ValueError when the universe database is missing or a month of the window cannot be ranked yet."""
+    member (research_universe), "symbols" = those with stored 1m candles inside the window (what the run evaluates),
+    "skipped" = the other members, to be reported (fetch them with `heartless fetch --start ... --symbols ...`),
+    "windows" = each evaluated member's membership spans (membership_windows; member_trades filters a run's trades by
+    them). ValueError when the universe database is missing or a month of the window cannot be ranked yet."""
     from pathlib import Path
 
     from heartless.core.store import Store
@@ -301,9 +396,12 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> d
     if res["unranked"]:
         raise ValueError(f"months {', '.join(res['unranked'])} cannot be ranked from {universe_db} (their previous "
                          f"month's 1h data is not built): run `heartless universe build` over the window")
-    have = stored_candle_symbols(candle_db, res["symbols"])
+    have = stored_candle_symbols(candle_db, res["symbols"], start, end)
+    symbols = sorted(s for s in res["symbols"] if s in have)
+    windows = membership_windows({s: res["members"][s] for s in symbols}, start, end)
     return {"rule": f"top{top} by median daily quote volume of the previous month, listed >= {RESEARCH_MIN_AGE_DAYS}d "
-                    f"(docs/UNIVERSE.md)", "research": res["symbols"],
-            "symbols": sorted(s for s in res["symbols"] if s in have),
+                    f"(docs/UNIVERSE.md)", "research": res["symbols"], "symbols": symbols,
             "skipped": sorted(s for s in res["symbols"] if s not in have), "unranked": res["unranked"],
-            "members": res["members"]}
+            "members": res["members"], "windows": windows,
+            "member_share": round(sum(b - a + 1 for w in windows.values() for a, b in w)
+                                  / max(1, len(symbols) * (int(end) - int(start) + 1)), 4)}

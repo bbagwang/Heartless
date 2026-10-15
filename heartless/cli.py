@@ -94,7 +94,8 @@ def main(argv: list[str] | None = None) -> None:
                     help="append the search (rules evaluated) to the P2 trial ledger; the t bar then also counts the "
                          "family's earlier trials")
     dc.add_argument("--universe", default=None, type=_universe_name,
-                    help="symbol set instead of --symbols (core, extended, all, topN over --train and --valid)")
+                    help="symbol set instead of --symbols (core, extended, all, or topN resolved over --train only: "
+                         "the VALID period never chooses the symbols)")
     dc.add_argument("--symbols", default=None)
     dc.add_argument("--beam", type=int, default=30)
     dc.add_argument("--depth", type=int, default=3)
@@ -119,6 +120,9 @@ def main(argv: list[str] | None = None) -> None:
     un.add_argument("--spot", action="store_true", help="build: spot 1h klines of the perpetuals with a spot market")
     un.add_argument("--symbols", default=None, help="build: only these (comma separated)")
     un.add_argument("--rebuild", action="store_true", help="build: download stored months again")
+    un.add_argument("--repair", action="store_true",
+                    help="build: download again the stored months with whole days missing (truncated monthly archive "
+                         "files, filled from the daily files) and futures months stored as not served")
     un.add_argument("--month", default=None, help="show: the ranked month, YYYY-MM")
     un.add_argument("--top", type=int, default=40)
     un.add_argument("--out", default=None, help="write the report / resolution JSON here")
@@ -193,8 +197,12 @@ def _universe_name(text: str) -> str:
 
 def _top_universe(settings, args, cmd: str) -> dict | None:
     """lab / discover --universe topN (F0): resolve the research universe of the run's window from the 1h universe
-    database and register the symbols that have stored 1m candles under that name in lab.UNIVERSES for this run. The
-    others are reported as skipped (never silently dropped) and recorded in the --out JSON (_note_top_universe)."""
+    database and register the symbols that have stored 1m candles in it under that name in lab.UNIVERSES for this run.
+    The others are reported as skipped (never silently dropped) and recorded in the --out JSON (_note_top_universe).
+
+    discover resolves over --train only: the run mines TRAIN and validates on VALID with one symbol list, and members
+    picked by their VALID-period liquidity would let the VALID period choose the symbols (often the ones that surged
+    there). A universe frozen at the end of TRAIN is point-in-time for VALID (its later delistings included)."""
     from heartless.data import universe as U
     from heartless.learning import lab
 
@@ -211,17 +219,22 @@ def _top_universe(settings, args, cmd: str) -> dict | None:
                 raise ValueError(f"--universe {args.universe} needs the window: --years or --start and --end")
         else:
             if not args.train:
-                raise ValueError(f"--universe {args.universe} needs --train (and resolves over --valid too)")
-            windows = [_window_arg(args.train)] + ([_window_arg(args.valid)] if args.valid else [])
-            start, end = min(w[0] for w in windows), max(w[1] for w in windows)
+                raise ValueError(f"--universe {args.universe} needs --train (the universe is resolved over it)")
+            start, end = _window_arg(args.train)
         res = U.resolve_for_run(settings.universe_db_path, settings.db_path, start, end, n)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
     lab.UNIVERSES[args.universe] = res["symbols"]
-    print(f"universe {args.universe}: {len(res['research'])} symbols were top {n} in a month of the window; "
-          f"{len(res['symbols'])} have stored 1m candles; skipped {len(res['skipped'])} without 1m candles"
+    print(f"universe {args.universe}: {len(res['research'])} symbols were top {n} in a month of the "
+          f"{'window' if cmd == 'lab' else 'TRAIN window'}; {len(res['symbols'])} have stored 1m candles in it; "
+          f"skipped {len(res['skipped'])} without 1m candles"
           + (f": {', '.join(res['skipped'])}" if res["skipped"] else ""), file=sys.stderr, flush=True)
+    if res["symbols"]:
+        print(f"note: every member is evaluated over the whole window, also in the months it was not top {n} (members "
+              f"cover {res['member_share']:.0%} of the symbol-hours): results include that look-ahead until the "
+              f"{cmd} filters by membership; universe_resolution.windows in --out has the spans "
+              f"(heartless.data.universe.member_trades)", file=sys.stderr, flush=True)
     if not res["symbols"]:
         print("error: none of them has stored 1m candles in this database", file=sys.stderr)
         sys.exit(2)
@@ -234,7 +247,11 @@ def _note_top_universe(args, res: dict | None) -> None:
         return
     with open(out) as f:
         doc = json.load(f)
-    doc["universe_resolution"] = {k: res[k] for k in ("rule", "research", "symbols", "skipped", "unranked")}
+    doc["universe_resolution"] = {k: res[k] for k in ("rule", "research", "symbols", "skipped", "unranked", "members",
+                                                      "member_share")}
+    # membership spans as [first ms, last ms] per evaluated symbol: the trades entered inside them are the ones free of
+    # the union's look-ahead (heartless.data.universe.member_trades)
+    doc["universe_resolution"]["windows"] = {s: [list(w) for w in ws] for s, ws in res["windows"].items()}
     with open(out, "w") as f:
         json.dump(doc, f, default=str, indent=1)
 

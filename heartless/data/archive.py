@@ -98,6 +98,12 @@ def monthly_kline_path(symbol: str, month: str, interval: str = "1h", market: st
     return f"{root}/{symbol}/{interval}/{symbol}-{interval}-{month}.zip"
 
 
+def daily_kline_path(symbol: str, day: str, interval: str = "1h", market: str = "um") -> str:
+    """Archive path of one daily kline file ("YYYY-MM-DD"): F0 fills the days a truncated monthly file lacks."""
+    root = f"{UM}/daily/klines" if market == "um" else f"{SPOT}/daily/klines"
+    return f"{root}/{symbol}/{interval}/{symbol}-{interval}-{day}.zip"
+
+
 def monthly_funding_path(symbol: str, month: str) -> str:
     return f"{UM}/monthly/fundingRate/{symbol}/{symbol}-fundingRate-{month}.zip"
 

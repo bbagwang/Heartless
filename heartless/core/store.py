@@ -569,8 +569,8 @@ class Store:
     # symbol_inventory: one row per USD-M archive symbol (kind, quote, asset, archive months, spot market, first / last
     # hour with trades). klines_1h / spot_klines_1h: one compressed block per (symbol, calendar month) holding that
     # month's hourly bars (symbols_inventory.encode_month), with the summary the universe ranking reads (rows, first /
-    # last hour with trades, median daily quote volume) as plain columns. A block with n = 0 is a month the archive
-    # listed but did not serve (not re-requested until a rebuild).
+    # last hour with trades, median daily quote volume) as plain columns. A block with n = 0 is a spot month the archive
+    # did not serve (a spot trading halt; futures months that are listed but not served are retried, never stored).
     _F0_TABLES = ("klines_1h", "spot_klines_1h")
     _F0_INVENTORY_DDL = ("CREATE TABLE IF NOT EXISTS symbol_inventory (symbol TEXT PRIMARY KEY, kind TEXT, quote TEXT, "
                          "base TEXT, asset TEXT, multiplier REAL, first_month TEXT, last_month TEXT, months INTEGER, "

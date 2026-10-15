@@ -16,6 +16,11 @@ What the archive does not say directly
   enter a universe (they would count one market twice). Dated delivery contracts (BTCUSDT_240329) are kind "delivery".
 * Multiplier contracts (1000PEPEUSDT, 1000000BOBUSDT, 1MBABYDOGEUSDT) quote 1000 / 1e6 units of the asset; the spot
   market of the asset (PEPEUSDT) is matched with that multiplier.
+* Truncated monthly files: some monthly 1h files lack whole days their daily files have (46 USDT perpetuals' 2022-02
+  files end on the 25th, 48 of the 2022-04 files start on the 3rd; data/archive.plan_kline_files knows the same for 1m).
+  A missing day would count as a zero-volume day in the ranking median and leave holes in the hourly series, so the
+  builds fill every whole day a monthly file lacks from the daily files (fill_days); days before a listing and after
+  the last file of a delisted symbol are not asked for. `universe build --repair` re-downloads blocks stored before.
 """
 from __future__ import annotations
 
@@ -34,7 +39,7 @@ from decimal import Decimal, InvalidOperation
 
 import numpy as np
 
-from heartless.data.archive import SPOT, UM, monthly_funding_path, monthly_kline_path
+from heartless.data.archive import SPOT, UM, daily_kline_path, monthly_funding_path, monthly_kline_path
 
 QUOTES = ("FDUSD", "USDT", "USDC", "BUSD", "TUSD", "USD1", "BTC", "U")  # matched longest first
 _MULT = re.compile(r"^(1000000|100000|10000|1000|1M)(?=[A-Z])")
@@ -264,6 +269,46 @@ def funding_rows(blob: bytes | None) -> list[tuple[int, str]]:
     return out
 
 
+def _day_str(ms: int) -> str:
+    return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def missing_days(open_times, month: str, skip_head: bool = False, skip_tail: bool = False) -> list[str]:
+    """UTC days ("YYYY-MM-DD") of `month` without a single hourly bar among `open_times` (ms). skip_head drops the days
+    before the first bar (the listing month: nothing traded yet), skip_tail the days after the last one (the last file
+    of a delisted symbol); with neither, a month without bars asks for every day."""
+    a = _month_ms(month)
+    nd = (_next_month_ms(month) - a) // MS_D
+    have = sorted({(int(t) - a) // MS_D for t in open_times if a <= int(t) < a + nd * MS_D})
+    if not have and (skip_head or skip_tail):
+        return []
+    lo = have[0] if skip_head else 0
+    hi = have[-1] if skip_tail else nd - 1
+    got = set(have)
+    return [_day_str(a + d * MS_D) for d in range(lo, hi + 1) if d not in got]
+
+
+async def fill_days(archive, rows: list[list[str]], symbol: str, month: str, skip_head: bool = False,
+                    skip_tail: bool = False, market: str = "um") -> tuple[list[list[str]], int]:
+    """`rows` (kline_rows of a monthly file) with the whole days it lacks added from the daily files, and the number
+    of days the daily files filled. The monthly file wins an hour both have. A day without a daily file stays missing
+    (a trading halt or a gap between a delisting and a relisting); a failed download raises (the month is retried)."""
+    days = missing_days([int(r[0]) for r in rows], month, skip_head, skip_tail)
+    if not days:
+        return rows, 0
+    blobs = await asyncio.gather(*(archive.get(daily_kline_path(symbol, d, market=market)) for d in days))
+    by_t: dict[int, list[str]] = {}
+    filled = 0
+    for b in blobs:
+        extra = kline_rows(b, month) if b else []
+        filled += bool(extra)
+        by_t.update((int(r[0]), r) for r in extra)
+    if not by_t:
+        return rows, 0
+    by_t.update((int(r[0]), r) for r in rows)
+    return [by_t[t] for t in sorted(by_t)], filled
+
+
 def encode_month(rows: list[list[str]], month: str, funding: list[tuple[int, str]] | None = None,
                  spot: bool = False) -> tuple[bytes, dict]:
     """Block bytes and summary (n, first_ts, last_ts, first_trade, last_trade, med_dqv, days_traded) of one month of
@@ -415,7 +460,7 @@ async def _build(store, archive, table: str, plan: dict[str, list[str]], fetch, 
     saved together, so an interrupted build resumes at the first symbol not finished). `fetch(symbol, month)` returns
     (block, summary) or None when the archive did not serve the month."""
     say = progress or (lambda m: None)
-    stats = {"symbols": 0, "blocks": 0, "empty": 0, "failed": [], "bytes": 0}
+    stats = {"symbols": 0, "blocks": 0, "empty": 0, "failed": [], "bytes": 0, "filled_days": 0}
     todo = sorted(plan.items())
     done = 0
     t0 = time.time()
@@ -430,7 +475,7 @@ async def _build(store, archive, table: str, plan: dict[str, list[str]], fetch, 
         rows = []
         for mo, res in zip(months, await asyncio.gather(*(fetch(sym, mo) for mo in months), return_exceptions=True)):
             if isinstance(res, BaseException):
-                stats["failed"].append(f"{sym} {mo}: {type(res).__name__}")
+                stats["failed"].append(f"{sym} {mo}: {type(res).__name__} {res}".strip()[:120])
                 continue
             if res is None:
                 rows.append((sym, _month_ms(mo), 0, None, None, None, None, 0.0, 0, b""))
@@ -440,6 +485,7 @@ async def _build(store, archive, table: str, plan: dict[str, list[str]], fetch, 
             rows.append((sym, _month_ms(mo), s["n"], s["first_ts"], s["last_ts"], s["first_trade"], s["last_trade"],
                          s["med_dqv"], s["days_traded"], blob))
             stats["bytes"] += len(blob)
+            stats["filled_days"] += s.get("filled_days", 0)
         stats["blocks"] += store.save_kline_blocks(table, rows)
         stats["symbols"] += 1
 
@@ -453,62 +499,117 @@ async def _build(store, archive, table: str, plan: dict[str, list[str]], fetch, 
     return stats
 
 
-def _plan(store, table: str, wanted: dict[str, list[str]], rebuild: bool) -> dict[str, list[str]]:
+def _plan(store, table: str, wanted: dict[str, list[str]], rebuild: bool,
+          stale: set[tuple[str, str]] = frozenset()) -> dict[str, list[str]]:
     have = set() if rebuild else {(r["symbol"], month_str(r["month"])) for r in store.kline_block_index(table)}
+    have -= set(stale)
     plan = {s: [m for m in months if (s, m) not in have] for s, months in wanted.items()}
     return {s: m for s, m in plan.items() if m}
 
 
+def _fill_rule(month: str, bounds: tuple[str | None, str | None], newest: str | None) -> tuple[bool, bool]:
+    """(skip_head, skip_tail) of fill_days for a symbol's month: no days before its first archive month's first bar
+    (the listing), none after the last bar of its last file when that file is older than the newest month any symbol
+    has (the archive stopped: delisted). An active symbol's latest month is filled to its end."""
+    first, last = bounds
+    return month == first, bool(last) and month == last and newest is not None and last < newest
+
+
+def repair_candidates(store, table: str, bounds: dict[str, tuple[str | None, str | None]], newest: str | None,
+                      empty: bool = False) -> set[tuple[str, str]]:
+    """Stored blocks of `table` to download again: whole days missing by the fill rule (a truncated monthly file
+    stored before the daily fill existed) and, with `empty`, months stored as not served. Only blocks with fewer rows
+    than hours in their month are decoded."""
+    out: set[tuple[str, str]] = set()
+    for b in store.kline_block_index(table):
+        sym, mo = b["symbol"], month_str(b["month"])
+        if sym not in bounds:
+            continue
+        if not b["n"]:
+            if empty:
+                out.add((sym, mo))
+            continue
+        if b["n"] >= (_next_month_ms(mo) - b["month"]) // MS_H:
+            continue
+        blocks = store.load_kline_blocks(table, sym, b["month"], b["month"])
+        if blocks and missing_days(decode_month(blocks[0][1])["open_time"], mo, *_fill_rule(mo, bounds[sym], newest)):
+            out.add((sym, mo))
+    return out
+
+
 async def build_futures(store, archive, start: int, end: int, quotes=("USDT",), symbols=None, funding: bool = True,
-                        rebuild: bool = False, progress=None) -> dict:
+                        rebuild: bool = False, progress=None, repair: bool = False) -> dict:
     """1h futures blocks (with the month's funding settlements) for every perpetual of the inventory quoted in `quotes`
     over the archive months of its lifetime that overlap [start, end], plus the month before `start` (the ranking of a
-    month reads the previous one). Resumable; `rebuild` downloads again."""
+    month reads the previous one). Whole days a monthly file lacks come from the daily files (fill_days). Resumable;
+    `rebuild` downloads again, `repair` only the stored months with whole days missing or stored as not served."""
     from heartless.data.universe import prev_month
 
     start = _month_ms(prev_month(month_str(start)))
-    inv = [r for r in store.load_symbol_inventory(kind="perpetual") if r["quote"] in quotes]
+    every = store.load_symbol_inventory()
+    newest = max((r["last_month"] for r in every if r["last_month"]), default=None)
+    inv = [r for r in every if r["kind"] == "perpetual" and r["quote"] in quotes]
     if symbols:
         inv = [r for r in inv if r["symbol"] in set(symbols)]
+    bounds = {r["symbol"]: (r["first_month"], r["last_month"]) for r in inv}
     wanted = {r["symbol"]: archive_months(r["first_month"], r["last_month"], r["missing_months"], start, end)
               for r in inv}
-    plan = _plan(store, FUT_TABLE, wanted, rebuild)
+    stale = repair_candidates(store, FUT_TABLE, bounds, newest, empty=True) if repair and not rebuild else set()
+    plan = _plan(store, FUT_TABLE, wanted, rebuild, stale)
     if progress:
         progress(f"{FUT_TABLE}: {sum(len(v) for v in plan.values())} months of {len(plan)} symbols to download "
-                 f"({sum(len(v) for v in wanted.values())} in the window)")
+                 f"({sum(len(v) for v in wanted.values())} in the window"
+                 + (f", {len(stale)} stored months to repair)" if repair else ")"))
 
     async def fetch(sym: str, month: str):
         kb, fb = await asyncio.gather(archive.get(monthly_kline_path(sym, month)),
                                       archive.get(monthly_funding_path(sym, month)) if funding else _none())
         if kb is None:
-            return None
-        return encode_month(kline_rows(kb, month), month, funding_rows(fb))
+            # the bucket listing has this file, and archive.get answers None also after exhausted 5xx retries: never
+            # stored as an empty month (that would hide it for good), the next run asks again
+            raise LookupError("listed monthly file not served")
+        rows, filled = await fill_days(archive, kline_rows(kb, month), sym, month,
+                                       *_fill_rule(month, bounds[sym], newest))
+        blob, summary = encode_month(rows, month, funding_rows(fb))
+        return blob, {**summary, "filled_days": filled}
 
     stats = await _build(store, archive, FUT_TABLE, plan, fetch, progress)
     store.refresh_inventory_trades(FUT_TABLE)
     return stats
 
 
-async def build_spot(store, archive, start: int, end: int, symbols=None, rebuild: bool = False, progress=None) -> dict:
+async def build_spot(store, archive, start: int, end: int, symbols=None, rebuild: bool = False, progress=None,
+                     repair: bool = False) -> dict:
     """1h spot blocks (close, quote volume) for every USDT perpetual of the inventory with a spot USDT market of the same
     asset, over the months both markets were listed that overlap [start, end] (spot history before the perpetual
-    existed is of no use to a basis). Stored under the spot symbol."""
-    inv = [r for r in store.load_symbol_inventory(kind="perpetual") if r["quote"] == "USDT" and r["spot_symbol"]]
+    existed is of no use to a basis). Stored under the spot symbol; whole days a monthly file lacks come from the daily
+    files. A month the spot listing does not have (a spot trading halt) is stored as not served."""
+    every = store.load_symbol_inventory(kind="perpetual")
+    newest = max((r["spot_last_month"] for r in every if r.get("spot_last_month")), default=None)
+    inv = [r for r in every if r["quote"] == "USDT" and r["spot_symbol"]]
     if symbols:
         inv = [r for r in inv if r["symbol"] in set(symbols) or r["spot_symbol"] in set(symbols)]
+    bounds = {r["spot_symbol"]: (r["spot_first_month"], r["spot_last_month"]) for r in inv}
     wanted: dict[str, list[str]] = {}
     for r in inv:
         perp = set(archive_months(r["first_month"], r["last_month"], r["missing_months"], start, end))
         spot = archive_months(r["spot_first_month"], r["spot_last_month"], [], start, end)
         wanted.setdefault(r["spot_symbol"], [])
         wanted[r["spot_symbol"]] = sorted(set(wanted[r["spot_symbol"]]) | {m for m in spot if m in perp})
-    plan = _plan(store, SPOT_TABLE, wanted, rebuild)
+    stale = repair_candidates(store, SPOT_TABLE, bounds, newest) if repair and not rebuild else set()
+    plan = _plan(store, SPOT_TABLE, wanted, rebuild, stale)
     if progress:
-        progress(f"{SPOT_TABLE}: {sum(len(v) for v in plan.values())} months of {len(plan)} spot symbols to download")
+        progress(f"{SPOT_TABLE}: {sum(len(v) for v in plan.values())} months of {len(plan)} spot symbols to download"
+                 + (f" ({len(stale)} to repair)" if repair else ""))
 
     async def fetch(sym: str, month: str):
         kb = await archive.get(monthly_kline_path(sym, month, market="spot"))
-        return None if kb is None else encode_month(kline_rows(kb, month), month, spot=True)
+        if kb is None:
+            return None
+        rows, filled = await fill_days(archive, kline_rows(kb, month), sym, month,
+                                       *_fill_rule(month, bounds[sym], newest), market="spot")
+        blob, summary = encode_month(rows, month, spot=True)
+        return blob, {**summary, "filled_days": filled}
 
     return await _build(store, archive, SPOT_TABLE, plan, fetch, progress)
 
@@ -743,11 +844,12 @@ def main_cli(settings, args) -> None:
                         end = _when(args.end, end=True) or int(time.time() * 1000)
                         syms = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
                         t1 = time.time()
+                        repair = bool(getattr(args, "repair", False))
                         if args.spot:
-                            out["spot"] = await build_spot(store, arch, start, end, syms, args.rebuild, say)
+                            out["spot"] = await build_spot(store, arch, start, end, syms, args.rebuild, say, repair)
                         else:
                             out["futures"] = await build_futures(store, arch, start, end, symbols=syms,
-                                                                 rebuild=args.rebuild, progress=say)
+                                                                 rebuild=args.rebuild, progress=say, repair=repair)
                         out["build_seconds"] = round(time.time() - t1, 1)
                     out["downloaded_mb"] = round(arch.downloaded_bytes / 1e6, 1)
                 return out
@@ -756,8 +858,9 @@ def main_cli(settings, args) -> None:
             for k in ("futures", "spot"):
                 if k in res:
                     st = res[k]
-                    print(f"{k}: {st['symbols']} symbols, {st['blocks']} blocks ({st['empty']} not served), "
-                          f"{st['bytes'] / 1e6:.1f} MB stored, {len(st['failed'])} failed"
+                    print(f"{k}: {st['symbols']} symbols, {st['blocks']} blocks ({st['empty']} not served, "
+                          f"{st['filled_days']} days filled from daily files), {st['bytes'] / 1e6:.1f} MB stored, "
+                          f"{len(st['failed'])} failed"
                           + (f": {', '.join(st['failed'][:10])}" if st["failed"] else ""))
             print(f"downloaded {res['downloaded_mb']} MB; {res.get('build_seconds', res.get('inventory_seconds'))}s; "
                   f"max RSS {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f} MB -> {path}")

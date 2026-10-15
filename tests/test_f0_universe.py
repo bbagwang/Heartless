@@ -118,11 +118,14 @@ def test_resolve_for_run_reports_symbols_without_1m_candles(udb, tmp_path):
     cdb = tmp_path / "candles.db"
     cs = Store(cdb)
     cs.save_candles("BIGUSDT", [Candle(M("2024-01"), 1, 1, 1, 1, 1, 1, 1, 1, M("2024-01") + 59_999)])
+    # GONE has 1m candles, but only before the window: it would only come back as a lab error, so it is skipped
+    cs.save_candles("GONEUSDT", [Candle(M("2023-10"), 1, 1, 1, 1, 1, 1, 1, 1, M("2023-10") + 59_999)])
     cs.close()
     res = U.resolve_for_run(udb.path, cdb, M("2023-12"), M("2024-02") - 1, 2)
     assert res["research"] == ["BIGUSDT", "GONEUSDT", "MIDUSDT"] or set(res["research"]) == {"BIGUSDT", "GONEUSDT",
                                                                                              "MIDUSDT"}
     assert res["symbols"] == ["BIGUSDT"] and res["skipped"] == ["GONEUSDT", "MIDUSDT"]
+    assert res["windows"] == {"BIGUSDT": [(M("2023-12"), M("2024-02") - 1)]} and res["member_share"] == 1.0
     with pytest.raises(ValueError, match="cannot be ranked"):
         U.resolve_for_run(udb.path, cdb, M("2023-10"), M("2023-12") - 1, 2)
     with pytest.raises(ValueError, match="no universe database"):
@@ -195,6 +198,10 @@ def test_lab_universe_topn_runs_the_stored_members_and_records_the_skipped(udb, 
     assert doc["universe"] == "top2" and doc["symbols"] == ["BIGUSDT"]
     assert doc["universe_resolution"]["skipped"] == ["GONEUSDT", "MIDUSDT"]
     assert set(doc["universe_resolution"]["research"]) == {"BIGUSDT", "GONEUSDT", "MIDUSDT"}
+    # the membership spans travel with the result: BIG was top 2 in December and January, clipped to the window
+    assert doc["universe_resolution"]["windows"] == {"BIGUSDT": [[lab.parse_when("2023-12-29"),
+                                                                  lab.parse_when("2024-01-03", end=True)]]}
+    assert doc["universe_resolution"]["members"]["GONEUSDT"] == ["2023-12"]
     # a topN universe needs the window up front
     with pytest.raises(SystemExit):
         cli._top_universe(settings, SimpleNamespace(universe="top2", years=None, start=None, end=None), "lab")
@@ -255,3 +262,95 @@ def test_live_selection_from_settings():
     sel = U.live_selection(s, infos, tickers, book)
     assert sel.trade == ["BTCUSDT", "YOUNGUSDT"] and sel.reference == ["BTCUSDT"]
     assert Settings(_env_file=None).always_include_list == ["BTCUSDT"]
+
+
+# --- review: a relisting is aged from its new first trade (live: the exchange's new onboardDate) ---------------------------
+def test_relisting_counts_the_listing_age_from_the_new_first_trade(tmp_path):
+    """BIG trades throughout. BACK (listed 2023-10) stops after November, flat December file, trades again from
+    2024-01-10 with the largest volume: 22 days old on 2024-02-01 (the PUMPUSDT 2025-08 case), ranked from 2024-03.
+    INSIDE pauses inside October (trades on the 1st..3rd and from the 20th): 12 days old on 2023-11-01. OLD was listed
+    before the stored months (first archive month 2023-01), its first stored months are flat files, it trades from
+    2024-01-08: a return, not a fresh listing of 2023-01."""
+    st = Store(tmp_path / "u.db")
+    st.save_symbol_inventory([_inv("BIGUSDT", "2023-10", "2024-03"), _inv("BACKUSDT", "2023-10", "2024-03"),
+                              _inv("INSIDEUSDT", "2023-10", "2024-03"), _inv("OLDUSDT", "2023-01", "2024-03")])
+    blocks = []
+    for m in ("2023-10", "2023-11", "2023-12", "2024-01", "2024-02", "2024-03"):
+        blocks.append(_block("BIGUSDT", m, 1e6))
+        blocks.append(_block("BACKUSDT", m, 9e7, days=range(10, 32) if m == "2024-01" else None,
+                             zero=m == "2023-12"))
+        blocks.append(_block("INSIDEUSDT", m, 5e5, days=[1, 2, 3, *range(20, 32)] if m == "2023-10" else None))
+        blocks.append(_block("OLDUSDT", m, 8e7, days=range(8, 32) if m == "2024-01" else None, zero=m < "2024-01"))
+    st.save_kline_blocks(SI.FUT_TABLE, blocks)
+    st.refresh_inventory_trades()
+    rel = U.relistings(st)
+    assert rel == {"BACKUSDT": [M("2024-01") + 9 * MS_DAY], "INSIDEUSDT": [M("2023-10") + 19 * MS_DAY],
+                   "OLDUSDT": [M("2024-01") + 7 * MS_DAY]}
+    assert "INSIDEUSDT" not in _syms(U.month_ranking(st, "2023-11"))
+    assert "INSIDEUSDT" in _syms(U.month_ranking(st, "2023-12"))
+    feb = _syms(U.month_ranking(st, "2024-02"))
+    assert "BACKUSDT" not in feb and "OLDUSDT" not in feb and feb[0] == "BIGUSDT"
+    assert _syms(U.month_ranking(st, "2024-03"))[:2] == ["BACKUSDT", "OLDUSDT"]
+    # without the relisting rule BACK would have ranked first in February on its original 2023-10 listing
+    assert _syms(U.month_ranking(st, "2024-02", relisted={}))[0] == "BACKUSDT"
+    inv = {r["symbol"]: r for r in st.load_symbol_inventory()}
+    assert U.listed_as_of(inv["BACKUSDT"], M("2024-02"), rel) == M("2024-01") + 9 * MS_DAY
+    assert U.listed_as_of(inv["BACKUSDT"], M("2024-01"), rel) == M("2023-10")  # not yet known at the start of January
+    st.close()
+
+
+# --- review: the union of monthly members carries a look-ahead outside each member's months ---------------------------
+def test_membership_windows_and_member_trades():
+    members = {"AUSDT": ["2024-01", "2024-02", "2024-04"], "BUSDT": ["2024-03"]}
+    w = U.membership_windows(members, M("2024-01") + 5 * MS_DAY, M("2024-05") - 1)
+    assert w == {"AUSDT": [(M("2024-01") + 5 * MS_DAY, M("2024-03") - 1), (M("2024-04"), M("2024-05") - 1)],
+                 "BUSDT": [(M("2024-03"), M("2024-04") - 1)]}
+    trades = [{"symbol": "AUSDT", "entry_time": M("2024-02") + 1}, {"symbol": "AUSDT", "entry_time": M("2024-03") + 1},
+              {"symbol": "BUSDT", "entry_time": M("2024-03") + 1}, {"symbol": "BUSDT", "entry_time": M("2024-02")},
+              {"symbol": "CUSDT", "entry_time": M("2024-03")}]
+    # A in March (not a member) and B in February (a member only from March: picked by its February surge) drop out
+    assert U.member_trades(trades, w) == [trades[0], trades[2]]
+
+
+def test_discover_resolves_the_universe_over_train_only(udb, tmp_path, monkeypatch, capsys):
+    """VALID must not choose the symbols mined on TRAIN: with TRAIN = December 2023 the top-2 universe is BIG and GONE,
+    although NEW (top in March 2024, inside VALID) would join a TRAIN+VALID resolution."""
+    from heartless import cli
+    from heartless.core.models import Candle
+    from heartless.learning import lab
+
+    db = tmp_path / "c.db"
+    cs = Store(db)
+    for sym in ("BIGUSDT", "GONEUSDT", "NEWUSDT"):
+        cs.save_candles(sym, [Candle(M("2023-12") + 60_000 * i, 1, 1, 1, 1, 1, 1, 1, 1, M("2023-12") + 60_000 * i
+                                     + 59_999) for i in range(3)])
+    cs.close()
+    settings = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(tmp_path), UNIVERSE_DB=str(udb.path))
+    monkeypatch.setattr(settings.__class__, "db_path", property(lambda self: db))
+    monkeypatch.setattr(lab, "UNIVERSES", dict(lab.UNIVERSES))
+    res = cli._top_universe(settings, SimpleNamespace(universe="top2", train="2023-12-01:2024-01-01",
+                                                      valid="2024-03-01:2024-04-01"), "discover")
+    assert set(res["research"]) == {"BIGUSDT", "GONEUSDT"} and lab.UNIVERSES["top2"] == ["BIGUSDT", "GONEUSDT"]
+    err = capsys.readouterr().err
+    assert "TRAIN window" in err and "look-ahead" in err
+    whole = U.resolve_for_run(udb.path, db, M("2023-12"), M("2024-04") - 1, 2)
+    assert "NEWUSDT" in whole["research"]  # what the old TRAIN+VALID resolution let in
+
+
+def test_relisting_inside_a_month_at_exactly_the_gap(tmp_path):
+    """No trade from 2023-10-03 13:00 to 2023-10-10 11:00: exactly 7 days between two traded hours, but only six whole
+    calendar days without a trade. The block must still be decoded and the relisting found."""
+    month = "2023-10"
+    rows = SI.kline_rows(_zip(kline_csv(month, 10.0, 1e6)), month)
+    a, b = M(month) + 2 * MS_DAY + 12 * 3_600_000, M(month) + 9 * MS_DAY + 12 * 3_600_000
+    for r in rows:
+        if a < int(r[0]) < b:
+            r[7] = r[10] = "0"
+    blob, s = SI.encode_month(rows, month)
+    st = Store(tmp_path / "u.db")
+    st.save_symbol_inventory([_inv("GAPUSDT", "2023-10", "2023-11")])
+    st.save_kline_blocks(SI.FUT_TABLE, [("GAPUSDT", M(month), s["n"], s["first_ts"], s["last_ts"], s["first_trade"],
+                                         s["last_trade"], s["med_dqv"], s["days_traded"], blob)])
+    st.refresh_inventory_trades()
+    assert s["days_traded"] == 31 - 6 and U.relistings(st) == {"GAPUSDT": [b]}
+    st.close()

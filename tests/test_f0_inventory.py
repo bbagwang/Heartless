@@ -276,3 +276,91 @@ def test_inventory_report_counts_listings_and_delistings(built):
     assert json.loads(text) == json.loads(json.dumps(rep))
     big = SI.dumps_report({"symbols": [[i, "x"] for i in range(20)], "n": 1})
     assert len(big.splitlines()) == 20 + 5 and json.loads(big)["symbols"][19] == [19, "x"]
+
+
+# --- review: truncated monthly files (SOLUSDT 2022-02 ends on the 25th, 2022-04 starts on the 3rd) ----------------------
+def _day_slice(csv_text: str, day: str) -> bytes:
+    """The rows of one UTC day of an hourly CSV, as the daily archive file of that day (with its header)."""
+    a = SI._month_ms(day[:7]) + (int(day[8:]) - 1) * DAY
+    lines = csv_text.splitlines()
+    keep = [ln for ln in lines[1:] if a <= int(ln.split(",")[0]) < a + DAY]
+    return _zip("\n".join([lines[0]] + keep))
+
+
+def test_missing_days_rule():
+    m = "2024-01"
+    t = [SI._month_ms(m) + d * DAY + h * H for d in range(2, 25) for h in range(24)]  # Jan 3 .. Jan 25
+    days = SI.missing_days(t, m)
+    assert days[:2] == ["2024-01-01", "2024-01-02"] and days[2:] == [f"2024-01-{d}" for d in range(26, 32)]
+    assert SI.missing_days(t, m, skip_head=True)[0] == "2024-01-26"  # the listing month: nothing before the first bar
+    assert SI.missing_days(t, m, skip_tail=True) == ["2024-01-01", "2024-01-02"]  # the last file of a delisted symbol
+    assert SI.missing_days([], m, skip_head=True) == [] and len(SI.missing_days([], m)) == 31
+    assert SI.missing_days(t + [SI._month_ms(m) + 9 * DAY + 5 * H], m, True, True) == []  # a day with one bar counts
+
+
+def test_truncated_monthly_files_are_filled_from_daily_files_and_repaired(tmp_path):
+    from heartless.data.archive import daily_kline_path
+
+    objs, listing = _world()
+    full = kline_csv("2024-01", 100.0, 5e6)
+    head = full.splitlines()
+    cut = SI._month_ms("2024-01") + 25 * DAY
+    objs[monthly_kline_path("AAAUSDT", "2024-01")] = _zip("\n".join(
+        [head[0]] + [ln for ln in head[1:] if int(ln.split(",")[0]) < cut]))  # ends on the 25th
+    daily = {daily_kline_path("AAAUSDT", f"2024-01-{d}"): _day_slice(full, f"2024-01-{d}") for d in range(26, 32)}
+    month = "2024-01"
+    want = SI.encode_month(SI.kline_rows(_zip(full), month), month, SI.funding_rows(_zip(funding_csv(month))))
+
+    def block(st):
+        r = next(b for b in st.kline_block_index(SI.FUT_TABLE, "AAAUSDT") if SI.month_str(b["month"]) == month)
+        return r, SI.decode_month(st.load_kline_blocks(SI.FUT_TABLE, "AAAUSDT", r["month"], r["month"])[0][1])
+
+    # a fresh build fills the six days: the block equals the one of the complete file (prices, volumes, funding)
+    st = Store(tmp_path / "a.db")
+    arch = FakeArchive({**objs, **daily}, listing)
+    asyncio.run(SI.refresh_inventory(st, arch))
+    stats = asyncio.run(SI.build_futures(st, arch, SI._month_ms("2023-12"), SI._month_ms("2024-02") + 10 * DAY))
+    r, d = block(st)
+    assert stats["filled_days"] == 6 and r["n"] == 31 * 24 and r["med_dqv"] == want[1]["med_dqv"]
+    ref = SI.decode_month(want[0])
+    for k in ref:
+        assert np.array_equal(d[k], ref[k], equal_nan=True), k
+    # the listing month's head (NEWUSDT from the 15th) and an active symbol's complete months ask for no daily file
+    assert not [p for p in arch.requested if "/daily/" in p and ("NEWUSDT" in p or "PEPE" in p)]
+    st.close()
+
+    # a store built before the fill (daily files not there): resume leaves it, --repair downloads it again
+    st = Store(tmp_path / "b.db")
+    arch = FakeArchive(dict(objs), listing)
+    asyncio.run(SI.refresh_inventory(st, arch))
+    asyncio.run(SI.build_futures(st, arch, SI._month_ms("2023-12"), SI._month_ms("2024-02") + 10 * DAY))
+    assert block(st)[0]["n"] == 25 * 24
+    inv = {x["symbol"]: (x["first_month"], x["last_month"]) for x in st.load_symbol_inventory()}
+    # GONE's December stops on the 10th but its archive goes on (flat January file): a candidate the daily files
+    # cannot fill; NEW's listing month is not one
+    assert SI.repair_candidates(st, SI.FUT_TABLE, inv, "2024-02") == {("AAAUSDT", month), ("GONEUSDT", "2023-12")}
+    arch.objects.update(daily)
+    arch.requested.clear()
+    asyncio.run(SI.build_futures(st, arch, SI._month_ms("2023-12"), SI._month_ms("2024-02") + 10 * DAY))
+    assert arch.requested == [] and block(st)[0]["n"] == 25 * 24  # a plain resume does not touch stored months
+    rep = asyncio.run(SI.build_futures(st, arch, SI._month_ms("2023-12"), SI._month_ms("2024-02") + 10 * DAY,
+                                       repair=True))
+    assert rep["blocks"] == 2 and rep["filled_days"] == 6 and block(st)[0]["n"] == 31 * 24
+    assert np.array_equal(block(st)[1]["close"], ref["close"])
+    st.close()
+
+
+def test_a_listed_futures_month_that_is_not_served_is_retried_not_stored_empty(tmp_path):
+    objs, listing = _world()
+    st = Store(tmp_path / "u.db")
+    arch = FakeArchive(objs, listing)
+    asyncio.run(SI.refresh_inventory(st, arch))
+    blob = arch.objects.pop(monthly_kline_path("AAAUSDT", "2024-02"))  # listed, then not served (e.g. 5xx retries)
+    stats = asyncio.run(SI.build_futures(st, arch, SI._month_ms("2023-12"), SI._month_ms("2024-02") + 10 * DAY))
+    assert stats["empty"] == 0 and any(f.startswith("AAAUSDT 2024-02: LookupError") for f in stats["failed"])
+    assert ("AAAUSDT", SI._month_ms("2024-02")) not in {(b["symbol"], b["month"]) for b in
+                                                        st.kline_block_index(SI.FUT_TABLE)}
+    arch.objects[monthly_kline_path("AAAUSDT", "2024-02")] = blob
+    again = asyncio.run(SI.build_futures(st, arch, SI._month_ms("2023-12"), SI._month_ms("2024-02") + 10 * DAY))
+    assert again["blocks"] == 1 and again["failed"] == []
+    st.close()
