@@ -1,0 +1,432 @@
+{
+ "what": "P3 acceptance (ROADMAP P3): FIFO vs portfolio allocator on the joint one-account backtest, 20 symbols, production risk settings, vol_breakout_dbox (comp_q=1.0) the only alpha (docs/results/p2_sealed2025_params.json)",
+ "note": "no alpha is enabled by default after the sealed-2025 exam, so the allocator ships off whatever these numbers say (ROADMAP section 6, 2026-10-10 protocol step 4); they are recorded for information",
+ "rule": "allocator on by default only if TRAIN return/maxDD beats FIFO and VALID return/maxDD is not worse",
+ "train_pooled_method": "the three calendar-year accounts (2022-01-13.., 2023, 2024; each a fresh 10,000 USDT) chained into one compounded daily curve; PF pooled from each year's gross win / loss",
+ "windows": {
+  "2022": {
+   "fifo": {
+    "window": [
+     "2022-01-13 00:00",
+     "2022-12-31 23:59"
+    ],
+    "symbols_loaded": 19,
+    "return_pct": -1.669,
+    "max_dd_pct": 6.562,
+    "return_over_maxdd": -0.254,
+    "n": 158,
+    "avg_r": -0.0177,
+    "profit_factor": 0.911,
+    "t_day": -0.3,
+    "win_rate": 46.8,
+    "net": -166.9,
+    "fees": 58.9,
+    "funding": -17.9,
+    "rejected": {
+     "max same-direction positions": 339
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 70,
+      "avg_r": -0.1422
+     },
+     "SHORT": {
+      "n": 88,
+      "avg_r": 0.0813
+     }
+    },
+    "git_commit": "c16848a3c93b0089bb16cc5f6347e24be636f76f",
+    "git_dirty": false,
+    "seconds": 404.6
+   },
+   "alloc": {
+    "window": [
+     "2022-01-13 00:00",
+     "2022-12-31 23:59"
+    ],
+    "symbols_loaded": 19,
+    "return_pct": 1.796,
+    "max_dd_pct": 3.278,
+    "return_over_maxdd": 0.548,
+    "n": 145,
+    "avg_r": 0.039,
+    "profit_factor": 1.116,
+    "t_day": 0.41,
+    "win_rate": 44.1,
+    "net": 179.6,
+    "fees": 50.0,
+    "funding": -14.8,
+    "rejected": {
+     "max same-direction positions": 215,
+     "same-direction risk budget": 153
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 72,
+      "avg_r": -0.0284
+     },
+     "SHORT": {
+      "n": 73,
+      "avg_r": 0.1055
+     }
+    },
+    "git_commit": "c16848a3c93b0089bb16cc5f6347e24be636f76f",
+    "git_dirty": false,
+    "seconds": 417.0
+   }
+  },
+  "2023": {
+   "fifo": {
+    "window": [
+     "2023-01-01 00:00",
+     "2023-12-31 23:59"
+    ],
+    "symbols_loaded": 20,
+    "return_pct": 19.042,
+    "max_dd_pct": 8.335,
+    "return_over_maxdd": 2.285,
+    "n": 192,
+    "avg_r": 0.1913,
+    "profit_factor": 1.685,
+    "t_day": 2.22,
+    "win_rate": 49.0,
+    "net": 1904.2,
+    "fees": 137.2,
+    "funding": -40.8,
+    "rejected": {
+     "max same-direction positions": 373,
+     "max positions": 1
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 130,
+      "avg_r": 0.2713
+     },
+     "SHORT": {
+      "n": 62,
+      "avg_r": 0.0234
+     }
+    },
+    "git_commit": "c16848a3c93b0089bb16cc5f6347e24be636f76f",
+    "git_dirty": false,
+    "seconds": 376.9
+   },
+   "alloc": {
+    "window": [
+     "2023-01-01 00:00",
+     "2023-12-31 23:59"
+    ],
+    "symbols_loaded": 20,
+    "return_pct": 15.679,
+    "max_dd_pct": 6.002,
+    "return_over_maxdd": 2.612,
+    "n": 152,
+    "avg_r": 0.2355,
+    "profit_factor": 1.758,
+    "t_day": 2.44,
+    "win_rate": 51.3,
+    "net": 1567.9,
+    "fees": 113.1,
+    "funding": -14.8,
+    "rejected": {
+     "max same-direction positions": 220,
+     "same-direction risk budget": 211,
+     "total risk budget": 15
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 104,
+      "avg_r": 0.3101
+     },
+     "SHORT": {
+      "n": 48,
+      "avg_r": 0.0741
+     }
+    },
+    "git_commit": "c16848a3c93b0089bb16cc5f6347e24be636f76f",
+    "git_dirty": false,
+    "seconds": 387.8
+   }
+  },
+  "2024": {
+   "fifo": {
+    "window": [
+     "2024-01-01 00:00",
+     "2024-12-31 23:59"
+    ],
+    "symbols_loaded": 20,
+    "return_pct": 11.431,
+    "max_dd_pct": 8.577,
+    "return_over_maxdd": 1.333,
+    "n": 182,
+    "avg_r": 0.1218,
+    "profit_factor": 1.498,
+    "t_day": 1.97,
+    "win_rate": 59.3,
+    "net": 1143.1,
+    "fees": 115.5,
+    "funding": -55.4,
+    "rejected": {
+     "max same-direction positions": 352,
+     "max positions": 3
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 130,
+      "avg_r": 0.144
+     },
+     "SHORT": {
+      "n": 52,
+      "avg_r": 0.0664
+     }
+    },
+    "git_commit": "c16848a3c93b0089bb16cc5f6347e24be636f76f",
+    "git_dirty": false,
+    "seconds": 383.5
+   },
+   "alloc": {
+    "window": [
+     "2024-01-01 00:00",
+     "2024-12-31 23:59"
+    ],
+    "symbols_loaded": 20,
+    "return_pct": 5.109,
+    "max_dd_pct": 7.194,
+    "return_over_maxdd": 0.71,
+    "n": 159,
+    "avg_r": 0.0843,
+    "profit_factor": 1.256,
+    "t_day": 1.34,
+    "win_rate": 51.6,
+    "net": 510.9,
+    "fees": 98.5,
+    "funding": -60.3,
+    "rejected": {
+     "max same-direction positions": 205,
+     "same-direction risk budget": 172,
+     "total risk budget": 14,
+     "max positions": 3
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 116,
+      "avg_r": 0.0874
+     },
+     "SHORT": {
+      "n": 43,
+      "avg_r": 0.076
+     }
+    },
+    "git_commit": "c16848a3c93b0089bb16cc5f6347e24be636f76f",
+    "git_dirty": false,
+    "seconds": 387.1
+   }
+  },
+  "valid": {
+   "fifo": {
+    "window": [
+     "2026-01-13 00:00",
+     "2026-09-30 23:59"
+    ],
+    "symbols_loaded": 20,
+    "return_pct": -2.097,
+    "max_dd_pct": 4.687,
+    "return_over_maxdd": -0.447,
+    "n": 112,
+    "avg_r": -0.0755,
+    "profit_factor": 0.823,
+    "t_day": -0.85,
+    "win_rate": 39.3,
+    "net": -209.7,
+    "fees": 48.0,
+    "funding": -9.1,
+    "rejected": {
+     "max same-direction positions": 138
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 53,
+      "avg_r": -0.228
+     },
+     "SHORT": {
+      "n": 59,
+      "avg_r": 0.0615
+     }
+    },
+    "git_commit": "c16848a3c93b0089bb16cc5f6347e24be636f76f",
+    "git_dirty": false,
+    "seconds": 333.5
+   },
+   "alloc": {
+    "window": [
+     "2026-01-13 00:00",
+     "2026-09-30 23:59"
+    ],
+    "symbols_loaded": 20,
+    "return_pct": -1.843,
+    "max_dd_pct": 4.395,
+    "return_over_maxdd": -0.419,
+    "n": 117,
+    "avg_r": -0.0452,
+    "profit_factor": 0.841,
+    "t_day": -0.46,
+    "win_rate": 39.3,
+    "net": -184.3,
+    "fees": 51.1,
+    "funding": -9.8,
+    "rejected": {
+     "max same-direction positions": 125,
+     "same-direction risk budget": 80
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 62,
+      "avg_r": -0.1379
+     },
+     "SHORT": {
+      "n": 55,
+      "avg_r": 0.0593
+     }
+    },
+    "git_commit": "c16848a3c93b0089bb16cc5f6347e24be636f76f",
+    "git_dirty": false,
+    "seconds": 334.6
+   }
+  },
+  "train3y": {
+   "fifo": {
+    "window": [
+     "2022-01-13 00:00",
+     "2024-12-31 23:59"
+    ],
+    "symbols_loaded": 20,
+    "return_pct": 23.687,
+    "max_dd_pct": 8.363,
+    "return_over_maxdd": 2.832,
+    "n": 530,
+    "avg_r": 0.1023,
+    "profit_factor": 1.359,
+    "t_day": 2.28,
+    "win_rate": 51.5,
+    "net": 2368.7,
+    "fees": 287.5,
+    "funding": -104.7,
+    "rejected": {
+     "max same-direction positions": 1061,
+     "max positions": 4
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 328,
+      "avg_r": 0.1315
+     },
+     "SHORT": {
+      "n": 202,
+      "avg_r": 0.0548
+     }
+    },
+    "git_commit": "58170c4b69d73f44b998013c1850e0174656b5af",
+    "git_dirty": false,
+    "seconds": 1304.7
+   },
+   "alloc": {
+    "window": [
+     "2022-01-13 00:00",
+     "2024-12-31 23:59"
+    ],
+    "symbols_loaded": 20,
+    "return_pct": 19.002,
+    "max_dd_pct": 6.423,
+    "return_over_maxdd": 2.958,
+    "n": 477,
+    "avg_r": 0.0997,
+    "profit_factor": 1.347,
+    "t_day": 2.09,
+    "win_rate": 49.3,
+    "net": 1900.2,
+    "fees": 247.7,
+    "funding": -88.9,
+    "rejected": {
+     "max same-direction positions": 694,
+     "same-direction risk budget": 455,
+     "total risk budget": 18
+    },
+    "drawdown_pause": false,
+    "by_side": {
+     "LONG": {
+      "n": 307,
+      "avg_r": 0.1132
+     },
+     "SHORT": {
+      "n": 170,
+      "avg_r": 0.0754
+     }
+    },
+    "git_commit": "58170c4b69d73f44b998013c1850e0174656b5af",
+    "git_dirty": false,
+    "seconds": 1227.4
+   }
+  }
+ },
+ "train_pooled": {
+  "fifo": {
+   "return_pct": 30.436,
+   "max_dd_pct": 8.577,
+   "return_over_maxdd": 3.549,
+   "n": 532,
+   "avg_r": 0.1055,
+   "profit_factor": 1.414,
+   "net_sum": 2880.4,
+   "rejected": {
+    "max same-direction positions": 1064,
+    "max positions": 4
+   }
+  },
+  "alloc": {
+   "return_pct": 23.773,
+   "max_dd_pct": 7.194,
+   "return_over_maxdd": 3.305,
+   "n": 456,
+   "avg_r": 0.1203,
+   "profit_factor": 1.402,
+   "net_sum": 2258.4,
+   "rejected": {
+    "max same-direction positions": 640,
+    "same-direction risk budget": 536,
+    "total risk budget": 29,
+    "max positions": 3
+   }
+  }
+ },
+ "rule_result": {
+  "train_basis": "train_pooled (calendar-year accounts chained)",
+  "train_fifo": 3.549,
+  "train_alloc": 3.305,
+  "valid_fifo": -0.447,
+  "valid_alloc": -0.419,
+  "train_improves": false,
+  "valid_not_worse": true,
+  "would_enable": false
+ },
+ "rule_result_train3y_check": {
+  "train_basis": "train3y (one account, 2022-01-13 .. 2024-12-31)",
+  "train_fifo": 2.832,
+  "train_alloc": 2.958,
+  "valid_fifo": -0.447,
+  "valid_alloc": -0.419,
+  "train_improves": true,
+  "valid_not_worse": true,
+  "would_enable": true
+ },
+ "enabled_alphas_by_default": 0,
+ "default": "PORTFOLIO_ALLOCATOR=false"
+}

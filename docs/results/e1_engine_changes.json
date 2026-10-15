@@ -1,0 +1,476 @@
+{
+ "what": "E1 engine changes (docs/PORTFOLIO.md sections 2-4): trade identity of the shipped / candidate alphas, realized risk at fill vs the per-trade budget, the funding-schedule effect, and the backtest memory fix",
+ "code": {
+  "before": "82e25a8",
+  "after": "c16848a (b473c02 + allocator tie-break; lab trade lists byte-identical to b473c02)"
+ },
+ "trade_identity": {
+  "setup": "heartless lab, research DB (data/research), 2026-05-01..2026-08-31, 12 core symbols, shipped default params, market context built from the same DB",
+  "path_fields": [
+   "symbol",
+   "side",
+   "entry_time",
+   "exit_time",
+   "exit_reason",
+   "bars_held"
+  ],
+  "price_tolerance": "entry/exit prices within 2e-4 relative (the paper account's size impact)",
+  "by_config": {
+   "vol_breakout_dbox": {
+    "n_before": 42,
+    "n_after": 42,
+    "identical_path": true,
+    "identical_all_fields": false,
+    "max_px_diff_bps": 0.0,
+    "max_abs_dR": 2.7576434362686086e-06,
+    "mean_abs_dR": 4.888437409921295e-07,
+    "avgR_before": 0.397648,
+    "avgR_after": 0.397649,
+    "notional_ratio": [
+     0.9778,
+     0.994,
+     1.0
+    ],
+    "risk_ratio": [
+     0.9778,
+     0.994,
+     1.0
+    ],
+    "net_before": 631.8,
+    "net_after": 627.01
+   },
+   "vol_breakout_dbox_comp_q_1_0": {
+    "n_before": 90,
+    "n_after": 90,
+    "identical_path": true,
+    "identical_all_fields": false,
+    "max_px_diff_bps": 0.0,
+    "max_abs_dR": 2.757640474637668e-06,
+    "mean_abs_dR": 4.053472740644474e-07,
+    "avgR_before": 0.407396,
+    "avgR_after": 0.407397,
+    "notional_ratio": [
+     0.9825,
+     0.9941,
+     1.0
+    ],
+    "risk_ratio": [
+     0.9825,
+     0.9941,
+     1.0
+    ],
+    "net_before": 1564.08,
+    "net_after": 1553.41
+   },
+   "htf_trend": {
+    "n_before": 211,
+    "n_after": 211,
+    "identical_path": true,
+    "identical_all_fields": false,
+    "max_px_diff_bps": 0.001,
+    "max_abs_dR": 7.876891012559284e-06,
+    "mean_abs_dR": 3.423399545080747e-07,
+    "avgR_before": 0.147242,
+    "avgR_after": 0.147242,
+    "notional_ratio": [
+     0.989,
+     1.0,
+     1.0161
+    ],
+    "risk_ratio": [
+     0.989,
+     1.0,
+     1.0161
+    ],
+    "net_before": 1218.75,
+    "net_after": 1219.73
+   },
+   "intraday_levels": {
+    "n_before": 113,
+    "n_after": 113,
+    "identical_path": true,
+    "identical_all_fields": false,
+    "max_px_diff_bps": 0.001,
+    "max_abs_dR": 0.002109585136706116,
+    "mean_abs_dR": 4.863987630587972e-05,
+    "avgR_before": 0.309303,
+    "avgR_after": 0.309276,
+    "notional_ratio": [
+     0.9909,
+     1.0,
+     1.0087
+    ],
+    "risk_ratio": [
+     0.9909,
+     1.0,
+     1.0087
+    ],
+    "net_before": 1600.11,
+    "net_after": 1600.95
+   },
+   "momentum_burst": {
+    "n_before": 155,
+    "n_after": 155,
+    "identical_path": true,
+    "identical_all_fields": false,
+    "max_px_diff_bps": 0.018,
+    "max_abs_dR": 0.0008407965431767028,
+    "mean_abs_dR": 6.985953120052467e-05,
+    "avgR_before": 0.350598,
+    "avgR_after": 0.350668,
+    "notional_ratio": [
+     0.9157,
+     0.9732,
+     0.9929
+    ],
+    "risk_ratio": [
+     0.9155,
+     0.9732,
+     0.9929
+    ],
+    "net_before": 2492.5,
+    "net_after": 2411.03
+   }
+  }
+ },
+ "budget_ratio": {
+  "definition": "position risk_amount after its entry fill / (equity x RiskManager.budget_pct(size_mult) / 100) at sizing; same lab runs as trade_identity",
+  "before": {
+   "vol_breakout_dbox": {
+    "entry": "MARKET",
+    "n": 42,
+    "min": 0.9864,
+    "p50": 0.9985,
+    "p90": 1.0028,
+    "p99": 1.0035,
+    "max": 1.0036,
+    "over_1_0005": 13,
+    "over_1_01": 0,
+    "lifted_to_min": 0
+   },
+   "vol_breakout_dbox_comp_q_1_0": {
+    "entry": "MARKET",
+    "n": 90,
+    "min": 0.9777,
+    "p50": 0.9984,
+    "p90": 1.0023,
+    "p99": 1.0036,
+    "max": 1.0036,
+    "over_1_0005": 22,
+    "over_1_01": 0,
+    "lifted_to_min": 0
+   },
+   "htf_trend": {
+    "entry": "LIMIT",
+    "n": 211,
+    "min": 0.9735,
+    "p50": 0.9974,
+    "p90": 0.9994,
+    "p99": 0.9999,
+    "max": 1.0002,
+    "over_1_0005": 0,
+    "over_1_01": 0,
+    "lifted_to_min": 0
+   },
+   "intraday_levels": {
+    "entry": "LIMIT",
+    "n": 113,
+    "min": 0.9908,
+    "p50": 0.9987,
+    "p90": 1.0004,
+    "p99": 1.0053,
+    "max": 1.009,
+    "over_1_0005": 11,
+    "over_1_01": 0,
+    "lifted_to_min": 0
+   },
+   "momentum_burst": {
+    "entry": "MARKET",
+    "n": 155,
+    "min": 0.9561,
+    "p50": 1.0104,
+    "p90": 1.0208,
+    "p99": 1.0413,
+    "max": 1.0721,
+    "over_1_0005": 142,
+    "over_1_01": 85,
+    "lifted_to_min": 0
+   },
+   "all": {
+    "n": 611,
+    "p50": 0.9989,
+    "p99": 1.0284,
+    "max": 1.0721,
+    "over_1_0005": 188
+   }
+  },
+  "after": {
+   "vol_breakout_dbox": {
+    "entry": "MARKET",
+    "n": 42,
+    "min": 0.9762,
+    "p50": 0.9937,
+    "p90": 0.9968,
+    "p99": 0.9976,
+    "max": 0.9976,
+    "over_1_0005": 0,
+    "over_1_01": 0,
+    "lifted_to_min": 0
+   },
+   "vol_breakout_dbox_comp_q_1_0": {
+    "entry": "MARKET",
+    "n": 90,
+    "min": 0.9777,
+    "p50": 0.9934,
+    "p90": 0.9965,
+    "p99": 0.997,
+    "max": 0.9974,
+    "over_1_0005": 0,
+    "over_1_01": 0,
+    "lifted_to_min": 0
+   },
+   "htf_trend": {
+    "entry": "LIMIT",
+    "n": 211,
+    "min": 0.9798,
+    "p50": 0.9973,
+    "p90": 0.9994,
+    "p99": 0.9999,
+    "max": 1.0,
+    "over_1_0005": 0,
+    "over_1_01": 0,
+    "lifted_to_min": 0
+   },
+   "intraday_levels": {
+    "entry": "LIMIT",
+    "n": 113,
+    "min": 0.9923,
+    "p50": 0.9994,
+    "p90": 0.9999,
+    "p99": 1.0,
+    "max": 1.0,
+    "over_1_0005": 0,
+    "over_1_01": 0,
+    "lifted_to_min": 0
+   },
+   "momentum_burst": {
+    "entry": "MARKET",
+    "n": 155,
+    "min": 0.9244,
+    "p50": 0.9862,
+    "p90": 0.9916,
+    "p99": 0.9943,
+    "max": 0.9961,
+    "over_1_0005": 0,
+    "over_1_01": 0,
+    "lifted_to_min": 0
+   },
+   "all": {
+    "n": 611,
+    "p50": 0.9948,
+    "p99": 0.9999,
+    "max": 1.0,
+    "over_1_0005": 0
+   }
+  }
+ },
+ "funding_schedule": {
+  "non_8h_settlements": "SOLUSDT 2022-11-09 16:00 .. 2022-11-18 08:00 UTC (98 x 2h, 3 x 4h) in data/longhist; every other settlement of both databases is on the 8-hour UTC grid",
+  "valid_rerun": {
+   "command": "lab --alpha vol_breakout_dbox --set vol_breakout_dbox.comp_q=1.0 --start 2026-01-13 --end 2026-10-01 --universe extended (no --tag)",
+   "before": {
+    "n": 311,
+    "avg_r": 0.1013,
+    "t_day": 0.82,
+    "profit_factor": 1.355,
+    "net": 1197.1,
+    "fees": 149.3,
+    "win_rate": 40.5
+   },
+   "after": {
+    "n": 311,
+    "avg_r": 0.1013,
+    "t_day": 0.82,
+    "profit_factor": 1.354,
+    "net": 1188.4,
+    "fees": 148.4,
+    "win_rate": 40.5
+   },
+   "trade_paths_identical": true,
+   "max_funding_per_notional_diff": 5.8e-11,
+   "note": "the funding change has no effect on 2026 (8-hour grid); the net difference is the E1 sizing (smaller market entries)"
+  },
+  "train_sol_2022": {
+   "trades": 15,
+   "identical": true,
+   "note": "no vol_breakout_dbox SOLUSDT trade was open during the 2-4 hour settlement period"
+  }
+ },
+ "backtest_memory": {
+  "code": {
+   "before": "c16848a",
+   "after": "58170c4 (+ load tweak in the P3 measurement commit)"
+  },
+  "cause": {
+   "setup": "joint backtest 2023 (window 365 d + vol_breakout_dbox warm-up 92 d = 658,080 1m bars per symbol), sizes measured on 2 symbols (array nbytes + Python containers, RSS from /proc)",
+   "per_symbol_mb": {
+    "1m_frame_indicators_55_cols": 276,
+    "1m_candle_arrays": 50,
+    "1m_close_time_list": 25,
+    "5m_frame": 68,
+    "15m_frame": 22.5,
+    "1h_frame": 5.7,
+    "4h_1d_frames": 1.7,
+    "positioning_metrics": 7,
+    "market_context": 5.4,
+    "funding": 0.2,
+    "total": 462
+   },
+   "load_transient_mb_per_symbol": 500,
+   "load_transient_note": "one query per symbol held a year of sqlite rows + Candle objects at once",
+   "not_the_cause": "equity curve (already hourly) and trade records (hundreds a year)",
+   "reads_all_16_alphas": {
+    "setup": "research DB, 2026-05, 2 symbols, all 16 registered alphas on, 30 days",
+    "1m": [],
+    "5m": [
+     "atr",
+     "atr_rank",
+     "close"
+    ],
+    "15m": [
+     "adx",
+     "atr",
+     "chop",
+     "close",
+     "ema9",
+     "high",
+     "hurst",
+     "low",
+     "slope20",
+     "st_dir",
+     "vol_z"
+    ],
+    "1h": [
+     "adx",
+     "atr",
+     "close",
+     "dc_hi20",
+     "dc_lo20",
+     "ema200",
+     "ema21",
+     "ema50",
+     "ema9",
+     "hh10",
+     "high",
+     "ll10",
+     "low",
+     "open",
+     "squeeze_bars",
+     "vol_z"
+    ],
+    "4h": [
+     "close"
+    ],
+    "1d": [
+     "atr",
+     "close",
+     "dc_hi20",
+     "dc_lo20",
+     "hh10",
+     "hh20",
+     "ll10",
+     "ll20"
+    ]
+   }
+  },
+  "fix": [
+   "backtester 1m and 5m frames compute an indicator column on first read (FeatureFrame over the same bars; one recompute per bar shared by its reads, columns other symbols read kept with it, every column kept from the third recompute); 15m .. 1d frames eager as before",
+   "load_backtester reads windows longer than 30 days in 30-day pieces into the same arrays",
+   "load: positioning-metrics rows released before the next symbol loads; the timeline is folded one symbol at a time with np.union1d (the same array as np.unique of the concatenation)"
+  ],
+  "identity": {
+   "lab_trade_lists": {
+    "setup": "research DB, 2026-05-01..08-31, 12 core symbols, 1 worker",
+    "configs": {
+     "vol_breakout_dbox_comp_q_1_0": 90,
+     "htf_trend": 211,
+     "intraday_levels": 113,
+     "momentum_burst": 155,
+     "funding_fade": 156,
+     "sweep_reversal": 1526
+    },
+    "byte_identical": true,
+    "peak_rss_mb_before": [
+     362,
+     521
+    ],
+    "peak_rss_mb_after": [
+     223,
+     332
+    ]
+   },
+   "joint_trade_lists": {
+    "setup": "research DB, 2026-05-01..06-30, 12 symbols, load_backtester + arun as `heartless backtest --start/--end`; trades (position ids dropped), hourly equity, refusals, final equity",
+    "configs": {
+     "vol_breakout_dbox_fifo": 27,
+     "vol_breakout_dbox_allocator": 26,
+     "all_16_alphas_fifo": 249
+    },
+    "identical": true,
+    "peak_rss_mb": [
+     2051,
+     855
+    ]
+   },
+   "joint_2023_fifo": {
+    "command": "the P3 2023 FIFO joint backtest (docs/PORTFOLIO.md section 4.1)",
+    "result_file_identical_except": [
+     "seconds",
+     "git_commit",
+     "git_dirty",
+     "argv",
+     "generated_utc"
+    ],
+    "peak_rss_mb": [
+     9128,
+     3675
+    ],
+    "wall_s": [
+     883,
+     511
+    ],
+    "load_s_approx": [
+     506,
+     91
+    ],
+    "rerun_after_load_tweak": {
+     "code": "58170c4 + load tweak (this commit)",
+     "identical": true,
+     "peak_rss_mb": 3674,
+     "wall_s": 561
+    }
+   },
+   "load_tweak": {
+    "what": "metrics rows released per symbol, timeline built by folding np.union1d",
+    "three_year_3_symbols_load_peak_rss_mb": [
+     1205,
+     932
+    ]
+   }
+  },
+  "rss_note": "of the 3,675 MB about 2.6 GB is live data (about 130 MB per symbol); the rest is freed 5m-recompute temporaries glibc keeps: MALLOC_MMAP_THRESHOLD_=131072 removes it (4 symbols, 2023: 830 -> 608 MB, same results)",
+  "train3y": {
+   "code": "58170c4",
+   "env": "MALLOC_MMAP_THRESHOLD_=131072",
+   "run_rss_mb": 6410,
+   "load_peak_rss_mb": {
+    "fifo": 8777,
+    "alloc": 8611
+   },
+   "wall_s": {
+    "fifo": 1770,
+    "alloc": 1599
+   }
+  }
+ }
+}
