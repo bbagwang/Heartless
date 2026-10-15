@@ -139,6 +139,22 @@ class Settings(BaseSettings):
     max_same_direction_risk_pct: float = Field(default=1.5, alias="MAX_SAME_DIRECTION_RISK_PCT")  # 3 x 0.5% at beta 1
     beta_lookback_days: int = Field(default=30, alias="BETA_LOOKBACK_DAYS")  # BTC beta from this many days of 1h returns
 
+    # --- F7: speed and optimization (docs/PERFORMANCE.md) ----------------------------------------------------------
+    # Live feature frames are appended bar by bar (heartless/data/incremental.py) instead of recomputed every minute:
+    # each frame equals, bit for bit, the batch computation over the bars since its anchor, and is re-anchored (checked
+    # against the batch, then rebuilt from the 1m tail) every few hours. Off: the per-bar batch rebuild as before.
+    incremental_features: bool = Field(default=True, alias="INCREMENTAL_FEATURES")
+    # Local order book per traded symbol from the depth streams (heartless/exchange/orderbook.py), read by alphas as
+    # ctx.book (spread, imbalance, depth within ORDERBOOK_DEPTH_BPS, staleness). Off until an F-wave alpha uses it;
+    # a replay then serves the conservative 1m-bar proxy instead. "partial": depth20 snapshots (no REST); "diff":
+    # diff-depth kept in sequence on REST snapshots. Speed: 100, 250 or 500 ms.
+    orderbook_stream: bool = Field(default=False, alias="ORDERBOOK_STREAM")
+    orderbook_mode: Literal["partial", "diff"] = Field(default="partial", alias="ORDERBOOK_MODE")
+    orderbook_speed_ms: int = Field(default=100, alias="ORDERBOOK_SPEED_MS")
+    orderbook_depth_bps: float = Field(default=10.0, alias="ORDERBOOK_DEPTH_BPS")
+    # |local clock - exchange clock| (REST time syncs, stream event times) above this is logged as a warning
+    clock_drift_warn_ms: float = Field(default=1000.0, alias="CLOCK_DRIFT_WARN_MS")
+
     # --- F0: coin-agnostic universes (docs/UNIVERSE.md, heartless/data/universe.py) -------------------------------
     # live eligibility besides UNIVERSE_MIN_QUOTE_VOLUME: listing age, tick size against the price, quoted spread
     universe_min_age_days: int = Field(default=30, alias="UNIVERSE_MIN_AGE_DAYS")

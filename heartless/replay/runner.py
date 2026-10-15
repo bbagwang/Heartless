@@ -78,6 +78,9 @@ class ReplayConfig:
     seed_trades: list = field(default_factory=list)
     # challengers stored before start: (slot name, StrategyParams dict, started ms, source)
     seed_challengers: list = field(default_factory=list)
+    # F7: profile the run (cProfile on the event-loop thread) and add the top functions by own time to the summary
+    profile: bool = False
+    profile_top: int = 30
 
 
 class _LogCapture(logging.Handler):
@@ -215,9 +218,22 @@ def run_replay(cfg: ReplayConfig) -> dict:
         old_level = root.level
         root.setLevel(getattr(logging, cfg.log_level.upper(), logging.WARNING))
         ctx.install_log_time(old_factory)
+        # --- F7: per-run latency budget and an optional hot-path profile ---
+        from heartless.util import perf
+
+        perf.reset()
+        prof = perf.Profiler() if cfg.profile else None
         try:
-            summary = run_virtual(ctx.main, cfg.start_ms, speed=cfg.speed, idle_grace_s=cfg.idle_grace_s,
-                                  exception_handler=ctx.loop_exception)
+            if prof is not None:
+                with prof:
+                    summary = run_virtual(ctx.main, cfg.start_ms, speed=cfg.speed, idle_grace_s=cfg.idle_grace_s,
+                                          exception_handler=ctx.loop_exception)
+                summary.setdefault("perf", {})["profile"] = {"wall_s": round(prof.wall, 1),
+                                                             "top": prof.top(cfg.profile_top)}
+            else:
+                summary = run_virtual(ctx.main, cfg.start_ms, speed=cfg.speed, idle_grace_s=cfg.idle_grace_s,
+                                      exception_handler=ctx.loop_exception)
+        # --- end F7 ---
         finally:
             logging.setLogRecordFactory(old_factory)
             root.setLevel(old_level)
@@ -306,6 +322,13 @@ class _Run:
             await real_rest.close()
             market = ReplayMarketStream(self.source, app._on_kline, app._on_book, app._on_mark, cfg.start_ms, cfg.end_ms)
             app.market = market
+            # --- F7: no depth data in a stored history: ctx.book comes from the conservative 1m-bar proxy ---
+            if getattr(app, "books", None) is not None:
+                from heartless.replay.book import ProxyBooks
+
+                app.books = ProxyBooks(app, self.settings.orderbook_depth_bps)
+                app.book_stream = None
+            # --- end F7 ---
             capture = TelegramCapture(commands=list(self.commands))
             capture.listeners.append(checker.on_message)
             capture.resolve_symbol = lambda: self._open_symbol(app)
@@ -648,10 +671,28 @@ class _Run:
                                                 "started": fmt_ts(c.started)} for c in app.challengers],
                          "champion_final": app.params.version},
             "memory": {**memory, "curve": mem_curve},
+            "perf": _perf_summary(app),  # F7
             "warnings": dict(sorted(self.log_handler.warnings.items(), key=lambda kv: -kv[1])[:40])
             if self.log_handler else {},
             "invariants": self.checker.summary(),
         }
+
+
+def _perf_summary(app) -> dict:
+    """F7: the latency budget, the clock drift, the feature-update counters and the startup checks of this run."""
+    from heartless.util import perf
+
+    views = list(app.views.values())
+    stats: dict[str, int] = {}
+    for v in views:
+        lf = getattr(v, "live", None)
+        for k, n in (lf.stats.items() if lf is not None else ()):
+            stats[k] = stats.get(k, 0) + n
+    return {**perf.latency_snapshot(), "startup_ms": dict(getattr(app, "startup_timings", {}) or {}),
+            "features": {"incremental_views": sum(1 for v in views if getattr(v, "live", None) is not None),
+                         "views": len(views), "batch_views": sum(1 for v in views if not getattr(v, "incremental", False)),
+                         **stats},
+            "orderbook": app.books.status() if getattr(app, "books", None) is not None else None}
 
 
 def context_digest(rows) -> str:
@@ -745,4 +786,32 @@ def format_report(s: dict) -> str:
             lines.append(f"  {r['time']}  rss {r['rss_mb']:>7.1f} MB  candles {r['candle_rows']:>9,}")
     if s.get("warnings"):
         lines += ["", "warnings (count):"] + [f"  {n:>6}  {k}" for k, n in list(s["warnings"].items())[:15]]
+    lines += _format_perf(s.get("perf") or {})  # F7
     return "\n".join(lines)
+
+
+def _format_perf(p: dict) -> list[str]:
+    """F7: the performance part of the report (latency budget, feature updates, startup, profile)."""
+    if not p:
+        return []
+    from heartless.util import perf
+
+    out = ["", "performance:"]
+    f = p.get("features") or {}
+    if f:
+        out.append(f"  features: {f.get('incremental_views', 0)}/{f.get('views', 0)} views incremental, "
+                   f"{f.get('bars', 0):,} bars appended in {f.get('steps', 0):,} steps, {f.get('builds', 0)} builds, "
+                   f"{f.get('reanchors', 0)} re-anchors ({f.get('verified', 0)} checked against the batch), "
+                   f"{f.get('long_rebuilds', 0)} 4h/1d rebuilds after trims")
+    for eng, stages in (p.get("latency") or {}).items():
+        parts = [f"{perf.STAGE_KO.get(st, st)} p50 {v['p50']:g} / p99 {v['p99']:g} ms (n {v['n']:,})"
+                 for st, v in stages.items()]
+        out.append(f"  latency {eng}: " + "; ".join(parts))
+    if p.get("startup_ms"):
+        out.append("  startup checks: " + ", ".join(f"{k} {v:g} ms" for k, v in p["startup_ms"].items()))
+    if p.get("orderbook"):
+        out.append("  order books: " + ", ".join(f"{k} {v}" for k, v in p["orderbook"].items()))
+    prof = p.get("profile")
+    if prof:
+        out.append("  " + perf.format_profile(prof["top"], prof.get("wall_s")).replace("\n", "\n  "))
+    return out

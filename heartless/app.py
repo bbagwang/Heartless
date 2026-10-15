@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable
@@ -24,6 +25,7 @@ from heartless.data.universe import select_universe
 from heartless.exchange.binance_rest import BinanceError, BinanceRest
 from heartless.exchange.binance_ws import MarketStream
 from heartless.exchange.live import LiveAccount
+from heartless.exchange.orderbook import EMPTY_BOOK  # F7: ctx.book when no order book runs
 from heartless.exchange.paper import PaperAccount
 from heartless.exchange.symbols import parse_exchange_info
 from heartless.execution.engine import TradingEngine
@@ -36,6 +38,7 @@ from heartless.strategy import evidence
 from heartless.strategy.base import Context
 from heartless.strategy.params import StrategyParams
 from heartless.strategy.regime import detect_regime
+from heartless.util import perf  # F7: latency budget, clock drift
 from heartless.util.ids import short_id, token_hex
 from heartless.util.timeutil import MS_DAY, MS_HOUR, MS_MINUTE, fmt_ts, local_day_start, next_local_time, now_ms
 
@@ -105,6 +108,9 @@ class Heartless:
     _batch_t: int | None = None
     _batch_seen: set | None = None
     _beta_tried: set | None = None
+    # F7: local order books (ORDERBOOK_STREAM) and their depth streams; None when off
+    books: Any = None
+    book_stream: Any = None
 
     def __init__(self, settings: Settings):
         self.s = settings
@@ -162,6 +168,22 @@ class Heartless:
         self.paper_accounts: dict[str, PaperAccount] = {}
         self.live_account: LiveAccount | None = None
         self.market = MarketStream(self.rest.ws_base, self._on_kline, self._on_book, self._on_mark)
+        # --- F7: speed and optimization (docs/PERFORMANCE.md) -----------------------------------------------------
+        perf.DRIFT.warn_ms = settings.clock_drift_warn_ms
+        self._f7_recv: dict[str, int] = {}  # symbol -> local time its latest closed kline arrived
+        self._f7_bar: dict[str, int] = {}  # symbol -> close time of the bar its engines are deciding on right now
+        self.startup_timings: dict[str, float] = {}  # startup check -> milliseconds
+        self.books = None  # exchange.orderbook.OrderBooks (ORDERBOOK_STREAM); the replay installs its 1m-bar proxy
+        self.book_stream = None  # exchange.binance_ws.BookStream feeding it
+        if settings.orderbook_stream:
+            from heartless.exchange.binance_ws import BookStream
+            from heartless.exchange.orderbook import OrderBooks
+
+            self.books = OrderBooks(settings.orderbook_mode, settings.orderbook_depth_bps,
+                                    fetch_snapshot=self._f7_depth_snapshot)
+            self.book_stream = BookStream(self.rest.ws_base, self.books.on_message, settings.orderbook_mode,
+                                          settings.orderbook_speed_ms, on_reset=self.books.on_reset)
+        # --- end F7 ---
         self.advisor = Advisor(settings.anthropic_api_key)
         self.mode_notice: str = ""  # startup warning when HEARTLESS_MODE and the persisted mode disagree
         self.mode: str = self._resolve_mode(settings)
@@ -259,9 +281,9 @@ class Heartless:
 
         for mod, err in FAILED_ALPHAS.items():
             log.error("alpha module %s failed to import and is unavailable: %s", mod, err)
-        await self.rest.sync_time()
-        await self._load_symbols()
-        await self._refresh_funding_schedule()
+        # --- F7: the environment checks run concurrently and are timed (were four sequential round trips) ---------
+        await self._f7_startup_checks()
+        # --- end F7 ---
         await self.refresh_universe(initial=True)
         self.context_only = self._context_only_symbols()
         await self._backfill(self.universe + self.context_only)
@@ -277,6 +299,11 @@ class Heartless:
         self._ctx_fill_task = asyncio.create_task(self._fill_context_gaps(metrics_task), name="context-fill")
         self.market.set_symbols(self.universe, kline_only=self.context_only)
         self.tasks.append(asyncio.create_task(self.market.run(), name="market-stream"))
+        # --- F7: depth streams for the local order books (ORDERBOOK_STREAM) --------------------------------------
+        self._f7_book_symbols()
+        if self.book_stream is not None:
+            self.tasks.append(asyncio.create_task(self.book_stream.run(), name="depth-stream"))
+        # --- end F7 ---
         self.tasks.append(asyncio.create_task(self._kline_worker(), name="kline-worker"))
         self.tasks.append(asyncio.create_task(self._scheduler(), name="scheduler"))
         if self.s.telegram_bot_token:
@@ -425,6 +452,7 @@ class Heartless:
                 self.candles.pop(s, None)
             self._set_context_only(self._context_only_symbols())
             self.market.set_symbols(self.universe, kline_only=self.context_only)
+            self._f7_book_symbols()  # F7
             await self.emit("universe", {"message": f"유니버스 갱신: +{','.join(added) or '-'} / -{','.join(removed) or '-'}",
                                          "added": added, "removed": removed, "universe": self.universe})
 
@@ -565,7 +593,7 @@ class Heartless:
             ca = CandleArrays("1m", capacity=len(rows) + 4096)
             ca.extend(rows)
             self.candles[sym] = ca
-            view = MarketView(sym)
+            view = MarketView(sym, incremental=self.s.incremental_features)  # F7: incremental live frames
             view.rebuild(ca, live=True)
             if ca.n:
                 view.seek(int(ca.close_time[ca.n - 1]))
@@ -651,6 +679,9 @@ class Heartless:
         # error in LiveAccount.start(), reconcile in eng.start()) must leave neither an account nor an engine behind:
         # otherwise a retry reports success without a live engine, or an unreconciled live engine trades real money
         # while mode/status still say paper.
+        # --- F7: the account reads LiveAccount.start and the reconcile make, fetched at once and timed ----------
+        await self._f7_prefetch_account()
+        # --- end F7 ---
         acc = LiveAccount(self.rest, "live", self.s.taker_fee)
         acc.set_symbols(self.symbols)
         watch = self._watch_fills(acc, "live")
@@ -669,6 +700,11 @@ class Heartless:
             raise
         self.live_account = acc
         self.engines["live"] = eng
+        # F7: keep a pooled REST connection warm for the order path (and the clock offset fresh); one task per process
+        warm = getattr(self, "_f7_warm", None)
+        if hasattr(self.rest, "keep_warm") and (warm is None or warm.done()):
+            self._f7_warm = asyncio.create_task(self.rest.keep_warm(), name="rest-keep-warm")
+            self.tasks.append(self._f7_warm)
         # the paper champion trades the same params on the same bars: while live is attached its outcomes alone are
         # booked into the shared bandit (weight 1.5), the paper duplicates are dropped
         self.bandit.live_attached = True
@@ -727,6 +763,7 @@ class Heartless:
         position as the engine left it. Returns a holder the caller fills with the engine once built."""
         holder: dict = {}
         self._record_order_refs(acc, holder)
+        self._f7_time_orders(acc, name)  # F7: order sent -> ack, bar close -> sent
         rows = self.store.load_fill_quality(name, self.s.exec_quality_window)
         if since is not None:
             rows = [r for r in rows if (r.get("ts") or 0) >= since]
@@ -1042,6 +1079,11 @@ class Heartless:
         if not k.get("x"):
             return
         sym, c = data["s"], Candle.from_ws(k)
+        # --- F7: latency budget (bar close -> received) ---
+        recv = now_ms()
+        self._f7_recv[sym] = recv
+        perf.LATENCY.record("app", "close_to_recv", recv - perf.exchange_to_local(c.close_time))
+        # --- end F7 ---
         # into the market context at once, not through the worker queue: the worker holds an hour-close bar until
         # every context symbol's bar closing at that hour has arrived (_ensure_context)
         self._context_bar(sym, c)
@@ -1139,19 +1181,33 @@ class Heartless:
                 tfs.append("15m")
             if m % 60 == 59 and "1h" not in tfs:
                 tfs.append("1h")
-        await asyncio.to_thread(self._rebuild_view, view, ca, tfs)
+        # --- F7: incremental feature frames (INCREMENTAL_FEATURES): an append on the loop, a (re)build off it ------
+        t_feat = time.perf_counter()
+        if view.live is not None:
+            if view.advance_cheap(ca):
+                view.advance(ca)
+            else:
+                await asyncio.to_thread(view.advance, ca)
+        else:
+            await asyncio.to_thread(self._rebuild_view, view, ca, tfs)
+        perf.LATENCY.record("app", "feature_update", (time.perf_counter() - t_feat) * 1e3)
+        # --- end F7 ---
         view.seek(c.close_time)
+        self._f7_features_ready(sym)  # F7: latency budget
         # a 5m close inside the gap is not flagged by seek() (it closed more than a minute ago): refresh explicitly
         if missing or view.closed("5m") or sym not in self.regimes:
             self.regimes[sym] = detect_regime(view)
         await self._ensure_context(c.close_time)  # the hour's market snapshot exists before any engine decides
         ctx = self._context(sym, c.close_time)
         await self._entry_batch_roll(c.close_time)  # P3: an older close's open batch is admitted first
+        self._f7_bar[sym] = c.close_time  # F7: orders sent while deciding on this bar count against its close
         for eng in list(self.engines.values()):
             try:
                 await eng.on_bar(view, ctx)
             except Exception:  # noqa: BLE001
                 log.exception("engine %s on_bar failed for %s", eng.name, sym)
+            perf.LATENCY.record(eng.name, "close_to_decision", now_ms() - perf.exchange_to_local(c.close_time))  # F7
+        self._f7_bar.pop(sym, None)  # F7
         await self._entry_batch_done(sym, c.close_time)
         if sym == "BTCUSDT":
             await self._btc_shock_check(view)
@@ -1215,6 +1271,139 @@ class Heartless:
             view.frames[tf] = FeatureFrame(tf, bars)
         view.base = ca
 
+    # --- F7: speed and optimization (docs/PERFORMANCE.md) --------------------------------------------------------------
+    async def _f7_startup_checks(self) -> dict[str, float]:
+        """The environment checks of the start-up at once instead of one after another: the server time (clock offset),
+        exchangeInfo (symbols), and premiumIndex, fundingInfo and the 24h tickers prefetched for the funding schedule
+        and the universe selection that read them next. Each is timed; the total is logged and kept in startup_timings.
+        Failures surface as before: the time sync and exchangeInfo raise, the funding schedule only logs, a ticker
+        failure is raised by the universe selection's own request."""
+        t0 = time.perf_counter()
+        timings: dict[str, float] = {}
+
+        async def timed(name: str, coro):
+            t = time.perf_counter()
+            try:
+                return await coro
+            finally:
+                timings[name] = round((time.perf_counter() - t) * 1e3, 1)
+
+        res = await asyncio.gather(
+            timed("time", self.rest.sync_time()), timed("exchangeInfo", self._load_symbols()),
+            timed("prefetch", self._f7_prefetch([("GET", "/fapi/v1/premiumIndex", None, False),
+                                                 ("GET", "/fapi/v1/fundingInfo", None, False),
+                                                 ("GET", "/fapi/v1/ticker/24hr", None, False)])),
+            return_exceptions=True)
+        for r in res[:2]:
+            if isinstance(r, BaseException):
+                raise r
+        if isinstance(res[2], dict):
+            timings.update({f"prefetch {k}": round(v, 1) for k, v in res[2].items()})
+        await timed("funding_schedule", self._refresh_funding_schedule())
+        timings["total"] = round((time.perf_counter() - t0) * 1e3, 1)
+        self.startup_timings.update(timings)
+        log.info("startup checks in %.0f ms (%s); runtime %s", timings["total"],
+                 ", ".join(f"{k} {v:.0f}" for k, v in timings.items() if k != "total"),
+                 ", ".join(f"{k} {v}" for k, v in perf.runtime_info().items()))
+        return timings
+
+    async def _f7_prefetch_account(self) -> dict[str, float]:
+        """LiveAccount.start and the engine's reconcile read the position mode, the account, the positions and the open
+        (algo) orders one after another: fetched here at once (BinanceRest.prefetch, answers kept PREFETCH_TTL_S), they
+        then read the answers instead of waiting for five round trips."""
+        t0 = time.perf_counter()
+        res = await self._f7_prefetch([("GET", "/fapi/v1/positionSide/dual", None, True),
+                                        ("GET", "/fapi/v3/account", None, True),
+                                        ("GET", "/fapi/v3/positionRisk", None, True),
+                                        ("GET", "/fapi/v1/openOrders", None, True),
+                                        ("GET", "/fapi/v1/openAlgoOrders", None, True)])
+        timings = {f"live {k}": round(v, 1) for k, v in res.items()}
+        timings["live total"] = round((time.perf_counter() - t0) * 1e3, 1)
+        self.startup_timings.update(timings)
+        if res:
+            log.info("live account checks in %.0f ms (%s)", timings["live total"],
+                     ", ".join(f"{k} {v:.0f}" for k, v in res.items()))
+        return timings
+
+    async def _f7_prefetch(self, calls: list) -> dict[str, float]:
+        fn = getattr(self.rest, "prefetch", None)  # a stand-in REST client (tests) may not have it
+        return await fn(calls) if fn is not None else {}
+
+    def _f7_time_orders(self, acc, name: str) -> None:
+        """Latency budget: time every order request of this engine's account until its answer (sent_to_ack) and, for
+        an order decided on a bar, that bar's close until the request leaves (close_to_sent)."""
+        for kind in ("market_order", "limit_order", "place_stop", "place_take_profit"):
+            fn = getattr(acc, kind, None)
+            if fn is not None:
+                setattr(acc, kind, self._f7_timed(fn, name, kind in ("market_order", "limit_order")))
+
+    def _f7_timed(self, fn, engine: str, decision: bool):
+        async def call(symbol, *a, **k):
+            if decision:
+                bar = self._f7_bar.get(symbol)
+                if bar is not None:
+                    perf.LATENCY.record(engine, "close_to_sent", now_ms() - perf.exchange_to_local(bar))
+            t0 = time.perf_counter()
+            try:
+                return await fn(symbol, *a, **k)
+            finally:
+                perf.LATENCY.record(engine, "sent_to_ack", (time.perf_counter() - t0) * 1e3)
+
+        return call
+
+    def _f7_features_ready(self, sym: str) -> None:
+        recv = self._f7_recv.pop(sym, None)
+        if recv is not None:
+            perf.LATENCY.record("app", "recv_to_features", now_ms() - recv)
+
+    def _f7_book(self, sym: str, now: int):
+        if self.books is None:
+            return EMPTY_BOOK
+        try:
+            return self.books.features(sym, now)
+        except Exception:  # noqa: BLE001 - a book problem must never stop a decision
+            log.debug("order book features failed for %s", sym, exc_info=True)
+            return EMPTY_BOOK
+
+    def _f7_book_symbols(self) -> None:
+        if self.books is not None:
+            self.books.set_symbols(self.universe)
+        if self.book_stream is not None:
+            self.book_stream.set_symbols(self.universe)
+
+    async def _f7_depth_snapshot(self, symbol: str, limit: int) -> dict:
+        return await self.rest.request("GET", "/fapi/v1/depth", {"symbol": symbol, "limit": limit})
+
+    def _f7_health(self) -> dict[str, Any]:
+        """The F7 part of self.health, refreshed at most once a minute (the scheduler updates the health every few
+        seconds; summarising the latency reservoirs that often cost more than the measured work)."""
+        now = now_ms()
+        cached = getattr(self, "_f7_health_cache", None)
+        if cached is not None and now - cached[0] < MS_MINUTE:
+            return cached[1]
+        out = self._f7_health_now()
+        self._f7_health_cache = (now, out)
+        return out
+
+    def _f7_health_now(self) -> dict[str, Any]:
+        views = list(self.views.values())
+        inc = [v for v in views if getattr(v, "live", None) is not None]
+        reanchors = sum(v.live.stats["reanchors"] for v in inc)
+        fallback = sum(1 for v in views if self.s.incremental_features and not getattr(v, "incremental", False))
+        d = perf.DRIFT.snapshot()
+        out = {"latency": " | ".join(perf.LATENCY.lines()) or "-",
+               "clock": (f"offset {', '.join(f'{k} {v:+.0f}ms' for k, v in d['offset_ms'].items()) or '-'}, "
+                         f"worst {d['worst_ms']:.0f}ms, warnings {d['warnings']}"),
+               "features": (f"incremental {len(inc)}/{len(views)} symbols, {reanchors} re-anchors checked"
+                            + (f", {fallback} back on batch" if fallback else "") if self.s.incremental_features
+                            else "batch rebuild (INCREMENTAL_FEATURES=false)")}
+        if self.startup_timings:
+            out["startup_ms"] = self.startup_timings.get("total")
+        out["runtime"] = ", ".join(f"{k} {v}" for k, v in perf.runtime_info().items())
+        if self.books is not None:
+            out["orderbook"] = ", ".join(f"{k} {v}" for k, v in self.books.status().items())
+        return out
+
     def _context(self, sym: str, now: int) -> Context:
         t = self.tickers.get(sym) or Ticker(sym)
         if not t.mark and self.candles.get(sym) is not None and self.candles[sym].n:
@@ -1235,10 +1424,12 @@ class Heartless:
                     oi_change = oi[-1][1] / old - 1
         iv = self._funding_interval_ms(sym)
         nft = t.next_funding_time or self.funding_next.get(sym) or ((now // iv) + 1) * iv
-        return Context(symbol=sym, info=self.symbols[sym], ticker=t, regime=reg, regime_info=info, btc_regime=btc,
-                       oi_change=oi_change, now=now, funding_rate=t.funding_rate,
-                       minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), funding_interval_min=iv / MS_MINUTE,
-                       book_imbalance=imb, extras=extras, market=self._market_context(sym, now))
+        ctx = Context(symbol=sym, info=self.symbols[sym], ticker=t, regime=reg, regime_info=info, btc_regime=btc,
+                      oi_change=oi_change, now=now, funding_rate=t.funding_rate,
+                      minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), funding_interval_min=iv / MS_MINUTE,
+                      book_imbalance=imb, extras=extras, market=self._market_context(sym, now))
+        ctx.book = self._f7_book(sym, now)  # F7: order-book features (EMPTY_BOOK unless ORDERBOOK_STREAM)
+        return ctx
 
     # --- P3 signal batching (PORTFOLIO_ALLOCATOR, heartless/execution/allocator.py) ----------------------------------
     # Each engine queues the entry decisions of a bar close (TradingEngine.on_bar) and admits them together in
@@ -1865,6 +2056,7 @@ class Heartless:
                        "short_history": short, "backfill_pending": sorted(self._backfill_failed), "market_context": ctx,
                        "user_stream": self.live_account.user_stream.connected if self.live_account else None,
                        "uptime_min": (now - self.started_at) / MS_MINUTE, "used_weight": self.rest.used_weight}
+        self.health.update(self._f7_health())  # F7: latency budget, clock drift, feature updates, order books
 
     # --- control API (Telegram / web) ----------------------------------------------------------
     async def pause(self, reason: str = "owner") -> None:
