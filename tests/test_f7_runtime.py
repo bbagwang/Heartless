@@ -28,10 +28,12 @@ class SlowRest(BinanceRest):
     def __init__(self, server_skew_ms: int = 0):
         super().__init__("k", "s", False)
         self.sent: list[str] = []
+        self.sent_at: list[tuple[str, float]] = []  # (path, loop time the request started)
         self.skew = server_skew_ms
 
     async def _send(self, method, path, params=None, signed=False, retries=3):
         self.sent.append(path)
+        self.sent_at.append((path, asyncio.get_running_loop().time()))
         await asyncio.sleep(LAT)
         if path == "/fapi/v1/time":
             return {"serverTime": int(time.time() * 1000) + self.skew}
@@ -99,6 +101,13 @@ def test_startup_checks_run_concurrently_under_three_seconds():
     assert app.rest.sent.count("/fapi/v1/ticker/24hr") == 1 and app.rest.sent.count("/fapi/v1/premiumIndex") == 1
     assert {"time", "exchangeInfo", "prefetch", "funding_schedule", "total"} <= set(timings)
     assert timings["total"] < 2 * LAT * 1e3 + 300 and timings["funding_schedule"] < 100  # served from the prefetch
+    # the five market checks start together (red-team F-L9: the total bound above also passed with the clock sync
+    # awaited before the others, 0.8 s instead of 0.4 s)
+    market = ("/fapi/v1/time", "/fapi/v1/exchangeInfo", "/fapi/v1/premiumIndex", "/fapi/v1/fundingInfo",
+              "/fapi/v1/ticker/24hr")
+    starts = [t for p, t in app.rest.sent_at if p in market]
+    assert len(starts) == 5 and max(starts) - min(starts) < 0.05
+    assert timings["total"] < LAT * 1e3 + 300
     assert live["live total"] < 2 * LAT * 1e3 and len([k for k in live if k != "live total"]) == 5
     assert app.startup_timings["total"] == timings["total"]
 

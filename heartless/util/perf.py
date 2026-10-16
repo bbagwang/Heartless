@@ -279,7 +279,9 @@ def bench_features(db_path: str, symbol: str, history_days: int = 23, minutes: i
     con.close()
     candles = [Candle(int(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], int(r[7]), r[8], int(r[9]), True) for r in rows]
     n0 = len(candles) - minutes
-    out: dict[str, Any] = {"symbol": symbol, "bars": len(candles), "updates": minutes}
+    out: dict[str, Any] = {"symbol": symbol, "bars": len(candles), "updates": minutes, "end_ms": int(end_ms),
+                           "first_open": candles[0].open_time if candles else None,
+                           "last_open": candles[-1].open_time if candles else None}
     for mode in ("batch", "incremental"):
         ca = CandleArrays("1m", capacity=len(candles) + 16)
         ca.extend(candles[:n0])
@@ -373,10 +375,17 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--symbols", default="BTCUSDT")
     b.add_argument("--minutes", type=int, default=1440)
     b.add_argument("--history-days", type=int, default=23)
+    b.add_argument("--end", default=None, help="ISO date, exclusive: the measured minutes end here (default: after the "
+                                               "symbol's last stored bar, which moves when the database grows)")
     b.add_argument("--out", default=None)
     b.add_argument("--deviation", action="store_true", help="also size the anchor effect against the sliding rebuild")
     a = ap.parse_args(argv)
-    res = [bench_features(a.db, s.strip().upper(), a.history_days, a.minutes, deviation=a.deviation)
+    end_ms = None
+    if a.end:
+        from datetime import datetime, timezone
+
+        end_ms = int(datetime.fromisoformat(a.end).replace(tzinfo=timezone.utc).timestamp() * 1000)
+    res = [bench_features(a.db, s.strip().upper(), a.history_days, a.minutes, end_ms=end_ms, deviation=a.deviation)
            for s in a.symbols.split(",") if s.strip()]
     text = json.dumps(res, indent=1)
     print(text)

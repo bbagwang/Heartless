@@ -24,7 +24,10 @@ the start of the loaded history) than the sliding window was. docs/PERFORMANCE.m
 aggregates by np.*.reduceat over the same base bars, the same completeness rule for the trailing group) and appends
 them to those frames. The 4h / 1d frames stay anchored at the start of the 1m base like MarketView._long_frame: after
 the base is trimmed they are rebuilt from their own cached bars at their next close (the moment the batch path would
-rebuild them), so they are bit-identical to that path at all times. The backtester and the lab keep the batch path.
+rebuild them). An edited or late bar forces a build of the 1m - 1h frames, but the 4h / 1d frames are kept until their
+next close as the batch path keeps them (it rebuilds a long frame only once the base reaches its next close) and are
+then rebuilt from the base (red-team F-L5: they used to re-anchor on a trimmed base at once). So the 4h / 1d frames
+equal the batch path's at every minute. The backtester and the lab keep the batch path.
 """
 from __future__ import annotations
 
@@ -192,8 +195,11 @@ class _Cum:
 
 class IncrementalFrame(FeatureFrame):
     """A FeatureFrame that grows one bar at a time; equal, column by column and bit for bit, to FeatureFrame(tf, bars)
-    over every bar appended since it was built. Arrays handed out earlier stay valid snapshots: appends write past
-    their end and growing reallocates."""
+    over every bar appended since it was built. Arrays handed out earlier stay valid snapshots (appends write past
+    their end and growing reallocates), with one exception: the batch Hurst proxy is NaN below n + q = 105 bars and
+    then fills from row n - 1 = 99 on, so the append that brings a frame to 105 rows writes "hurst" rows 99..103 into
+    the shared buffer, and a "hurst" array handed out before that changes in those rows (to the batch values; red-team
+    F-L12). Only frames that start shorter than 105 rows meet it: new listings, a short 1d history."""
 
     def __init__(self, tf: str, bars: CandleArrays, extra: int = 0):  # noqa: D107 - no batch call of the parent
         self.tf = tf
@@ -593,6 +599,12 @@ def _tail_group(base: CandleArrays, tf: str) -> _Group:
     return _Group(gid, cnt, emitted)
 
 
+def _due(last_close: int, tf: str) -> int:
+    """MarketView._long_frame's due: the close of the first tf group not complete at the base close `last_close`."""
+    period = TF_MS[tf]
+    return ((int(last_close) + 1) // period + 1) * period - 1
+
+
 def _frame_equal(a: FeatureFrame, b: FeatureFrame) -> list[str]:
     """Columns that differ (NaN positions or IEEE values), [] when the frames are identical."""
     if a.n != b.n or not np.array_equal(a.close_time, b.close_time):
@@ -613,21 +625,43 @@ class LiveFrames:
         self.seen_edits = self.seen_trims = 0
         self.next_reanchor: dict[str, int] = {}
         self.stale_long: set[str] = set()
+        # 4h / 1d: the base close at or after which the batch path would rebuild the frame (MarketView._long_frame's
+        # due), and the frames kept across an edit-forced build, rebuilt from the base (not their cached bars) next
+        self.long_due: dict[str, int] = {}
+        self.long_from_base: set[str] = set()
         self.failed: str = ""  # why incremental updates were given up for this symbol ("" while they run)
-        self.stats = {"steps": 0, "bars": 0, "builds": 0, "reanchors": 0, "verified": 0, "long_rebuilds": 0}
+        self.stats = {"steps": 0, "bars": 0, "builds": 0, "reanchors": 0, "verified": 0, "long_rebuilds": 0,
+                      "long_kept": 0, "long_offset_rebuilds": 0}
 
     # --- full builds ------------------------------------------------------------------------------------------------
-    def build(self, base: CandleArrays) -> dict[str, IncrementalFrame]:
+    def build(self, base: CandleArrays, keep_long: bool = False) -> dict[str, IncrementalFrame]:
         """Build every frame from `base` exactly as MarketView.rebuild(live=True) does (the 4h / 1d frames over the
-        whole base), and the state to continue from it."""
+        whole base), and the state to continue from it.
+
+        keep_long (advance() after an edited / late bar or a new base object): the 4h / 1d frames whose next close the
+        base has not reached yet are kept and marked stale, because the batch path (app._rebuild_view + the lazy
+        MarketView._long_frame) does not rebuild them before then; they are rebuilt from the base at that close."""
+        old = self.frames
+        last = int(base.close_time[base.n - 1]) if base.n else None
         self.base = base
         self.frames = {}
         self.groups = {}
+        self.stale_long = set()
         for tf in TIMEFRAMES + LONG_TIMEFRAMES:
-            self.frames[tf] = self._fresh(tf, base)
+            keep = (keep_long and tf in LONG_TIMEFRAMES and tf in old and last is not None
+                    and tf in self.long_due and last < self.long_due[tf])
+            if keep:
+                self.frames[tf] = old[tf]
+                self.stale_long.add(tf)
+                self.long_from_base.add(tf)
+                self.stats["long_kept"] += 1
+            else:
+                self.frames[tf] = self._fresh(tf, base)
+                self.long_from_base.discard(tf)
+                if tf in LONG_TIMEFRAMES and last is not None:
+                    self.long_due[tf] = _due(last, tf)
             if tf != "1m":
                 self.groups[tf] = _tail_group(base, tf)
-        self.stale_long.clear()
         self._mark(base)
         self.stats["builds"] += 1
         return self.frames
@@ -705,7 +739,7 @@ class LiveFrames:
         new base, an edited bar). After a failed check (`failed` set) the caller must stop using these frames."""
         j = self._new_from(base)
         if j is None:
-            self.build(base)
+            self.build(base, keep_long=not self.failed)
             return False
         try:
             return self._step(base, j)
@@ -743,6 +777,8 @@ class LiveFrames:
                     dirty.add(tf)
         for tf in dirty:
             self.frames[tf]._publish()
+            if tf in LONG_TIMEFRAMES and n:  # the batch path rebuilt it at this base: its next due close
+                self.long_due[tf] = _due(int(ct[n - 1]), tf)
         self._mark(base)
         self.stats["steps"] += 1
         self.stats["bars"] += n - j
@@ -777,7 +813,9 @@ class LiveFrames:
         tf_ms = TF_MS[tf]
         first = int(base.open_time[0]) if base.n else 0
         cached = fr.bars()
-        if first % tf_ms == 0:
+        from_base = tf in self.long_from_base  # kept across an edit: its cached bars may predate the edited bar
+        self.long_from_base.discard(tf)
+        if first % tf_ms == 0 and not from_base:
             k = int(np.searchsorted(cached.open_time[:cached.n], first))
             bars = cached.slice(k, cached.n)
             if bars.n >= bars._cap:
@@ -786,7 +824,9 @@ class LiveFrames:
                          "taker_buy"):
                 getattr(bars, name)[bars.n] = getattr(bar, name)[0]
             bars.n += 1
-        else:  # a start inside a period: the first group is partial, aggregate it again
+        else:  # a start inside a period (the first group is partial) or an edit: aggregate the base again
+            if not from_base:
+                self.stats["long_offset_rebuilds"] += 1
             bars = resample(base.slice(0, base.n), tf)
             bars = bars.slice(0, int(np.searchsorted(bars.close_time[:bars.n], int(bar.close_time[0]), side="right")))
         self.frames[tf] = IncrementalFrame(tf, bars, extra=64)

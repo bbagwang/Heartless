@@ -76,6 +76,28 @@ def test_top_n_offline_equals_online_and_follows_liquidity(hist, db, tmp_path):
     out.close()
 
 
+# sha1 (first 16 hex) over every snapshot's (ts, present, sym, mkt) bytes of compute_unit in the fixed mode on this
+# history, 2026-10-16: the same at c16848a (before F0's top_n mode) and on the merged tree. Comparing compute_unit(...)
+# with compute_unit(..., top_n=0) compares the default with itself and cannot catch a change of the fixed mode (red-team
+# F-L11); a definition change that is meant must bump context.VERSION and this digest together.
+FIXED_MODE_DIGEST = "08984d69f96b1334"
+
+
+def test_fixed_mode_bits_are_pinned(db):
+    import hashlib
+
+    st = Store(db)
+    snaps = C.compute_unit(st, SYMS, START, START + 37 * DAY)
+    st.close()
+    h = hashlib.sha1()
+    for sn in snaps:
+        h.update(np.int64(sn.ts).tobytes())
+        h.update(np.asarray(sn.present, dtype=np.uint8).tobytes())
+        h.update(np.asarray(sn.sym, dtype=np.float64).tobytes())
+        h.update(np.asarray(sn.mkt, dtype=np.float64).tobytes())
+    assert len(snaps) == 864 and h.hexdigest()[:16] == FIXED_MODE_DIGEST
+
+
 def test_fixed_mode_is_unchanged_and_stores_of_the_two_modes_refuse_each_other(db, tmp_path):
     st = Store(db)
     a = C.compute_unit(st, SYMS, START + 34 * DAY, START + 35 * DAY)

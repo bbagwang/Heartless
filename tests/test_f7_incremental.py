@@ -98,6 +98,31 @@ def test_every_appended_row_equals_the_batch_over_the_bars_since_the_anchor(case
     assert checks > 5 and set(fr.f) == set(KEYS)
 
 
+def test_only_the_hurst_back_fill_rewrites_rows_of_a_short_frame():
+    """The documented exception (IncrementalFrame docstring, red-team F-L12): a frame built from 100 bars publishes
+    "hurst" rows 99..103 as NaN; the append that reaches 105 rows fills them (to the batch values) in the shared buffer.
+    Nothing else that was handed out changes."""
+    b = _series(130, 9)
+    fr = IncrementalFrame("1m", b.slice(0, 100), extra=64)  # no reallocation on the way, as live frames are sized
+    snaps = []
+    for k in range(100, 130):
+        if fr.n in (100, 103):
+            snaps.append(({c: v.copy() for c, v in fr.f.items()}, dict(fr.f)))
+        _append(fr, b, k)
+    assert len(snaps) == 2
+    touched: set[int] = set()
+    for held, views in snaps:
+        for c, v in views.items():
+            if c != "hurst":
+                assert np.array_equal(v, held[c], equal_nan=True), c
+                continue
+            diff = np.flatnonzero(~((v == held[c]) | (np.isnan(v) & np.isnan(held[c]))))
+            assert np.all(np.isnan(held[c][diff])) and np.all(np.isfinite(v[diff]))  # NaN before, the batch value now
+            touched |= set(int(x) for x in diff)
+    assert touched and touched <= set(range(99, 104))
+    assert _same(fr, FeatureFrame("1m", b.slice(0, 130))) == []
+
+
 def test_snapshots_handed_out_earlier_do_not_change():
     b = _series(400, 7)
     fr = IncrementalFrame("1m", b.slice(0, 200), extra=4)
@@ -198,13 +223,51 @@ def _drive(candles, n0: int, keep_days: int, check_every: int = 37):
 
 
 def test_live_frames_follow_the_base_with_holes_trims_and_reanchors(small_windows):
+    # (1440 - 13, 1): the day-1 00:00 bar is missing, so the trim at day 4 leaves the base starting at 00:01, inside a
+    # 4h / 1d period: the long frames take _rebuild_long's re-aggregation branch (red-team F-L8)
     candles = _candles(7 * 1440 + 333, 11, start=START + 13 * MS_MINUTE,
-                       holes=[(3 * 1440 + 3, 1), (4 * 1440 - 1, 1), (5 * 1440 + 100, 300), (6 * 1440 + 239, 2)])
+                       holes=[(1440 - 13, 1), (3 * 1440 + 3, 1), (4 * 1440 - 1, 1), (5 * 1440 + 100, 300),
+                              (6 * 1440 + 239, 2)])
     inc, ca, steps = _drive(candles, 3 * 1440, keep_days=3)  # the app keeps more history than any live window
     st = inc.live.stats
     assert inc.live.failed == "" and ca.trims >= 3
     assert st["reanchors"] >= 40 and st["verified"] == st["reanchors"] and st["long_rebuilds"] >= 4
+    assert st["long_offset_rebuilds"] >= 2  # 4h and 1d after the day-4 trim
     assert steps == len(candles) - 3 * 1440 and st["builds"] == 1
+
+
+def test_an_edit_after_a_trim_keeps_the_long_frames_until_their_next_close(small_windows):
+    """Red-team F-L5: a trim at 00:00, then a revised bar at 00:06 forces a build. The batch path keeps its 4h / 1d
+    frames until their next close; the incremental path used to re-anchor them on the trimmed base at once (1d: 25 rows
+    against the batch's 28). Compared at every minute by _drive's reference view."""
+    candles = _candles(6 * 1440 + 400, 21, start=START)
+    ca = CandleArrays("1m", capacity=len(candles) + 16)
+    n0 = 3 * 1440
+    ca.extend(candles[:n0])
+    inc = MarketView("BTCUSDT", incremental=True)
+    inc.rebuild(ca, live=True)
+    ref = MarketView("BTCUSDT")
+    ref.rebuild(ca, live=True)
+    edits = {4 * 1440 + 6, 4 * 1440 + 200, 5 * 1440 + 3}  # minutes after the day-4 and day-5 trims
+    for i in range(n0, len(candles)):
+        c = candles[i]
+        ca.append(c)
+        if c.open_time % MS_DAY == 0:
+            ca.trim_before(c.open_time - 2 * MS_DAY)
+        if i in edits:  # the exchange revises the last bar (or a late duplicate with other values arrives)
+            ca.append(Candle(c.open_time, c.open, c.high * 1.002, c.low, c.close, c.volume, c.quote_volume, c.trades,
+                             c.taker_buy_volume, c.close_time))
+        inc.advance(ca)
+        ref.base = ca
+        inc.seek(c.close_time)
+        ref.seek(c.close_time)
+        for tf in LONG_TIMEFRAMES:
+            a, b = inc.tf(tf), ref.tf(tf)
+            assert inc.closed(tf) == ref.closed(tf) and a.idx == b.idx, (tf, i)
+            if b.frame.n:
+                assert a.frame.n == b.frame.n and _same(a.frame, b.frame) == [], (tf, i)
+    st = inc.live.stats
+    assert ca.edits == len(edits) and st["builds"] == 1 + len(edits) and st["long_kept"] >= 2 * len(edits) - 1
 
 
 def test_a_reanchor_lands_on_the_per_bar_rebuild(small_windows):
