@@ -624,13 +624,21 @@ def basis_series(store, symbol: str, start: int | None = None, end: int | None =
     """Hourly perpetual-vs-spot basis of a USDT perpetual from the stored 1h blocks, one row per hour close T where both
     markets have a bar closing at T:
     ts = T (bar open + 1 h), perp / spot = the two closes (spot times the contract multiplier, 1000 for 1000PEPEUSDT),
-    basis = (perp - spot) / spot, funding = the rate settled at T (NaN when no settlement at T), funding_last = the
-    last rate settled at or before T, perp_qv / spot_qv = the hour's quote volumes (0 in an hour without trades, e.g.
-    the flat files the archive keeps publishing after a delisting). Empty arrays when the symbol has no spot market or
-    no stored blocks. `row`: the
-    symbol's inventory row when the caller has it (read from the store otherwise)."""
+    basis = (perp - spot) / spot, perp_qv / spot_qv = the hour's quote volumes (0 in an hour without trades, e.g. the
+    flat files the archive keeps publishing after a delisting).
+
+    Funding follows the time convention of ROADMAP 7.4: the rate settled at s is usable for decisions only from the
+    close at s + 1h (a close at s is the last instant of the bar [s - 1h, s), before the settlement is published).
+    * funding = the rate that becomes usable at this close, i.e. settled at T - 1h (NaN when there was none);
+    * funding_last = the last rate usable at this close (settled at or before T - 1h);
+    * funding_settled = the rate settled AT T, for PnL accounting only: a position open across T (entered at or before
+      the close at T - 1h, still open after T) pays or receives it. Never a decision input at T.
+    Red-team F-M1: funding / funding_last used to be one settlement early (the rate settled at T on the row of the
+    close at T). Empty arrays when the symbol has no spot market or no stored blocks. `row`: the symbol's inventory
+    row when the caller has it (read from the store otherwise)."""
     r = row if row is not None else next((x for x in store.load_symbol_inventory() if x["symbol"] == symbol), None)
-    empty = {k: np.zeros(0) for k in ("ts", "perp", "spot", "basis", "funding", "funding_last", "perp_qv", "spot_qv")}
+    empty = {k: np.zeros(0) for k in ("ts", "perp", "spot", "basis", "funding", "funding_last", "funding_settled",
+                                      "perp_qv", "spot_qv")}
     if r is None or not r.get("spot_symbol"):
         return empty
     # a day before `start`, so funding_last is known from the first row on (settlements are at most 8 h apart)
@@ -640,14 +648,21 @@ def basis_series(store, symbol: str, start: int | None = None, end: int | None =
         return empty
     t_f = fut["open_time"] + MS_H
     common, i_f, i_s = np.intersect1d(t_f, spot["open_time"] + MS_H, return_indices=True)
-    # funding settled at T is stored on the bar that OPENS at T: shift by one bar via the time key
+    # the funding settled at s is stored on the bar that OPENS at s; settlement times and rates
     f_t = fut["open_time"][np.isfinite(fut["funding"])]
     f_v = fut["funding"][np.isfinite(fut["funding"])]
-    at = np.searchsorted(f_t, common)
-    hit = (at < len(f_t)) & (f_t[np.minimum(at, max(len(f_t) - 1, 0))] == common) if len(f_t) else np.zeros(len(common), bool)
-    fund = np.full(len(common), np.nan)
-    fund[hit] = f_v[at[hit]]
-    last_i = np.searchsorted(f_t, common, side="right") - 1
+
+    def settled_at(times: np.ndarray) -> np.ndarray:
+        out = np.full(len(times), np.nan)
+        if not len(f_t):
+            return out
+        at = np.searchsorted(f_t, times)
+        hit = (at < len(f_t)) & (f_t[np.minimum(at, len(f_t) - 1)] == times)
+        out[hit] = f_v[at[hit]]
+        return out
+
+    known = common - MS_H  # the latest settlement time a decision at the close T may use
+    last_i = np.searchsorted(f_t, known, side="right") - 1
     f_last = np.where(last_i >= 0, f_v[np.maximum(last_i, 0)] if len(f_v) else np.nan, np.nan)
     perp = fut["close"][i_f]
     sp = spot["close"][i_s] * float(r.get("multiplier") or 1.0)
@@ -658,9 +673,28 @@ def basis_series(store, symbol: str, start: int | None = None, end: int | None =
         sel &= common <= int(end)
     with np.errstate(all="ignore"):
         basis = (perp - sp) / sp
-    return {"ts": common[sel], "perp": perp[sel], "spot": sp[sel], "basis": basis[sel], "funding": fund[sel],
-            "funding_last": f_last[sel], "perp_qv": fut["quote_volume"][i_f][sel],
-            "spot_qv": spot["quote_volume"][i_s][sel]}
+    return {"ts": common[sel], "perp": perp[sel], "spot": sp[sel], "basis": basis[sel],
+            "funding": settled_at(known)[sel], "funding_last": f_last[sel], "funding_settled": settled_at(common)[sel],
+            "perp_qv": fut["quote_volume"][i_f][sel], "spot_qv": spot["quote_volume"][i_s][sel]}
+
+
+PAIR_MAX_ABS_BASIS = 0.05  # above this median |basis| the spot market is probably another asset with the same ticker
+
+
+def paired_as_of(store, symbol: str, month: str, row: dict | None = None) -> dict:
+    """The spot pairing check of a perpetual point in time for calendar month `month`: the median |basis| over the
+    hours of month m - 1 in which both markets traded (red-team F-L3: spot_coverage's whole-history median also reads
+    VALID-F and FORWARD hours). paired = None when there was no such hour (unverified: the carry universe's prior-month
+    spot volume rule excludes the symbol then anyway)."""
+    y, m = map(int, month.split("-"))
+    prev = f"{y - (m == 1):04d}-{12 if m == 1 else m - 1:02d}"
+    a, b = _month_ms(prev) + MS_H, _month_ms(month)  # hour closes inside month m - 1
+    bs = basis_series(store, symbol, a, b, row=row)
+    both = np.isfinite(bs["basis"]) & (bs["perp_qv"] > 0) & (bs["spot_qv"] > 0)
+    v = bs["basis"][both]
+    med = float(np.median(np.abs(v))) if len(v) else None
+    return {"symbol": symbol, "month": month, "hours_both_traded": int(len(v)), "median_abs_basis": med,
+            "paired": None if med is None else med < PAIR_MAX_ABS_BASIS}
 
 
 # --- reports ---------------------------------------------------------------------------------------------------------------
@@ -748,7 +782,8 @@ def spot_coverage(store) -> dict:
     """Spot side of the carry datasets: perpetuals with a spot USDT market in the archive, those with stored spot
     blocks, the first stored month, and a sanity check of the pairing (the median |basis| over the hours both markets
     traded; above 5% the spot market is probably another asset with the same ticker, or a redenominated one). Data
-    checks only, no performance statistic."""
+    checks only, no performance statistic. This report reads the whole stored history; a research universe applies the
+    check point in time with paired_as_of (month m - 1 only)."""
     inv = [r for r in store.load_symbol_inventory(kind="perpetual") if r["quote"] == "USDT" and r.get("spot_symbol")]
     idx: dict[str, list[dict]] = {}
     for b in store.kline_block_index(SPOT_TABLE):
@@ -769,7 +804,7 @@ def spot_coverage(store) -> dict:
         per[r["symbol"]] = {"spot_symbol": r["spot_symbol"], "multiplier": r["multiplier"], "first_month": fm,
                             "last_month": month_str(blocks[-1]["month"]), "stored_months": len(blocks),
                             "hours_both_traded": int(len(b)), "median_abs_basis": med,
-                            "paired": med is not None and med < 0.05}
+                            "paired": med is not None and med < PAIR_MAX_ABS_BASIS}
     stored = [s for s, v in per.items() if v["stored_months"]]
     return {"perpetuals_with_spot_market": len(inv), "with_stored_spot": len(stored),
             "paired_ok": sum(1 for s in stored if per[s].get("paired")),

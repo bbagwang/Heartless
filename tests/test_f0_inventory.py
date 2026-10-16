@@ -249,8 +249,12 @@ def test_spot_build_and_basis_series(built):
     assert np.allclose(b["spot"], b["perp"], rtol=0.01)  # 1000 x 0.001233 against 1.234: paired via the multiplier
     assert np.allclose(b["basis"], (b["perp"] - b["spot"]) / b["spot"]) and np.all(np.abs(b["basis"]) < 0.01)
     a = SI.basis_series(st, "AAAUSDT", SI._month_ms("2024-01"), SI._month_ms("2024-01") + 2 * DAY)
-    settled = a["ts"][np.isfinite(a["funding"])]
-    assert len(settled) == 7 and np.all(settled % (8 * H) == 0)  # T in [01-01 00:00, 01-03 00:00]: 2 days + 1
+    # PnL accounting: the settlements AT the row's close, T in [01-01 00:00, 01-03 00:00]: 2 days + 1
+    settled = a["ts"][np.isfinite(a["funding_settled"])]
+    assert len(settled) == 7 and np.all(settled % (8 * H) == 0)
+    # decisions (ROADMAP 7.4): the rate settled at s is usable from the close at s + 1h (red-team F-M1)
+    usable = a["ts"][np.isfinite(a["funding"])]
+    assert len(usable) == 6 and np.all(usable % (8 * H) == H)
     assert np.all(a["funding_last"] == 0.0001)  # known from the first row on (preloaded a day back)
     assert SI.basis_series(st, "NEWUSDT")["ts"].size == 0  # no spot market
     cov = SI.spot_coverage(st)
@@ -259,6 +263,41 @@ def test_spot_build_and_basis_series(built):
     assert np.all(g["perp_qv"][g["ts"] > SI._month_ms("2024-01") + H] == 0) and np.median(np.abs(g["basis"])) > 0.5
     assert cov["with_stored_spot"] == 3 and cov["paired_ok"] == 3 and cov["suspect_pairs"] == []
     assert cov["symbols"]["GONEUSDT"]["hours_both_traded"] == 10 * 24
+
+
+def test_basis_funding_columns_follow_the_time_convention(tmp_path):
+    """A 1h-interval perpetual whose rate settled at hour k is k x 1e-6: at the close T the decision columns may only
+    know settlements up to T - 1h, the accounting column holds the one at T."""
+    st = Store(tmp_path / "b.db")
+    month = "2024-01"
+    m0 = SI._month_ms(month)
+    rows = SI.kline_rows(_zip(kline_csv(month, 10.0, 1e6)), month)
+    fund = [(m0 + k * H, f"{k * 1e-6:.6f}") for k in range(1, 31 * 24)]
+    blob, summ = SI.encode_month(rows, month, fund)
+    sblob, ssumm = SI.encode_month(rows, month)
+    st.save_symbol_inventory([{"symbol": "HRLYUSDT", "kind": "perpetual", "quote": "USDT", "base": "HRLY",
+                               "asset": "HRLY", "multiplier": 1, "first_month": month, "last_month": month, "months": 1,
+                               "missing_months": [], "spot_symbol": "HRLYUSDT", "spot_first_month": month,
+                               "spot_last_month": month, "spot_months": 1, "updated": 0}])
+    for table, b, sm in ((SI.FUT_TABLE, blob, summ), (SI.SPOT_TABLE, sblob, ssumm)):
+        st.save_kline_blocks(table, [("HRLYUSDT", m0, sm["n"], sm["first_ts"], sm["last_ts"], sm["first_trade"],
+                                      sm["last_trade"], sm["med_dqv"], sm["days_traded"], b)])
+    bs = SI.basis_series(st, "HRLYUSDT", m0 + 10 * H, m0 + 20 * H)
+    k = (bs["ts"] - m0) // H  # the close at hour k
+    assert list(k) == list(range(10, 21))
+    assert np.allclose(bs["funding"], (k - 1) * 1e-6)  # settled at T - 1h: usable at the close T
+    assert np.allclose(bs["funding_last"], (k - 1) * 1e-6)
+    assert np.allclose(bs["funding_settled"], k * 1e-6)  # settled at T: charged to positions open across T
+    st.close()
+
+
+def test_pairing_is_checked_point_in_time(built):
+    st, _, _, _ = built
+    p = SI.paired_as_of(st, "AAAUSDT", "2024-02")
+    assert p["paired"] is True and p["hours_both_traded"] == 31 * 24 and p["median_abs_basis"] < 0.05
+    gone = SI.paired_as_of(st, "GONEUSDT", "2024-02")  # nothing traded in January: unverified, not paired
+    assert gone["paired"] is None and gone["hours_both_traded"] == 0
+    assert SI.paired_as_of(st, "NEWUSDT", "2024-02")["paired"] is None  # no spot market
 
 
 def test_inventory_report_counts_listings_and_delistings(built):
