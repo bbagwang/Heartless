@@ -1032,12 +1032,28 @@ def pit_span(ustore) -> tuple[int, int] | None:
 
 def pit_source_info(src, ustore, universe_db) -> dict:
     """source_info of a point-in-time store: every eligible inventory symbol's candle / funding / metrics range in the
-    candle database (the ones it holds), the universe.db path and its 1h data span as one more range entry, so an
-    appended universe.db month re-opens only the hours after it."""
+    candle database (the ones it holds), the universe.db path, its 1h data span as one more range entry, so an
+    appended universe.db month re-opens only the hours after it, and every eligible symbol's own 1h bar span there
+    ("@universe.db SYMBOL"): the ranking reads every candidate's 1h bars, so a symbol whose blocks appear or grow inside
+    the stored span (a perpetual added to the inventory later, a repaired last month) changes the members of hours
+    the store already holds, and those hours are re-opened from where its bars changed (adversarial review 2026-10-16:
+    with the global span only, such a store kept reading as "same")."""
+    from heartless.data.symbols_inventory import FUT_TABLE
     from heartless.data.universe import eligible_research
 
     ranges: dict = {}
-    for r in ustore.load_symbol_inventory():
+    inv = ustore.load_symbol_inventory()
+    ok = {r["symbol"] for r in inv if eligible_research(r) is None}
+    spans: dict[str, list[int]] = {}
+    for blk in ustore.kline_block_index(FUT_TABLE):
+        if not blk["n"] or blk["symbol"] not in ok or blk["first_ts"] is None or blk["last_ts"] is None:
+            continue
+        cur = spans.get(blk["symbol"])
+        a, b = hour_close(int(blk["first_ts"]) // MS_H), hour_close(int(blk["last_ts"]) // MS_H)  # as pit_span
+        spans[blk["symbol"]] = [a, b] if cur is None else [min(cur[0], a), max(cur[1], b)]
+    for sym, span in spans.items():
+        ranges[f"@universe.db {sym}"] = {"futures_1h": span}
+    for r in inv:
         if eligible_research(r) is not None:
             continue
         sym = r["symbol"]

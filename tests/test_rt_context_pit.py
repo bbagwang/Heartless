@@ -247,3 +247,51 @@ def test_month_pieces_give_the_bits_of_one_grid_over_the_whole_window(udb, tmp_p
         assert pr == wr, p.ts  # the same members with the same bytes, market row included
     src.close()
     us.close()
+
+
+def test_a_symbol_added_inside_the_stored_span_reopens_the_hours_it_changes(udb, tmp_path):
+    """Adversarial review 2026-10-16: the ranking reads every eligible perpetual's 1h bars, so a perpetual whose blocks
+    appear inside the span a store already holds (added to the inventory later) changes the members of those hours.
+    The fingerprint held only universe.db's global span, which such an addition leaves unchanged: the store read as
+    "same" and kept serving the old members. Each symbol's own span is tracked now."""
+    cdb = tmp_path / "c.db"
+    Store(cdb).close()
+    src = Store(cdb, readonly=True)
+    dst = Store(tmp_path / "ctx.db")
+    a, b = M("2024-02"), M("2024-02") + 3 * DAY - 1
+    C.build(src, dst, a, b, top_n=2, pit=str(udb))
+    assert C.usable(src, dst, ["AAAUSDT"], 2, pit=str(udb))[:2] == (True, "same")
+    us = Store(udb, readonly=True)
+    before = C.pit_source_info(src, us, udb)
+    us.close()
+    # EEE: 9e6 an hour from 2024-02-01 12:00 on, inside the stored span (it outranks every member)
+    st = Store(udb)
+    st.save_symbol_inventory([_inv("EEEUSDT", "2024-02", "2024-02")])
+    first = M("2024-02") + 12 * H
+    rows = [r for r in _rows("2024-02", 3.0, lambda t: 9e6) if int(r[0]) >= first]
+    blob, s = SI.encode_month(rows, "2024-02", [])
+    st.save_kline_blocks(SI.FUT_TABLE, [("EEEUSDT", M("2024-02"), s["n"], s["first_ts"], s["last_ts"], s["first_trade"],
+                                         s["last_trade"], s["med_dqv"], s["days_traded"], blob)])
+    st.refresh_inventory_trades()
+    st.close()
+    us = Store(udb, readonly=True)
+    after = C.pit_source_info(src, us, udb)
+    assert C.pit_span(us) == tuple(before["ranges"]["@universe.db"]["futures_1h"])  # the global span did not move
+    h = C.hour_of(first + 36 * H)
+    syms, mask = C.pit_members(us, h, h, 2)
+    assert "EEEUSDT" in [x for x, m in zip(syms, mask[0]) if m]  # the hour's members did change
+    us.close()
+    status, stable, why = C.source_status({"source": before}, after)
+    assert status == "extended" and stable < first + H - 1 and "EEEUSDT" in why  # before its first hour close
+    assert C.usable(src, dst, ["AAAUSDT"], 2, pit=str(udb))[1] != "same"
+    # the next build re-opens those hours: EEE is a member once it has 24 h of bars, as a fresh build has it
+    C.build(src, dst, a, b, top_n=2, pit=str(udb))
+    fresh = Store(tmp_path / "fresh.db")
+    C.build(src, fresh, a, b, top_n=2, pit=str(udb))
+    names = ["AAAUSDT", "BBBUSDT", "BTCUSDT", "DDDUSDT", "EEEUSDT"]
+    got, want = C.ContextTable.load(dst, names, a, b), C.ContextTable.load(fresh, names, a, b)
+    assert len(got.symbols["EEEUSDT"]) == len(want.symbols["EEEUSDT"]) > 0
+    assert {k: len(v) for k, v in got.symbols.items()} == {k: len(v) for k, v in want.symbols.items()}
+    src.close()
+    dst.close()
+    fresh.close()
