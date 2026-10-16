@@ -505,7 +505,8 @@ class ResearchManager:
             result = await loop.run_in_executor(self.pool, run_research_cycle, str(self.s.db_path), settings_dict,
                                                 self.app.params.to_dict(), symbols_dict, self.s.research_lookback_days,
                                                 self.s.research_candidates, now % 100_000, sel["alphas"],
-                                                self.store.get("advisor.seeds", {}) or {}, self.s.research_folds)
+                                                self.store.get("advisor.seeds", {}) or {}, self.s.research_folds,
+                                                seal.live_loop("research_cycle"))  # FORWARD-exempt (ROADMAP 7.9)
             self.last_cycle_ms = int((time.monotonic() - t_wall) * 1000)
             self.store.set("research.last_cycle_ms", self.last_cycle_ms)
         except Exception as e:  # noqa: BLE001
@@ -620,7 +621,9 @@ class ResearchManager:
             await self.app.emit("research_done", {"message": f"알파 발굴 건너뜀: 저장된 이력 {days:.0f}일 < {self.s.discovery_min_days}일", "notify": False})
             return None
         start = first + 14 * MS_DAY  # indicator warm-up
-        win = seal.clip_window(start, last)  # the automated loop never mines or validates on a sealed period
+        # the automated loop never mines or validates on a sealed period; it is exempt from the FORWARD blocks only
+        # (ROADMAP 7.9: it keeps adapting to the market the bot trades and its rules are never a confirmation)
+        win = seal.clip_window(start, last, seal.live_loop("discovery_cycle"))
         if win is None or win[1] - win[0] < (self.s.discovery_min_days - 14) * MS_DAY:
             await self.app.emit("research_done", {"message": "알파 발굴 건너뜀: 봉인 구간을 제외하면 이력이 부족함", "notify": False})
             return None
@@ -1079,7 +1082,8 @@ def _discovery_worker(db_path: str, symbols: list[str], train: tuple[int, int], 
 
     out = {"tested": 0, "passed": [], "seconds": 0.0, "rows": {}, "t_bar": 0.0, "n_tests": 0, "tf": grids}
     try:
-        res = D.mine(db_path, symbols, train, valid, grids, D.SearchConfig(beam=25, depth=3), workers=1)
+        res = D.mine(db_path, symbols, train, valid, grids, D.SearchConfig(beam=25, depth=3), workers=1,
+                     unseal=seal.live_loop("discovery_cycle"))  # the live discovery loop: FORWARD-exempt (7.9)
     except Exception as e:  # noqa: BLE001
         out["errors"] = [f"{grids}: {e}"]
         return out

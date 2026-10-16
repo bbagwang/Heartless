@@ -79,7 +79,17 @@ def test_ensure_candles_with_only_forming_kline_stores_nothing():
 
 
 # --- findings 2 & 5: backtest subcommand must run inside the already-running loop ---------------------------
-def test_backtest_subcommand_runs_under_asyncio_run(monkeypatch, capsys):
+@pytest.fixture
+def before_forward(monkeypatch):
+    """`backtest --days` evaluates the last N days, which the FORWARD seal (ROADMAP 7.9) refuses from 2026-10-07 on
+    (tests/test_f4_forward.py): these tests run on a clock set before FWD-01."""
+    from heartless.learning import seal
+    from heartless.util import timeutil
+
+    monkeypatch.setattr(timeutil, "_clock", lambda: seal.FORWARD_ORIGIN_MS - 10 * 86_400_000)
+
+
+def test_backtest_subcommand_runs_under_asyncio_run(monkeypatch, capsys, before_forward):
     s = _settings()
     store = Store(s.db_path)
     now = now_ms()
@@ -101,7 +111,7 @@ def test_backtest_subcommand_runs_under_asyncio_run(monkeypatch, capsys):
     assert rest.closed
 
 
-def test_backtest_subcommand_human_output(monkeypatch, capsys):
+def test_backtest_subcommand_human_output(monkeypatch, capsys, before_forward):
     s = _settings()
     store = Store(s.db_path)
     now = now_ms()

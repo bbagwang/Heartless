@@ -158,7 +158,8 @@ def warmup_start(since: int, warm: int, unseal=()) -> int:
 
     lo = int(since) - int(warm)
     for name in seal.overlapping(lo, int(since) - 1, unseal):
-        lo = max(lo, int(seal.SEALED[name][1]))
+        # a named period or a FORWARD block still sealed (F4; a live loop's exemption never lists one)
+        lo = max(lo, int((seal.SEALED.get(name) or seal.block_span(name))[1]))
     return min(lo, int(since))
 
 
