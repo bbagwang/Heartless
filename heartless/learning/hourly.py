@@ -791,7 +791,9 @@ def evaluate(alpha: HourlyAlpha, start: int, end: int, universe_db, symbols: lis
     trades.sort(key=lambda t: (t["entry_time"], t["symbol"]))
     daily = {day0 + d: float(v) for d, v in enumerate(acc["acc"]) if day0 + d <= day1}
     cfg = {"tool": "hourly", **alpha.config(), "universe": f"top{int(top)}" if top else syms, "exec": exec}
-    if entry_filter is not None:
+    if entry_filter is not None and not getattr(entry_filter, "evaluator_policy", False):
+        # a filter that is a choice of the configuration is part of its identity; the shock layer is not (it is the
+        # evaluator's own policy from F-pre-B on, as the costs are: the trial records it in `extra` instead)
         cfg["entry_filter"] = getattr(entry_filter, "__name__", type(entry_filter).__name__)
     return HourlyResult(alpha.name, alpha.family, cfg, start, end, trades, [s for s in syms if s not in skipped],
                         skipped, daily, membership, bool(stress), time.time() - t0, n_dec)
@@ -961,7 +963,7 @@ def main_cli(settings, args) -> None:
                    "shock": shock_doc}
             tag = (args.tag or "").strip()
             if tag:
-                doc["trial"] = record(res, tag, extra={"argv": list(args.argv)})
+                doc["trial"] = record(res, tag, extra={"argv": list(args.argv), "shock": shock_doc})
                 n_fam = trials.family_tests(tag)
                 print(f"trial ledger: {tag} config {doc['trial']['config_hash']} recorded; family N={n_fam}, TRAIN bar "
                       f"t_day >= {trials.threshold(n_fam):.2f}", file=sys.stderr)

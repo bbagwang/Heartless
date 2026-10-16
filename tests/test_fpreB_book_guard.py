@@ -9,7 +9,7 @@ from heartless.core.models import Candle
 from heartless.data.candles import CandleArrays
 from heartless.data.features import FeatureFrame
 from heartless.exchange.orderbook import BookFeatures, bar_book_proxy
-from heartless.execution.engine import BookGuard, book_proxy_series
+from heartless.execution.engine import BOOK_MAX_AGE_MS, BookGuard, book_proxy_series, usable_stream_book
 from heartless.strategy.base import Context
 from synth import synth_candles
 from tests.test_fpreB_support import Scripted, backtest
@@ -48,23 +48,27 @@ def _ctx(book=None):
                    book=book or BookFeatures())
 
 
+def _stream(spread, depth_side, age=50.0):
+    return BookFeatures(spread_bps=spread, imbalance=0.0, depth_bid_k=depth_side, depth_ask_k=depth_side,
+                        staleness_ms=age, source="stream")
+
+
 def test_guard_rules_on_stream_samples():
     g = BookGuard(Settings(_env_file=None))
     t0 = 1_700_006_400_000
     for k in range(1440):
-        g.observe(_ctx(BookFeatures(spread_bps=1.0 + 0.001 * (k % 3), depth_bid_k=5e5, depth_ask_k=5e5,
-                                    source="stream")), t0 + k * MIN)
+        g.observe(_ctx(_stream(1.0 + 0.001 * (k % 3), 5e5)), t0 + k * MIN)
     now = t0 + 1440 * MIN
-    ok = BookFeatures(spread_bps=4.0, depth_bid_k=4e5, depth_ask_k=4e5, source="stream")
+    ok = _stream(4.0, 4e5)
     assert g.check(None, _ctx(ok), now, 0.01) == ""  # 4 bp: over 3x the median but under the 5 bp floor
-    wide = BookFeatures(spread_bps=6.0, depth_bid_k=4e5, depth_ask_k=4e5, source="stream")
+    wide = _stream(6.0, 4e5)
     assert g.check(None, _ctx(wide), now, 0.01) == "book guard: spread"
-    thin = BookFeatures(spread_bps=1.0, depth_bid_k=1.2e5, depth_ask_k=1.2e5, source="stream")
+    thin = _stream(1.0, 1.2e5)
     assert g.check(None, _ctx(thin), now, 0.01) == "book guard: depth"  # 2.4e5 < 25% of 1e6
     # a fresh stream (under 720 prior minutes) judges nothing
     g2 = BookGuard(Settings(_env_file=None))
     for k in range(700):
-        g2.observe(_ctx(BookFeatures(spread_bps=1.0, depth_bid_k=5e5, depth_ask_k=5e5, source="stream")), t0 + k * MIN)
+        g2.observe(_ctx(_stream(1.0, 5e5)), t0 + k * MIN)
     assert g2.check(None, _ctx(wide), t0 + 700 * MIN, 0.01) == ""
     # one sample per minute
     assert len(g.samples["XUSDT"]) == 1440
@@ -118,3 +122,23 @@ def test_live_incremental_frames_give_the_same_proxy():
     assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
     g = BookGuard(Settings(_env_file=None))
     assert g.figures(_V(inc), _ctx(), now, 0.001)[:2] == g.figures(_V(batch), _ctx(), now, 0.001)[:2]
+
+
+def test_an_unusable_stream_book_falls_back_to_the_proxy():
+    """Red-team F-M5 / F-M6 (orderbook.usable_book): a stale stream book, or one whose levels stop short of k (NaN
+    depth, e.g. BTC's 20 partial levels), is no book: the guard judges the 1m-bar proxy instead (current and prior),
+    and such books never enter the stream samples."""
+    ca = _calm_then_wild()
+    fr = FeatureFrame("1m", ca)
+    now = int(fr.close_time[-1])
+    stale = _stream(1.0, 5e5, age=BOOK_MAX_AGE_MS + 1)
+    uncovered = BookFeatures(spread_bps=1.0, staleness_ms=50.0, source="stream")  # depth / imbalance NaN
+    assert usable_stream_book(_stream(1.0, 5e5)) and not usable_stream_book(stale)
+    assert not usable_stream_book(uncovered) and not usable_stream_book(BookFeatures(source="proxy"))
+    g = BookGuard(Settings(_env_file=None))
+    for b in (stale, uncovered, BookFeatures()):
+        assert g.check(_V(fr), _ctx(b), now, 0.01) == "book guard: spread"  # the proxy's wild last bars
+        g.observe(_ctx(b), now)
+    assert g.samples == {}
+    # a usable stream book is judged on its own samples (none yet: no verdict)
+    assert g.check(_V(fr), _ctx(_stream(1.0, 5e5)), now, 0.01) == ""

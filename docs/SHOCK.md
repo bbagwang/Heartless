@@ -52,9 +52,10 @@ ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코�
 |---|---|---|
 | 백테스터 (`learning/backtester.py`) | `Backtester(shock="auto")`: SHOCK_LAYER 가 켜져 있으면 불러온 이력 전체에 대해 한 번 계산해 모든 실행에 씁니다. S0 는 실행 자신의 BTCUSDT 1분봉, 없으면 SHOCK_CANDLE_DB 의 BTC. S1~S3 는 UNIVERSE_DB | 완료 |
 | lab (`learning/lab.py`) | 작업자마다 Backtester 가 위 규칙으로 일정을 만듭니다(프로세스 안 캐시). SHOCK_SCHEDULE 을 주면 그 파일을 읽고, 없으면 써 둡니다 | 동작함. 부모 프로세스에서 한 번 만드는 연결은 6절 |
-| 시간 단위 평가기 (`learning/hourly.py`) | `heartless hourly` 가 `EntryFilter.for_alpha(alpha, schedule)` 를 `entry_filter` 로 넘깁니다. 결과 JSON 의 `shock` 에 발동 수와 막힌 결정 수 | 완료 |
+| 시간 단위 평가기 (`learning/hourly.py`) | `heartless hourly` 가 `EntryFilter.for_alpha(alpha, schedule)` 를 `entry_filter` 로 넘깁니다. 결과 JSON 과 원장 줄의 `shock` 에 발동 수와 막힌 결정 수. 층은 평가기의 정책이라(`EntryFilter.evaluator_policy`) 구성 해시에 넣지 않습니다. lab 해시도 층을 담지 않으므로, 한 구성의 TRAIN·스트레스·VALID·FORWARD 실행이 층 도입 전후로 같은 해시입니다 | 완료 |
 | 두 다리 중립 평가기 (`learning/neutral.py`) | `EntryFilter` 는 스칼라 시각도 받습니다(`entry_filter(symbol, T) -> bool`) | 연결은 6절 |
-| 운영 (`app.py`) | `ShockDetector` 를 모든 엔진의 `TradingEngine.shock` 으로 | F6, 5절 |
+| 킬 스위치·리서치 창 (`learning/research.py`) | `AlphaKillSwitch.evaluate` 의 경보선은 `shock_kill_switch_h(app, now, KILL_SWITCH_H)`, 리서치 사이클 창은 `ResearchManager.lookback_days(now)`. 둘 다 앱의 `app.shock`(운영 감지기)에게 묻고, 없거나 SHOCK_LAYER 가 꺼져 있으면 설정값 그대로 | 완료. 앱이 `app.shock` 을 붙이면 작동(5절) |
+| 운영 (`app.py`) | `ShockDetector` 를 `app.shock` 과 모든 엔진의 `TradingEngine.shock` 으로 | F6, 5절 |
 
 설정:
 
@@ -75,6 +76,8 @@ ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코�
 from heartless.strategy.shock import ShockDetector, WARMUP_MS
 
 det = ShockDetector()
+det.prime(settings.universe_db_path, now)                   # 시작 시 한 번: universe.db 의 1h 이력으로 창을 채움
+app.shock = det                                             # 킬 스위치·리서치 창(learning/research.py)이 읽음
 for eng in engines: eng.shock = det                         # 엔진은 det.entry_halt(now) 만 묻습니다
 ev = det.observe_minute(btc_close_time, btc_close)          # BTC 1분봉 마감마다, 그 봉에서 엔진이 결정하기 전
 evs = det.observe_hour(hour_close, btc_hour_close, xs, eligible)  # 정시마다, 엔진이 그 정시 봉을 결정하기 전
@@ -83,16 +86,18 @@ det.research_lookback_days(now, settings.research_lookback_days)  # 리서치 �
 ```
 
 - `xs` = {종목: (그 시간 1h 종가, 그 시간 거래대금)}. 그 시간에 1h 봉이 있는 모든 USDT 무기한입니다(거래대금 0 포함). `eligible(symbol)` 은 거래소 필터(USDT 무기한, TRADING, 스테이블코인 아님)입니다.
-- 시작 시 WARMUP_MS(746시간) 의 저장된 1h 이력(BTC 와 단면)으로 `observe_hour` 를 먼저 돌려 둡니다. 그 전에는 S1~S3 가 판정하지 않습니다.
+- 시작 시 `prime(universe_db, until)` 이 저장된 1h 이력(BTC 와 단면)을 `observe_hour` 로 먼저 돌려 둡니다. 기본 구간은 WARMUP_MS(746시간) + 45일이라, 봇이 꺼져 있던 동안의 발동도 킬 스위치(30일)와 리서치 창(45일)에 반영됩니다. 구성원 이력은 그보다 49시간 앞부터 넣으므로, 이어지는 실시간 정시의 판정이 오프라인 일정과 같습니다(`tests/test_fpreB_shock.py`). universe.db 가 없으면 0을 돌려주고, 실시간 정시가 창을 채운 뒤부터 판정합니다.
+- `prime` 이 읽는 universe.db 가 시작 시각까지 최신이 아니면, 빠진 시간은 BTC 종가를 이월(수익률 0)하고 단면은 비워 둡니다. F6 은 시작 시 빠진 1h 봉을 REST 로 채운 뒤 `observe_hour` 로 이어 넣는 편이 정확합니다.
 - 반환된 `ShockEvent.message()` 를 텔레그램으로 알립니다(한국어 한 줄).
 - 처리 순서: BTC 봉을 받으면 엔진들의 `on_bar` 보다 먼저 `observe_minute` 를 부릅니다. 지금은 BTC 를 처리한 뒤 검사하므로, 같은 분에 먼저 처리된 종목은 막히지 않습니다. 백테스터는 같은 분의 모든 종목을 막습니다.
 
 ## 6. 다른 파일에 필요한 연결
 
-- `learning/lab.py`: `evaluate()` 가 작업을 나누기 전에 `shock.schedule_for(settings, start − warm-up, end)` 로 일정을 만들어 파일에 저장하고 작업 설정에 `SHOCK_SCHEDULE` 을 넣으면, 작업마다 다시 계산하지 않습니다. 지금도 결과는 같습니다(작업자마다 계산).
-- `learning/neutral.py`: CLI 에서 `EntryFilter(schedule)` 를 `entry_filter` 로 넘깁니다.
-- `learning/research.py`: 킬 스위치의 `s.kill_switch_h` 대신 `shock.kill_switch_h(now, s.kill_switch_h)`, 리서치 창의 `research_lookback_days` 대신 `shock.research_lookback_days(now, ...)`.
-- `app.py`: 5절.
+전체 목록은 `docs/EXECUTION.md` 7절입니다. 충격 층에 해당하는 것:
+
+- `learning/lab.py`: `evaluate()` 가 작업을 나누기 전에 `shock.schedule_for(settings, start − warm-up, end)` 로 일정을 만들어 파일에 저장하고 작업 설정에 `SHOCK_SCHEDULE` 과 `SHOCK_CANDLE_DB`(작업의 캔들 DB)를 넣으면, 작업마다 다시 계산하지 않습니다. 지금도 결과는 같습니다(작업자마다 계산). `--tag` 실행은 원장에 `SHOCK_LAYER` 를 남기고, 꺼져 있으면 거부하거나 경고합니다(7.8: F-pre-B 이후 lab 결과에는 대응 1과 S0 가 들어감).
+- `learning/neutral.py`: CLI 에서 `EntryFilter(schedule)` 를 `entry_filter` 로 넘기고, 막힌 결정 수와 발동 수를 결과 문서와 원장 `extra` 에 남깁니다. 구성의 `entry_filter` 항목은 `getattr(entry_filter, "evaluator_policy", False)` 이면 넣지 않습니다(시간 단위 평가기와 같은 규칙).
+- `app.py`: 5절. 시작 메시지의 킬 스위치 설명(`-{kill_switch_h}σ`)은 충격 뒤 30일 동안 실제 경보선(`app.shock.kill_switch_h(now, …)`)을 보여 주어야 합니다. 리서치 창을 쓰는 다른 곳(`_ensure_context` 의 컨텍스트 채움 범위)은 120일 그대로 두어도 됩니다(45일은 그 안에 있음).
 
 ## 7. 보고 (성과 수치 없음)
 

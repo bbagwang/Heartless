@@ -48,11 +48,12 @@ class BookGuard:
     BOOK_GUARD_SPREAD_MULT x its prior-24h median and >= BOOK_GUARD_MIN_SPREAD_BPS, or the depth within
     +-ORDERBOOK_DEPTH_BPS (both sides) < BOOK_GUARD_DEPTH_FRAC x its prior-24h median.
 
-    The figures are the live stream book's (ctx.book.source == "stream"; one sample per minute is kept per symbol)
-    or, everywhere else (backtests, replays, live without ORDERBOOK_STREAM), the conservative 1m-bar proxy of
-    exchange/orderbook.bar_book_proxy computed over the symbol's 1m bars on demand (book_proxy_series). The
-    thresholds are ratios to the symbol's own usual values, so they mean the same on the proxy. Fewer than
-    MIN_SAMPLES prior minutes: no verdict (the entry is not held)."""
+    The figures are the live stream book's when it is usable (usable_stream_book: synced, fresh, its levels reaching
+    +-k on both sides; one sample per minute is kept per symbol) or, everywhere else (backtests, replays, live without
+    ORDERBOOK_STREAM, a stale or uncovered stream book), the conservative 1m-bar proxy of
+    exchange/orderbook.bar_book_proxy computed over the symbol's 1m bars on demand (book_proxy_series), current and
+    prior alike. The thresholds are ratios to the symbol's own usual values, so they mean the same on the proxy.
+    Fewer than MIN_SAMPLES prior minutes: no verdict (the entry is not held)."""
 
     MIN_SAMPLES = 720  # half the window: a fresh stream or a short history judges nothing
     WINDOW = 1440  # prior-24h = the 1,440 minutes before the current one
@@ -68,7 +69,7 @@ class BookGuard:
     def observe(self, ctx: Context, now: int) -> None:
         """Keep the minute's stream-book sample (called on every 1m bar; nothing for a proxy or no book)."""
         b = ctx.book
-        if getattr(b, "source", "none") != "stream":
+        if not usable_stream_book(b):
             return
         minute = int(now) // MS_MINUTE
         dq = self.samples.setdefault(ctx.symbol, deque(maxlen=self.WINDOW + 60))
@@ -79,7 +80,7 @@ class BookGuard:
     def figures(self, view: MarketView, ctx: Context, now: int, tick: float) -> tuple[float, float, list, list]:
         """(current spread, current depth, prior spreads, prior depths) of the symbol at `now`."""
         b = ctx.book
-        if getattr(b, "source", "none") == "stream":
+        if usable_stream_book(b):
             minute = int(now) // MS_MINUTE
             prior = [(s, d) for m, s, d in self.samples.get(ctx.symbol, ()) if minute - self.WINDOW <= m < minute]
             return (float(b.spread_bps), float(b.depth_bid_k) + float(b.depth_ask_k), [p[0] for p in prior],
@@ -105,6 +106,21 @@ class BookGuard:
                 self.held += 1
                 return "book guard: depth"
         return ""
+
+
+# a stream book older than this is not the market (exchange/orderbook.MAX_BOOK_AGE_MS of the red-team fix F-M6)
+BOOK_MAX_AGE_MS = 3_000
+
+
+def usable_stream_book(b) -> bool:
+    """Whether a ctx.book can back the book guard as a live stream book: source "stream", synced and covering +-k on both
+    sides (finite spread, depths and imbalance: a book whose levels stop short of k reads NaN depth) and fresh
+    (staleness <= BOOK_MAX_AGE_MS). The same test as exchange/orderbook.usable_book (red-team F-M5 / F-M6); anything
+    else falls back to the 1m-bar proxy: a guard comparing NaN figures would never hold anything."""
+    if getattr(b, "source", "none") != "stream":
+        return False
+    figs = (b.spread_bps, b.depth_bid_k, b.depth_ask_k, b.imbalance, b.staleness_ms)
+    return all(x == x for x in figs) and b.staleness_ms <= BOOK_MAX_AGE_MS
 
 
 def book_proxy_series(frame, now: int, k_bps: float, tick: float, n: int) -> tuple[np.ndarray, np.ndarray]:

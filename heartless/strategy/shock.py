@@ -788,8 +788,13 @@ def is_exempt(alpha_name: str) -> bool:
 
 class EntryFilter:
     """The hourly evaluator's entry filter (learning/hourly.evaluate(entry_filter=)): decisions at halted times are
-    blocked; `blocked` counts them. An exempt alpha takes no filter at all (for_alpha)."""
+    blocked; `blocked` counts them. An exempt alpha takes no filter at all (for_alpha).
+
+    `evaluator_policy`: the layer belongs to every evaluation from F-pre-B on (as the costs do), not to a configuration,
+    so the evaluators leave it out of the trial config hash and record it in the trial's `extra`: a family's TRAIN,
+    stress, VALID and FORWARD runs of one configuration keep one hash (the lab, whose hash never held it, likewise)."""
     __name__ = "shock_layer"
+    evaluator_policy = True
 
     def __init__(self, events: ShockEvents):
         self.events = events
