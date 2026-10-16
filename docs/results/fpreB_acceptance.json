@@ -540,5 +540,22 @@
     "single_bar_sessions": 1080
    }
   }
+ },
+ "review": {
+  "what": "adversarial review of F-pre-B (wave-f-fpb dbeb688): identity and counts only, no performance figures",
+  "fixes": [
+   "552f017 book guard missing-book clause: ORDERBOOK_STREAM on + no usable book (none, unsynced, stale, NaN, short of +-k) holds the entry (ROADMAP 7.11, 6절 2026-10-16); engine.usable_book = orderbook.usable_book",
+   "e20d32d + 7b27e77 shock schedule window boundary: firings whose halt reaches into the window are kept (S1-S3 2 h, S0 15 min before start), heartless hourly builds from S0_LEAD_MS earlier, schedule VERSION 2",
+   "b239c31 heartless hourly --tag refuses SHOCK_LAYER=false (non-exempt alphas): the trial config hash leaves the layer out"
+  ],
+  "identity": {
+   "commit": "7b27e77",
+   "command": "heartless lab --alpha htf_trend --start 2026-05-01 --end 2026-07-01 --universe core --workers 1 (scratch copy of data/research/heartless.db; SHOCK_LAYER=false BOOK_GUARD=false EXEC_MODE=taker)",
+   "sha256_trades": "a6accc69a928d6df96fb705fd374b1475828e993bc29f764db23671638d851f4",
+   "shipped_defaults_htf_trend_sha256": "65daca64b8dcdc98feb51b15278d79828fcec5046237b4f30531e35d36371b1a",
+   "maker_m1_htf_trend_sha256_at_b239c31": "aedcb50db2117dbcffe4a49e5335bec6eef78b09f91608aa4efaaeb66027c54f",
+   "trial_merge": "wave-f-merge bdd200f + this branch: the same two hashes; 154 F-pre-A/B, red-team and p1_prep tests pass there with none skipped (S3 members = context.pit_members, engine.usable_book = orderbook.usable_book)"
+  },
+  "train_f_start_inside_a_halt": "no: no S1-S3 firing in the 2 h and no S0 firing in the 15 minutes before 2022-01-13 00:00 (longhist, counts only), so train_f_shock stands under the boundary fix"
  }
 }
