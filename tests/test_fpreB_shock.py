@@ -168,8 +168,9 @@ def test_offline_schedule_equals_the_online_detector(tmp_path):
         if (t + 1) % H == 0:
             det.observe_hour(t, px, xs_at.get(t + 1, {}))
             cms[t + 1] = det.cms[-1]
-    on_s0 = [x for x in det.s0 if start <= x <= end + 1]
-    on_h = {r: [x for x in det.hourly[r] if x >= start] for r in SH.HOURLY_RULES}
+    # the schedule holds the window's firings and those before it whose halt reaches into it
+    on_s0 = [x for x in det.s0 if start - SH.S0_HALT_MS < x <= end + 1]
+    on_h = {r: [x for x in det.hourly[r] if x > start - SH.HALT_MS] for r in SH.HOURLY_RULES}
     assert off.s0 == on_s0 and off.hourly == on_h
     assert len(off.s0) == 0  # the S0 drop is on day 9, before this window
     assert off.hourly["S1"] and off.hourly["S2"] and off.hourly["S3"], off.hourly
@@ -185,7 +186,7 @@ def test_offline_schedule_equals_the_online_detector(tmp_path):
     # the same schedule over the whole span finds the S0 drop
     full = SH.build_schedule(T0 + 8 * D, end, btc_1m=(ct, c), universe_db=udb)
     assert len(full.s0) >= 1 and all(T0 + 9 * D <= x < T0 + 9 * D + 7 * H for x in full.s0)
-    assert full.s0 == [x for x in det.s0 if x >= T0 + 8 * D]
+    assert full.s0 == [x for x in det.s0 if x > T0 + 8 * D - SH.S0_HALT_MS]
 
 
 def test_a_primed_detector_continues_as_the_offline_schedule(tmp_path):
@@ -210,7 +211,7 @@ def test_a_primed_detector_continues_as_the_offline_schedule(tmp_path):
         det.observe_hour(h, btc_at[h], live.get(h, {}))
         k = int((h - hours[0]) // H)
         assert (math.isnan(series[k]) and math.isnan(det.cms[-1])) or series[k] == det.cms[-1]
-    assert {r: [x for x in det.hourly[r] if x >= start] for r in SH.HOURLY_RULES} == off.hourly
+    assert {r: [x for x in det.hourly[r] if x > start - SH.HALT_MS] for r in SH.HOURLY_RULES} == off.hourly
     assert off.hourly["S1"] and off.hourly["S3"]
     # the default history keeps 45 days of firings (kill switch 30 days, research window 45 days)
     again = SH.ShockDetector()
@@ -227,15 +228,48 @@ def test_schedule_from_a_candle_database_and_without_universe(tmp_path):
     a = SH.build_schedule(T0 + 32 * D, end, candle_db=tmp_path / "c.db")
     b = SH.build_schedule(T0 + 32 * D, end, btc_1m=(ct, c))
     assert a.meta["missing"] == ["S3"] and a.meta["hourly_source"] == "1m" and a.s0 == b.s0
-    # no candle before the window start is read: two days of bars hold no 720-hour history, so S1 / S2 cannot judge
+    # no candle earlier than S0_READ_MS before the window start is read: two days of bars hold no 720-hour history, so
+    # S1 / S2 cannot judge
     assert a.hourly["S1"] == [] and b.hourly["S1"]
     a2 = SH.build_schedule(T0 + D, end, candle_db=tmp_path / "c.db")
-    assert {r: [h for h in v if h >= T0 + 32 * D] for r, v in a2.hourly.items()} == b.hourly
+    assert {r: [h for h in v if h > T0 + 32 * D - SH.HALT_MS] for r, v in a2.hourly.items()} == b.hourly
     # nothing after `end` is read: a window ending before the +6% hour has no S1
     early = SH.build_schedule(T0 + 32 * D, T0 + 33 * D, btc_1m=(ct, c))
     assert early.hourly["S1"] == []
     none = SH.build_schedule(T0 + 32 * D, int(ct[-1]))
     assert none.meta["missing"] == ["S0", "S1", "S2", "S3"]
+
+
+def test_a_window_starting_inside_a_halt_is_halted(tmp_path):
+    """A firing just before a window halts the window's first decisions as it does online and in any longer window:
+    the schedule keeps the S1-S3 firings up to 2 h and the S0 firings up to 15 minutes before `start` (they are history
+    only: counts() reports the window itself)."""
+    ct, c = _btc_minutes()
+    udb, _ = _universe(tmp_path, ct, c)
+    end = int(ct[-1])
+    full = SH.build_schedule(T0 + 32 * D, end, btc_1m=(ct, c), universe_db=udb)
+    f = full.hourly["S1"][0]
+    for k in (1, 2):  # windows starting 1 h and 2 h after the S1 firing
+        cut = SH.build_schedule(f + k * H, end, btc_1m=(ct, c), universe_db=udb)
+        assert ("S1" in cut.entry_halt(f + k * H)) == (k == 1) == ("S1" in full.entry_halt(f + k * H))
+        assert cut.counts()["S1"] == 0 and cut.counts(f, end)["S1"] == (1 if k == 1 else 0)
+        for t in range(f + k * H, f + 3 * H, MIN):  # every decision of the window from its start, minute by minute
+            assert cut.entry_halt(t) == full.entry_halt(t), (k, t)
+    det = SH.ShockDetector()
+    det.prime(udb, until=f + H, since=f + H - SH.WARMUP_MS)
+    assert det.entry_halt(f + H) == full.entry_halt(f + H) == SH.build_schedule(f + H, end, universe_db=udb).entry_halt(f + H)
+    # S0 read from a candle database: the 15 minutes after a firing that precedes the window
+    db = Store(tmp_path / "c.db")
+    db.save_candles("BTCUSDT", [Candle(int(t) - 59_999, float(p), float(p), float(p), float(p), 1.0, float(p), 1, 0.5,
+                                       int(t)) for t, p in zip(ct, c)])
+    db.close()
+    s0 = SH.build_schedule(T0 + 8 * D, end, candle_db=tmp_path / "c.db")
+    m = s0.s0[0]
+    last = s0.s0[-1]  # the drop fires on consecutive minutes
+    for t0 in (m + MIN, last + MIN, last + 14 * MIN, last + 15 * MIN):
+        late = SH.build_schedule(t0, end, candle_db=tmp_path / "c.db")
+        assert late.entry_halt(t0) == s0.entry_halt(t0) == ("shock S0" if t0 < last + 15 * MIN else ""), t0
+        assert late.counts()["S0"] == sum(1 for x in s0.s0 if x >= t0)
 
 
 def test_schedule_file_and_process_cache(tmp_path):

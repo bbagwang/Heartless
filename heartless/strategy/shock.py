@@ -51,7 +51,8 @@ MS_MIN = 60_000
 MS_H = 3_600_000
 MS_D = 86_400_000
 BTC = "BTCUSDT"
-VERSION = 1  # bump when a definition below changes (a stored schedule of another version is rebuilt)
+VERSION = 2  # bump when a definition below changes (a stored schedule of another version is rebuilt); 2: a schedule
+# keeps the firings before its window whose halt reaches into it
 
 # --- fixed definitions (ROADMAP 7.8) ---------------------------------------------------------------------------------
 S0_MOVE = 0.03  # BTC move over S0_BARS 1m bars
@@ -76,6 +77,10 @@ KILL_SWITCH_MS = 30 * MS_D  # ... within 30 days of the latest firing
 RESEARCH_DAYS = 45  # research window while ...
 RESEARCH_MS = 45 * MS_D  # ... within 45 days of the latest firing
 HOURLY_RULES = ("S1", "S2", "S3")
+# a schedule keeps the firings before its window whose halt still reaches into it (an S1-S3 firing up to 2 h - 1 ms,
+# an S0 firing up to 15 minutes - 1 ms before `start`), so a window's first decisions are halted as the online
+# detector and any longer window halt them; S0 reads its 1m bars from that reach + 5 bars of history before `start`
+S0_READ_MS = S0_HALT_MS + (S0_BARS + 1) * MS_MIN
 # history before a window that the hourly rules need: 720 prior values of a statistic over 24 h of returns, + slack
 WARMUP_MS = (WINDOW_HOURS + RV_HOURS + 2) * MS_H
 
@@ -485,6 +490,11 @@ class ShockSchedule(ShockEvents):
     def covers(self, start: int, end: int) -> bool:
         return self.start <= int(start) and int(end) <= self.end
 
+    def counts(self, start: int | None = None, end: int | None = None) -> dict:
+        """ShockEvents.counts over the schedule's own window by default (the firings it keeps before `start` only serve
+        the halts reaching into it)."""
+        return super().counts(self.start if start is None else start, self.end if end is None else end)
+
     def to_json(self) -> dict:
         return {"version": VERSION, "start": self.start, "end": self.end, "s0": self.s0,
                 "hourly": self.hourly, "meta": self.meta}
@@ -644,23 +654,25 @@ def build_schedule(start: int, end: int, btc_1m: tuple[np.ndarray, np.ndarray] |
                    progress=None) -> ShockSchedule:
     """The shock schedule over [start, end] (ms; instants) from stored data, reading nothing after `end`.
 
-    S0: BTC's 1m bars (`btc_1m` = (close_time, close) arrays, or read from `candle_db` inside [start, end] only: a
-    backtest reads no candle before its own first one). S1-S3: universe.db's 1h bars (BTC, and the cross-section for
-    S3) from WARMUP_MS before `start`; without universe.db S1 / S2 use BTC's 1m bars (the close ending each hour, the
-    same value as the 1h kline's; they judge once those bars hold WARMUP_MS of history) and S3 is not evaluated. meta
-    records the sources and the rules that could not be evaluated ("missing")."""
+    S0: BTC's 1m bars (`btc_1m` = (close_time, close) arrays, or read from `candle_db` from S0_READ_MS before `start`
+    to `end`). S1-S3: universe.db's 1h bars (BTC, and the cross-section for S3) from WARMUP_MS before `start`; without
+    universe.db S1 / S2 use BTC's 1m bars (the close ending each hour, the same value as the 1h kline's; they judge
+    once those bars hold WARMUP_MS of history) and S3 is not evaluated. The schedule holds the firings inside the
+    window and those just before it whose halt reaches into it (S0_READ_MS): a window starting inside a halt is halted
+    there, as the online detector and every longer window are. meta records the sources and the rules that could not
+    be evaluated ("missing")."""
     start, end = int(start), int(end)
     e_inst = instant(end)  # a 1m close_time stands for its bar end: the hour that bar closes is known at `end`
     meta: dict = {"version": VERSION, "missing": []}
     lo = start - WARMUP_MS
     if btc_1m is None and candle_db and Path(candle_db).exists():
-        btc_1m = _load_btc_1m(candle_db, start, end)
+        btc_1m = _load_btc_1m(candle_db, start - S0_READ_MS, end)
         meta["candle_db"] = str(candle_db)
     s0: list[int] = []
     if btc_1m is not None and len(btc_1m[0]):
         ct, c = btc_1m
         keep = np.asarray(ct, dtype=np.int64) <= end
-        s0 = [t for t in s0_firings(np.asarray(ct)[keep], np.asarray(c)[keep]) if start <= t <= e_inst]
+        s0 = [t for t in s0_firings(np.asarray(ct)[keep], np.asarray(c)[keep]) if start - S0_HALT_MS < t <= e_inst]
     else:
         meta["missing"].append("S0")
     hourly: dict[str, list[int]] = {r: [] for r in HOURLY_RULES}
@@ -689,7 +701,7 @@ def build_schedule(start: int, end: int, btc_1m: tuple[np.ndarray, np.ndarray] |
                 cms = cross_section_series(ustore, hours, closes, progress)
             else:
                 meta["missing"].append("S3")
-            hourly = hourly_firings(hours, closes, cms, start)
+            hourly = hourly_firings(hours, closes, cms, start - HALT_MS + 1)  # a halt reaching into the window
             hourly = {r: [h for h in v if h <= e_inst] for r, v in hourly.items()}
             meta["hours"] = [int(hours[0]), int(hours[-1])]
     finally:

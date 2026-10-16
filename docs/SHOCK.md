@@ -32,6 +32,7 @@ ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코�
 - 정시 H 의 발동(H 에 끝나는 1h 봉으로 계산)은 결정 시각 [H, H + 2h) 의 진입을 막습니다. H 에 끝나는 1분봉(close_time H − 1)의 결정도 막힙니다. 그 봉의 종가와 BTC 의 그 시간 종가는 같은 순간에 알려지므로 미래 정보가 아닙니다.
 - S0 는 분 m 의 발동이 [m, m + 15분) 을 막습니다.
 - 시간 단위 평가기의 결정 시각은 정시(봉 open + 1h)이므로 같은 함수로 판정합니다.
+- **창 경계**: 오프라인 일정(`build_schedule`)은 창 안의 발동과 함께, 창 시작 전 발동 중 중단이 창 안으로 이어지는 것(S1~S3 는 시작 전 2시간 안, S0 는 15분 안)도 담습니다. S0 의 1분봉은 그만큼과 5봉을 더 앞에서부터 읽습니다(`S0_READ_MS`). 그래서 중단 중에 시작하는 창도 온라인 감지기와, 그 창을 포함하는 더 긴 창과 똑같이 첫 결정들을 막습니다(검토에서 고침, 일정 `VERSION` 2). 창 앞의 발동은 이력일 뿐이라 `ShockSchedule.counts()` 는 기본으로 창 자신만 셉니다. TRAIN-F 시작(2022-01-13 00:00) 앞 2시간에는 S1~S3·S0 발동이 없어(장기 DB, 개수만 확인) 7절의 TRAIN-F 개수는 그대로입니다.
 
 ## 3. 대응
 
@@ -52,7 +53,7 @@ ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코�
 |---|---|---|
 | 백테스터 (`learning/backtester.py`) | `Backtester(shock="auto")`: SHOCK_LAYER 가 켜져 있으면 불러온 이력 전체에 대해 한 번 계산해 모든 실행에 씁니다. S0 는 실행 자신의 BTCUSDT 1분봉, 없으면 SHOCK_CANDLE_DB 의 BTC. S1~S3 는 UNIVERSE_DB | 완료 |
 | lab (`learning/lab.py`) | 작업자마다 Backtester 가 위 규칙으로 일정을 만듭니다(프로세스 안 캐시). SHOCK_SCHEDULE 을 주면 그 파일을 읽고, 없으면 써 둡니다 | 동작함. 부모 프로세스에서 한 번 만드는 연결은 6절 |
-| 시간 단위 평가기 (`learning/hourly.py`) | `heartless hourly` 가 `EntryFilter.for_alpha(alpha, schedule)` 를 `entry_filter` 로 넘깁니다. 결과 JSON 과 원장 줄의 `shock` 에 발동 수와 막힌 결정 수. 층은 평가기의 정책이라(`EntryFilter.evaluator_policy`) 구성 해시에 넣지 않습니다. lab 해시도 층을 담지 않으므로, 한 구성의 TRAIN·스트레스·VALID·FORWARD 실행이 층 도입 전후로 같은 해시입니다 | 완료 |
+| 시간 단위 평가기 (`learning/hourly.py`) | `heartless hourly` 가 `EntryFilter.for_alpha(alpha, schedule)` 를 `entry_filter` 로 넘깁니다. 결과 JSON 과 원장 줄의 `shock` 에 발동 수와 막힌 결정 수. 층은 평가기의 정책이라(`EntryFilter.evaluator_policy`) 구성 해시에 넣지 않습니다. lab 해시도 층을 담지 않으므로, 한 구성의 TRAIN·스트레스·VALID·FORWARD 실행이 층 도입 전후로 같은 해시입니다. | 완료 |
 | 두 다리 중립 평가기 (`learning/neutral.py`) | `EntryFilter` 는 스칼라 시각도 받습니다(`entry_filter(symbol, T) -> bool`) | 연결은 6절 |
 | 킬 스위치·리서치 창 (`learning/research.py`) | `AlphaKillSwitch.evaluate` 의 경보선은 `shock_kill_switch_h(app, now, KILL_SWITCH_H)`, 리서치 사이클 창은 `ResearchManager.lookback_days(now)`. 둘 다 앱의 `app.shock`(운영 감지기)에게 묻고, 없거나 SHOCK_LAYER 가 꺼져 있으면 설정값 그대로 | 완료. 앱이 `app.shock` 을 붙이면 작동(5절) |
 | 운영 (`app.py`) | `ShockDetector` 를 `app.shock` 과 모든 엔진의 `TradingEngine.shock` 으로 | F6, 5절 |
