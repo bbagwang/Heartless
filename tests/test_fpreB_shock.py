@@ -155,7 +155,7 @@ def test_offline_schedule_equals_the_online_detector(tmp_path):
     assert off.meta["missing"] == [] and off.meta["hourly_source"] == "universe.db"
     # online: every 1m bar, and at each hour close the hour's BTC close and the cross-section from the same blocks
     st = Store(udb, readonly=True)
-    bars = {s: SI.load_hourly(st, s, None, None) for s in syms}
+    bars = {s: SI.load_hourly(st, s, None, None) for s in ["BTCUSDT"] + syms}  # every perpetual, BTC included
     st.close()
     xs_at: dict[int, dict] = {}
     for s, d in bars.items():
@@ -222,3 +222,71 @@ def test_schedule_file_and_process_cache(tmp_path):
     assert b.hourly == a.hourly and b.s0 == a.s0 and b.covers(T0 + 32 * D + 5 * H, int(ct[-1]))
     SH._CACHE.clear()
     assert SH.schedule_for(s, T0 + 32 * D + 5 * H, int(ct[-1])).hourly == a.hourly  # read back, nothing rebuilt
+
+
+# --- S3 membership: the research context's point-in-time top_n ------------------------------------------------------
+def _feed(xs, bars: dict[str, dict], h_from: int, h_to: int):
+    by_h: dict[int, list] = {}
+    for s, d in bars.items():
+        for t, c, q in zip(d["open_time"], d["close"], d["quote_volume"]):
+            by_h.setdefault(int(t) + H, []).append((s, float(c), float(q)))
+    out = {}
+    for h in range(h_from, h_to + H, H):
+        for s, c, q in by_h.get(h, []):
+            xs.push(h, s, c, q)
+        out[h] = xs.members(h)
+    return out
+
+
+def test_s3_members_follow_the_context_rule():
+    xs = SH._CrossSection()
+    h = T0 + 100 * H
+    bars = {}
+    for k in range(45):  # 45 symbols trading every hour, volume rising with k; BTC the most liquid
+        s = "BTCUSDT" if k == 44 else f"Z{k:02d}USDT"
+        t = np.arange(h - 60 * H, h, H, dtype=np.int64)
+        bars[s] = {"open_time": t, "close": np.full(len(t), 10.0 + k), "quote_volume": np.full(len(t), 1e6 * (k + 1))}
+    bars["Z43USDT"]["quote_volume"][-1] = 0.0  # did not trade in the last hour: out
+    bars["TIEAUSDT"] = dict(bars["Z42USDT"])  # same volume as Z42: the name decides
+    young = np.arange(h - 20 * H, h, H, dtype=np.int64)  # 20 hours of history: no close 23 hours back
+    bars["YNGUSDT"] = {"open_time": young, "close": np.full(20, 5.0), "quote_volume": np.full(20, 1e12)}
+    gap = np.array([h - 47 * H, h - H], dtype=np.int64)  # a close 46 hours before the close then a gap: carried
+    bars["GAPUSDT"] = {"open_time": gap, "close": np.array([5.0, 5.0]), "quote_volume": np.array([1e12, 1e12])}
+    far = np.array([h - 48 * H, h - H], dtype=np.int64)  # one hour older: beyond the carry
+    bars["FARUSDT"] = {"open_time": far, "close": np.array([5.0, 5.0]), "quote_volume": np.array([2e12, 2e12])}
+    m = _feed(xs, bars, h - 60 * H + H, h)[h]
+    assert len(m) == SH.S3_TOP and m[0] == "GAPUSDT" and m[1] == "BTCUSDT"
+    assert "YNGUSDT" not in m and "FARUSDT" not in m and "Z43USDT" not in m
+    assert m.index("TIEAUSDT") < m.index("Z42USDT")
+    # members without 24 defined returns stay members but leave the mean (GAPUSDT's carry ends 24 hours on)
+    assert any(not math.isfinite(x) for x in xs.returns("GAPUSDT", h))
+
+
+def test_s3_members_equal_context_pit_members_when_available(tmp_path):
+    """After the merge with the point-in-time research context (context.pit_members), S3's members must be the same
+    set at every hour (ROADMAP 7.8: "the context's top_n member definition")."""
+    from heartless.data import context as C
+
+    if not hasattr(C, "pit_members"):
+        pytest.skip("context.pit_members is not in this tree yet")
+    rng = np.random.default_rng(9)
+    st = Store(tmp_path / "u.db")
+    syms = [f"P{k:02d}USDT" for k in range(48)]
+    st.save_symbol_inventory([_inv(s, "2023-10", "2024-02") for s in syms])
+    n = 24 * 6
+    for k, s in enumerate(syms):
+        qv = np.round(rng.lognormal(14, 1, n), 4)
+        qv[rng.random(n) < 0.05] = 0.0
+        start = T0 + int(rng.integers(0, 40)) * H  # staggered listings
+        put_symbol(st, s, start, np.round(10 + rng.normal(0, 0.1, n).cumsum(), 4), qv=qv)
+    st.refresh_inventory_trades()
+    st.close()
+    us = Store(tmp_path / "u.db", readonly=True)
+    bars = {s: SI.load_hourly(us, s, None, None) for s in syms}
+    ha, hb = T0 // H + 60, T0 // H + n - 2
+    cands, mask = C.pit_members(us, ha, hb, SH.S3_TOP)
+    us.close()
+    ours = _feed(SH._CrossSection(), bars, T0 + H, (hb + 1) * H)
+    for i, hh in enumerate(range(ha, hb + 1)):
+        want = {cands[j] for j in np.flatnonzero(mask[i])}
+        assert set(ours[(hh + 1) * H]) == want, hh

@@ -7,8 +7,9 @@ Detection (fixed definitions, never tuned on performance; docs/results/wave_f_re
 * S2, every hour: BTC 24h realized volatility (sqrt of the sum of the last 24 squared 1h log returns) >= 2.5 x the
   median of the same statistic over the 720 hours before it.
 * S3, every hour: the mean 24h correlation of 1h log returns with BTC over the 40 eligible USDT perpetuals trading at
-  that hour with the highest trailing 24h quote volume (point in time, universe.db, the 2026-10-16 amendment; BTC
-  itself is not part of its own cross-section) is >= 0.80 and >= its mean over the 720 hours before + 0.25.
+  that hour with the highest trailing 24h quote volume (point in time from universe.db, the 2026-10-16 amendment: the
+  research context's top_n members, context.pit_members; BTC is one of them) is >= 0.80 and >= its mean over the 720
+  hours before + 0.25.
 
 Responses
 * entry halt: S0 -> 15 minutes, S1-S3 -> 2 hours from the firing's close; no new entry in any decision frame, resting
@@ -64,7 +65,8 @@ S3_HOURS = 24  # correlation window (hourly returns)
 S3_LEVEL = 0.80
 S3_JUMP = 0.25
 S3_MIN_MEMBERS = 20  # fewer correlations than this at an hour: no value (S3 cannot fire)
-S3_MIN_AGE_MS = 30 * MS_D  # the F0 listing-age rule (docs/UNIVERSE.md): a perpetual is eligible 30 days after listing
+CARRY_HOURS = 24  # a close is carried forward at most this long through a gap (context.CARRY_HOURS)
+KEEP_HOURS = 49  # bars kept per symbol: the history check reaches 46 hours back, carried closes 47 + the carry
 WINDOW_HOURS = 720  # "the prior 30 days" of S1 / S2 / S3
 S3_MIN_PRIOR = 360  # S3's prior mean needs at least half of its 720 hours defined (a data hole must not mute it)
 HALT_MS = 2 * MS_H  # S1-S3 entry halt
@@ -160,21 +162,18 @@ def mean_corr(btc: list[float], rows: list[list[float]]) -> float:
     return math.fsum(corrs) / len(corrs)
 
 
-def _cents(qv: float) -> int:
-    """Quote volume in integer cents: rolling 24 h sums stay exact (ranks never depend on summation order)."""
-    return int(round(qv * 100.0)) if qv == qv and qv > 0 else 0
-
-
 class _CrossSection:
-    """S3's hourly cross-section, fed one hour at a time on both paths: per symbol the last S3_HOURS + 1 consecutive
-    hourly closes and the matching quote volumes. A symbol is a candidate at hour H when it has a close for every hour
-    H - 24 h .. H, traded in the hour ending at H and is eligible (the caller's filter: instrument and age rules)."""
+    """S3's hourly cross-section, fed one hour at a time on both paths (offline from universe.db, online by the app).
+
+    The members at hour close H are the research context's point-in-time top_n (context.pit_members, ROADMAP 6절
+    2026-10-16, "컨텍스트 top_n 구성원 정의와 같음"): among the eligible perpetuals with a bar in the hour ending at H
+    that traded (quote volume > 0) and have a close within CARRY_HOURS before the hour 23 hours earlier, the S3_TOP
+    with the largest quote volume over the 24 hours ending at H (summed oldest first, missing hours 0), ties by name.
+    BTC is a member like any other symbol. Each member's returns use its closes carried forward at most CARRY_HOURS
+    (context._carried); a member without 24 defined returns is left out of the mean, not replaced."""
 
     def __init__(self) -> None:
-        self.closes: dict[str, deque] = {}
-        self.vols: dict[str, deque] = {}
-        self.vsum: dict[str, int] = {}
-        self.last: dict[str, int] = {}
+        self.bars: dict[str, deque] = {}  # symbol -> (hour close, close, quote volume) of its last stored bars
         self.cur_h: int | None = None
         self.cur: list[str] = []  # the symbols pushed for hour cur_h
 
@@ -182,48 +181,63 @@ class _CrossSection:
         if h != self.cur_h:
             self.cur_h, self.cur = h, []
         self.cur.append(sym)
-        if self.last.get(sym) != h - MS_H:  # a gap (or the first bar): the trailing window starts over
-            self.closes[sym] = deque(maxlen=S3_HOURS + 1)
-            self.vols[sym] = deque(maxlen=S3_HOURS)
-            self.vsum[sym] = 0
-        c, v = self.closes[sym], self.vols[sym]
-        c.append(float(close))
-        cents = _cents(qv)
-        if len(v) == S3_HOURS:
-            self.vsum[sym] -= v[0]
-        v.append(cents)
-        self.vsum[sym] += cents
-        self.last[sym] = h
+        dq = self.bars.get(sym)
+        if dq is None:
+            dq = self.bars[sym] = deque(maxlen=KEEP_HOURS)
+        dq.append((int(h), float(close), float(qv) if qv == qv else 0.0))
+
+    def members(self, h: int, eligible: Callable[[str], bool] | None = None) -> list[str]:
+        """The hour's members, most liquid first."""
+        ranked = []
+        hi_hist = h - (S3_HOURS - 1) * MS_H  # a close 23 hours back, carried from at most CARRY_HOURS - 1 before it
+        lo_hist = hi_hist - (CARRY_HOURS - 1) * MS_H
+        for sym in (self.cur if self.cur_h == h else ()):
+            dq = self.bars[sym]
+            last = dq[-1]
+            if last[0] != h or not last[2] > 0:
+                continue
+            if not any(lo_hist <= t <= hi_hist for t, _, _ in dq):  # no close to carry 23 hours back
+                continue
+            if eligible is not None and not eligible(sym):
+                continue
+            vol = 0.0
+            for t, _, q in dq:  # the 24 hours ending at h, oldest first (a missing hour adds 0)
+                if t > h - S3_HOURS * MS_H:
+                    vol = vol + q
+            ranked.append((-vol, sym))
+        ranked.sort()
+        return [sym for _, sym in ranked[:S3_TOP]]
+
+    def returns(self, sym: str, h: int) -> list[float]:
+        """The symbol's S3_HOURS hourly log returns ending at h from its closes carried forward <= CARRY_HOURS."""
+        dq = self.bars[sym]
+        closes = []
+        for k in range(S3_HOURS, -1, -1):
+            t = h - k * MS_H
+            c = float("nan")
+            for tb, cb, _ in reversed(dq):
+                if tb <= t:
+                    if t - tb < CARRY_HOURS * MS_H:
+                        c = cb
+                    break
+            closes.append(c)
+        return [log_return(closes[i], closes[i - 1]) for i in range(1, len(closes))]
 
     def value(self, h: int, btc_rets: list[float], eligible: Callable[[str], bool] | None = None) -> float:
-        """The mean correlation with BTC at hour H over the top S3_TOP candidates by trailing 24 h volume."""
+        """The mean correlation with BTC's returns at hour close h over the members."""
         if len(btc_rets) < S3_HOURS or not all(math.isfinite(x) for x in btc_rets):
             return float("nan")
-        cand = []
-        for sym in (self.cur if self.cur_h == h else ()):
-            if sym == BTC or len(self.closes[sym]) <= S3_HOURS or not self.vols[sym][-1] > 0:
-                continue
-            cand.append((-self.vsum[sym], sym))
-        cand.sort()  # most liquid first, ties by name
-        top = []
-        for _, sym in cand:  # the eligibility rules only for as many as the top needs
-            if eligible is None or eligible(sym):
-                top.append(sym)
-                if len(top) == S3_TOP:
-                    break
         rows = []
-        for sym in top:
-            c = list(self.closes[sym])
-            r = [log_return(c[k], c[k - 1]) for k in range(1, len(c))]
+        for sym in self.members(h, eligible):
+            r = self.returns(sym, h)
             if all(math.isfinite(x) for x in r):
                 rows.append(r)
         return mean_corr(btc_rets[-S3_HOURS:], rows)
 
     def drop_stale(self, h: int) -> None:
-        """Forget symbols without a bar for a day (a delisted symbol must not hold memory for ever)."""
-        for sym in [s for s, t in self.last.items() if t < h - MS_D]:
-            for d in (self.closes, self.vols, self.vsum, self.last):
-                d.pop(sym, None)
+        """Forget symbols without a bar for KEEP_HOURS (a delisted symbol must not hold memory for ever)."""
+        for sym in [s for s, dq in self.bars.items() if dq[-1][0] < h - KEEP_HOURS * MS_H]:
+            del self.bars[sym]
 
 
 # --- events and the queries every path shares ------------------------------------------------------------------------
@@ -368,7 +382,8 @@ class ShockDetector(ShockEvents):
                      eligible: Callable[[str], bool] | None = None) -> list[ShockEvent]:
         """The hour that closed at h (a multiple of one hour, or that hour's last 1m close_time): BTC's close and the
         {symbol: (close, quote volume of the hour)} of every perpetual that traded in it (S3; None skips S3 for the
-        hour). `eligible(symbol)`: the instrument and listing-age rules (S3_MIN_AGE_MS). Returns the hour's events."""
+        hour). `eligible(symbol)`: the instrument rules (USDT perpetual, TRADING, not a stablecoin), as
+        universe.eligible_research offline. Returns the hour's events."""
         h = instant(h)
         if self.h_last is not None and h <= self.h_last:
             return []
@@ -481,9 +496,9 @@ def hourly_firings(hours: np.ndarray, closes: np.ndarray, cms: np.ndarray | None
 
 
 def cross_section_series(store, hours: np.ndarray, btc_closes: np.ndarray, progress=None) -> np.ndarray:
-    """S3's statistic at every hour close of `hours` (a complete grid) from universe.db (point in time: the perpetuals
-    with stored bars at that hour, the instrument rules of universe.eligible_research and the 30-day listing age,
-    relistings counted from their new first trade), fed to the same _CrossSection the live detector uses."""
+    """S3's statistic at every hour close of `hours` (a complete grid) from universe.db: every eligible perpetual's
+    stored bars (universe.eligible_research: USDT perpetual, not a stablecoin) fed hour by hour to the _CrossSection the
+    live detector uses, which picks the context's point-in-time members."""
     from heartless.data import universe as U
     from heartless.data.symbols_inventory import FUT_TABLE, decode_month
 
@@ -491,28 +506,14 @@ def cross_section_series(store, hours: np.ndarray, btc_closes: np.ndarray, progr
     if not len(hours):
         return out
     inv = {r["symbol"]: r for r in store.load_symbol_inventory()}
-    relisted = U.relistings(store, inv)
     ok_inst = {s for s, r in inv.items() if U.eligible_research(r) is None}
-    # universe.listed_as_of(row, h, relisted) = max(listing, the latest relisting before h), precomputed per symbol
-    base = {s: U.listed_at(inv[s]) for s in ok_inst}
-
-    def eligible_at(h: int) -> Callable[[str], bool]:
-        def f(sym: str) -> bool:
-            listed = base.get(sym)
-            if listed is None:
-                return False
-            back = [t for t in relisted.get(sym, ()) if t < h]
-            if back:
-                listed = max(listed, back[-1])
-            return h - listed >= S3_MIN_AGE_MS
-        return f
 
     h0, h1 = int(hours[0]), int(hours[-1])
     btc_rets = [float("nan")] + [log_return(float(btc_closes[k]), float(btc_closes[k - 1])) for k in range(1, len(hours))]
     xs = _CrossSection()
     pos = {int(h): k for k, h in enumerate(hours)}
-    # months whose bars close inside [h0 - 25 h, h1]: a bar opening at t closes at t + 1 h
-    first_open = h0 - (S3_HOURS + 1) * MS_H - MS_H
+    # months whose bars close inside [h0 - KEEP_HOURS h, h1]: a bar opening at t closes at t + 1 h
+    first_open = h0 - (KEEP_HOURS + 1) * MS_H
     months = []
     m = _month_start(first_open)
     while m <= h1:
@@ -541,7 +542,7 @@ def cross_section_series(store, hours: np.ndarray, btc_closes: np.ndarray, progr
                 xs.push(h, sym, c, q)
             k = pos.get(h)
             if k is not None:
-                out[k] = xs.value(h, btc_rets[max(0, k - S3_HOURS + 1):k + 1], eligible_at(h))
+                out[k] = xs.value(h, btc_rets[max(0, k - S3_HOURS + 1):k + 1])
             if h % MS_D == 0:
                 xs.drop_stale(h)
             h += MS_H
