@@ -11,6 +11,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
+import numpy as np
+
 from heartless.config import Settings
 from heartless.core.bus import EventBus
 from heartless.core.models import (Decision, EntryStyle, Fill, Position, PositionStatus, Side, SymbolInfo,
@@ -36,6 +38,108 @@ CLOSE_RETRY_MS = 10_000
 TERMINAL_ORDER_STATES = ("FILLED", "CANCELED", "EXPIRED", "REJECTED")
 # entry decisions kept per symbol for the owner's /why and the dashboard (memory only, newest last)
 DECISION_LOG_PER_SYMBOL = 5
+# F-pre-B execution modes (ROADMAP 7.7.2): how long a maker entry rests (decision bars of the alpha, capped)
+MAKER_TTL = {"maker_m1": (1, 60 * MS_MINUTE), "maker_m2": (3, 240 * MS_MINUTE)}
+MAKER_M2_ATR = 0.25  # maker_m2 rests 0.25 signal ATR behind the decision close (long below, short above)
+
+
+class BookGuard:
+    """ROADMAP 7.11: hold an entry while the symbol's book is abnormal against its own last 24 hours: spread >=
+    BOOK_GUARD_SPREAD_MULT x its prior-24h median and >= BOOK_GUARD_MIN_SPREAD_BPS, or the depth within
+    +-ORDERBOOK_DEPTH_BPS (both sides) < BOOK_GUARD_DEPTH_FRAC x its prior-24h median.
+
+    The figures are the live stream book's (ctx.book.source == "stream"; one sample per minute is kept per symbol)
+    or, everywhere else (backtests, replays, live without ORDERBOOK_STREAM), the conservative 1m-bar proxy of
+    exchange/orderbook.bar_book_proxy computed over the symbol's 1m bars on demand (book_proxy_series). The
+    thresholds are ratios to the symbol's own usual values, so they mean the same on the proxy. Fewer than
+    MIN_SAMPLES prior minutes: no verdict (the entry is not held)."""
+
+    MIN_SAMPLES = 720  # half the window: a fresh stream or a short history judges nothing
+    WINDOW = 1440  # prior-24h = the 1,440 minutes before the current one
+
+    def __init__(self, settings: Settings):
+        self.mult = float(getattr(settings, "book_guard_spread_mult", 3.0))
+        self.min_bps = float(getattr(settings, "book_guard_min_spread_bps", 5.0))
+        self.frac = float(getattr(settings, "book_guard_depth_frac", 0.25))
+        self.k_bps = float(getattr(settings, "orderbook_depth_bps", 10.0))
+        self.samples: dict[str, deque] = {}  # symbol -> (minute, spread bps, depth both sides) of the stream book
+        self.held = 0
+
+    def observe(self, ctx: Context, now: int) -> None:
+        """Keep the minute's stream-book sample (called on every 1m bar; nothing for a proxy or no book)."""
+        b = ctx.book
+        if getattr(b, "source", "none") != "stream":
+            return
+        minute = int(now) // MS_MINUTE
+        dq = self.samples.setdefault(ctx.symbol, deque(maxlen=self.WINDOW + 60))
+        if dq and dq[-1][0] == minute:
+            return
+        dq.append((minute, float(b.spread_bps), float(b.depth_bid_k) + float(b.depth_ask_k)))
+
+    def figures(self, view: MarketView, ctx: Context, now: int, tick: float) -> tuple[float, float, list, list]:
+        """(current spread, current depth, prior spreads, prior depths) of the symbol at `now`."""
+        b = ctx.book
+        if getattr(b, "source", "none") == "stream":
+            minute = int(now) // MS_MINUTE
+            prior = [(s, d) for m, s, d in self.samples.get(ctx.symbol, ()) if minute - self.WINDOW <= m < minute]
+            return (float(b.spread_bps), float(b.depth_bid_k) + float(b.depth_ask_k), [p[0] for p in prior],
+                    [p[1] for p in prior])
+        spread, depth = book_proxy_series(view.frames.get("1m"), now, self.k_bps, tick, self.WINDOW + 1)
+        if not len(spread):
+            return math.nan, math.nan, [], []
+        return float(spread[-1]), float(depth[-1]), spread[:-1].tolist(), depth[:-1].tolist()
+
+    def check(self, view: MarketView, ctx: Context, now: int, tick: float) -> str:
+        """Why the entry is held ('' = not held)."""
+        s, d, ps, pd = self.figures(view, ctx, now, tick)
+        ps = [x for x in ps if x == x]
+        pd = [x for x in pd if x == x]
+        if len(ps) >= self.MIN_SAMPLES and s == s:
+            med = float(np.median(ps))
+            if s >= self.mult * med and s >= self.min_bps:
+                self.held += 1
+                return "book guard: spread"
+        if len(pd) >= self.MIN_SAMPLES and d == d:
+            med = float(np.median(pd))
+            if med > 0 and d < self.frac * med:
+                self.held += 1
+                return "book guard: depth"
+        return ""
+
+
+def book_proxy_series(frame, now: int, k_bps: float, tick: float, n: int) -> tuple[np.ndarray, np.ndarray]:
+    """The 1m-bar book proxy (exchange/orderbook.bar_book_proxy: spread = max(tick, 0.2 x the median 1m range of the
+    last 15 bars), depth per side = 0.1 x their median quote volume x min(1, k / range)) at each of the last `n` bars
+    closed at or before `now`, vectorised: (spread bps, depth of both sides). Empty arrays without bars."""
+    from bisect import bisect_right
+
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    from heartless.exchange.orderbook import PROXY_BARS, PROXY_DEPTH_FRAC, PROXY_SPREAD_FRAC
+
+    empty = np.zeros(0)
+    if frame is None or not frame.n:
+        return empty, empty
+    i = bisect_right(frame.close_times(), now)
+    if i <= 0:
+        return empty, empty
+    a = max(0, i - n - PROXY_BARS + 1)
+    f = frame.f
+    h, lo, c, qv = (np.asarray(f[k][a:i], dtype=float) for k in ("high", "low", "close", "quote_volume"))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rng = np.where(c > 0, (h - lo) / c * 1e4, np.nan)
+    if len(rng) < PROXY_BARS:  # too short for one full window: the proxy over what there is, for the last bar only
+        r_med, q_med, mid = np.array([np.nanmedian(rng)]), np.array([np.nanmedian(qv)]), c[-1:]
+    else:
+        r_med = np.nanmedian(sliding_window_view(rng, PROXY_BARS), axis=1)
+        q_med = np.nanmedian(sliding_window_view(qv, PROXY_BARS), axis=1)
+        mid = c[PROXY_BARS - 1:]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tick_bps = np.where(mid > 0, tick / mid * 1e4, 0.0) if tick > 0 else np.zeros(len(mid))
+        spread = np.maximum(tick_bps, PROXY_SPREAD_FRAC * r_med)
+        scale = np.where(r_med > 0, np.minimum(1.0, k_bps / r_med), 1.0)
+    depth = 2.0 * PROXY_DEPTH_FRAC * q_med * scale
+    return spread[-n:], depth[-n:]
 
 
 @dataclass
@@ -71,6 +175,8 @@ class EntryPlan:
     equity: float
     open_notional: float
     meta_x: list | None = None
+    exec_mode: str = "taker"  # F-pre-B: the alpha's execution mode (EXEC_MODE)
+    ttl_ms: int = 0  # how long a maker entry rests (0 = taker, or the signal's own rules)
 
     @property
     def symbol(self) -> str:
@@ -123,6 +229,14 @@ class TradingEngine:
         # symbol -> the latest entry decisions that had at least one signal (what was considered, the outcome and why):
         # the answer to "why did / didn't it trade". Only persisted engines keep it; backtests pay nothing
         self.decision_log: dict[str, deque] | None = {} if self.persist else None
+        # F-pre-B. The shock layer (heartless/strategy/shock.py): an object answering entry_halt(t) -> reason ('' =
+        # none) - the backtester's ShockSchedule, the live bot's ShockDetector (wired by the app); None = no layer.
+        self.shock = None
+        # execution mode per alpha (EXEC_MODE, ROADMAP 7.7.2): taker = the orders as before F-pre-B
+        self._exec_default, self._exec = getattr(settings, "exec_modes", ("taker", {}))
+        # entry hold on an abnormal book (BOOK_GUARD, ROADMAP 7.11)
+        self.book_guard: BookGuard | None = BookGuard(settings) if getattr(settings, "book_guard", False) else None
+        self._exempt: dict[str, bool] = {}
 
     # --- lifecycle -----------------------------------------------------------------------------
     async def start(self) -> None:
@@ -143,6 +257,26 @@ class TradingEngine:
     def set_params(self, params: StrategyParams) -> None:
         self.params = params
         self.ensemble.set_params(params)
+
+    # --- F-pre-B: execution mode and shock layer -------------------------------------------------------------------
+    def exec_mode(self, alpha: str) -> str:
+        """The execution mode the engine trades `alpha` with (EXEC_MODE: taker | maker_m1 | maker_m2)."""
+        return self._exec.get(alpha, self._exec_default)
+
+    def _shock_exempt(self, alpha: str) -> bool:
+        ex = self._exempt.get(alpha)
+        if ex is None:
+            from heartless.strategy.shock import is_exempt
+
+            ex = self._exempt[alpha] = is_exempt(alpha)
+        return ex
+
+    def shock_halt(self, now: int, alpha: str | None = None) -> str:
+        """Why the shock layer halts new entries at `now` ('' = it does not): for `alpha` when given (a shock_exempt
+        alpha is never halted), else for the non-exempt alphas."""
+        if self.shock is None or (alpha is not None and self._shock_exempt(alpha)):
+            return ""
+        return self.shock.entry_halt(now)
 
     @property
     def queued_entries(self) -> int:
@@ -184,6 +318,8 @@ class TradingEngine:
         flush_entries() once every symbol's bar at this close has been processed."""
         self.last_views[ctx.symbol] = view
         now = self.clock()
+        if self.book_guard is not None:
+            self.book_guard.observe(ctx, now)
         if self.allocator is not None and view.closed("1h"):
             h1 = view.tf("1h")
             if h1.ok:
@@ -195,7 +331,14 @@ class TradingEngine:
             # an opposite-signal exit (Signal.exit_on_opposite) closed it on this bar: the bar may still decide
         if not view.ready() or not self.entries_enabled:
             return
-        decision = self.ensemble.decide(view, ctx)
+        # the shock layer's entry halt drops the signals of every alpha but the shock_exempt ones (ROADMAP 7.8)
+        halt = self.shock_halt(now)
+        decision = self.ensemble.decide(view, ctx, veto=self._shock_exempt_not) if halt else self.ensemble.decide(view, ctx)
+        if halt and self.ensemble.last_vetoed:
+            self.stats.skipped["shock halt"] = self.stats.skipped.get("shock halt", 0) + len(self.ensemble.last_vetoed)
+            if decision is None and self.decision_log is not None:
+                self._log_decision(ctx, None, "risk", halt, self.ensemble.last_vetoed)
+                return
         if decision is None:
             if self.decision_log is not None and self.ensemble.last_signals.get(ctx.symbol):
                 self._log_decision(ctx, None, "ensemble", self._ensemble_pass_reason(ctx.symbol))
@@ -218,6 +361,9 @@ class TradingEngine:
         await self._open(decision, view, ctx, equity)
         if self.decision_log is not None:
             self._log_outcome(ctx, decision, before, skipped)
+
+    def _shock_exempt_not(self, alpha: str) -> bool:
+        return not self._shock_exempt(alpha)
 
     def _log_outcome(self, ctx: Context, decision: Decision, before: Position | None, skipped: dict[str, int],
                      signals: list | None = None, allocation: dict | None = None) -> None:
@@ -317,7 +463,20 @@ class TradingEngine:
             return None
         t = ctx.ticker
         limit = sig.entry_style is EntryStyle.LIMIT
-        if limit and sig.limit_price:
+        mode = self.exec_mode(sig.alpha)
+        ttl_ms = 0
+        if mode != "taker":
+            # ROADMAP 7.7.2: a post-only limit at the decision close (maker_m1) or 0.25 signal ATR behind it
+            # (maker_m2); a limit the alpha set itself keeps its price. Sized below for the limit and the stop.
+            entry_ref = self._maker_price(mode, d, view, info)
+            if entry_ref is None:
+                self.stats.skipped["maker"] = self.stats.skipped.get("maker", 0) + 1
+                return None
+            limit = True
+            bars, cap = MAKER_TTL[mode]
+            tf = self.ensemble.alpha_timeframe(sig.alpha) or sig.timeframe
+            ttl_ms = min(bars * int(TF_MS.get(tf, MS_MINUTE)), cap)
+        elif limit and sig.limit_price:
             entry_ref = sig.limit_price
         else:
             entry_ref = (t.ask if d.side is Side.LONG else t.bid) or t.ref or view.price
@@ -326,6 +485,11 @@ class TradingEngine:
         if t.spread_bps > 12:  # illiquid moment
             self.stats.skipped["spread"] = self.stats.skipped.get("spread", 0) + 1
             return None
+        if self.book_guard is not None:
+            held = self.book_guard.check(view, ctx, self.clock(), info.tick_size)
+            if held:
+                self.stats.skipped["book guard"] = self.stats.skipped.get("book guard", 0) + 1
+                return None
         meta_x = None
         if self.meta is not None:
             meta_x, allow, mult, er = meta if meta is not None else self._meta_eval(view, ctx, d)
@@ -364,7 +528,26 @@ class TradingEngine:
             return None
         return EntryPlan(decision=d, view=view, ctx=ctx, info=info, entry_ref=entry_ref, size=sz, stop=stop, tp=tp,
                          tp1=tp1, r_unit=r_unit, risk_pct=risk_pct, budget=equity * risk_pct / 100, equity=equity,
-                         open_notional=open_notional, meta_x=meta_x)
+                         open_notional=open_notional, meta_x=meta_x, exec_mode=mode, ttl_ms=ttl_ms)
+
+    @staticmethod
+    def _maker_price(mode: str, d: Decision, view: MarketView, info: SymbolInfo) -> float | None:
+        """The resting limit of a maker entry, rounded to the passive side of the tick (None: no valid limit)."""
+        sig = d.primary
+        if sig.entry_style is EntryStyle.LIMIT and sig.limit_price:
+            px = float(sig.limit_price)
+        elif mode == "maker_m1":
+            px = float(view.price)
+        else:
+            atr = float(sig.atr or 0.0)
+            if not (atr > 0 and math.isfinite(atr)):
+                return None
+            px = float(view.price) - d.side.sign * MAKER_M2_ATR * atr
+            if (sig.stop - px) * d.side.sign >= 0:
+                return None  # the retest limit lies beyond the stop: the signal is dropped
+        if not (px > 0 and math.isfinite(px)):
+            return None
+        return norm_price(info, px, d.side.order_side)
 
     def _cooldown_ms(self, alpha: str, bars: int | None, timeframe: str) -> int | None:
         """Signal.cooldown_bars in ms of the alpha's decision timeframe (the signal's own as a fallback)."""
@@ -380,15 +563,17 @@ class TradingEngine:
         entry_ref, stop, tp, tp1, r_unit = plan.entry_ref, plan.stop, plan.tp, plan.tp1, plan.r_unit
         pid = short_id("P")
         cid = client_order_id(f"E{self.tag}")
+        maker = plan.exec_mode != "taker"
+        style = EntryStyle.LIMIT if maker else sig.entry_style
         pos = Position(id=pid, engine=self.name, symbol=d.symbol, side=d.side, qty=0.0, entry_price=entry_ref,
                        entry_time=self.clock(), stop=stop, take_profit=tp, tp1=tp1, initial_stop=stop,
                        alpha=sig.alpha, alphas=list(d.alphas), reason=d.reason, confidence=d.score, regime=d.regime.value,
                        risk_amount=sz.risk_amount, r_unit=r_unit, notional=sz.notional, leverage=sz.leverage,
                        params_version=self.params.version, atr=sig.atr, trail_atr_mult=sig.trail_atr_mult,
                        max_hold_bars=sig.max_hold_bars, timeframe=sig.timeframe, status=PositionStatus.PENDING,
-                       entry_client_id=cid, original_qty=sz.qty, entry_style=sig.entry_style.value,
-                       limit_price=entry_ref if sig.entry_style is EntryStyle.LIMIT else None, pending_since=self.clock(),
-                       entry_ttl_bars=d.entry_ttl_bars if sig.entry_style is EntryStyle.LIMIT else None,
+                       entry_client_id=cid, original_qty=sz.qty, entry_style=style.value,
+                       limit_price=entry_ref if style is EntryStyle.LIMIT else None, pending_since=self.clock(),
+                       entry_ttl_bars=d.entry_ttl_bars if style is EntryStyle.LIMIT and not maker else None,
                        exit_on_regime_change=d.exit_on_regime_change,
                        time_exit=sig.time_exit, allow_renewal=sig.allow_renewal, exit_on_opposite=sig.exit_on_opposite,
                        cooldown_ms=self._cooldown_ms(sig.alpha, sig.cooldown_bars, sig.timeframe),
@@ -398,13 +583,24 @@ class TradingEngine:
                               "size_mult": d.size_mult, "risk_pct": sz.risk_pct, "risk_budget": plan.budget})
         if plan.meta_x is not None:
             pos.extra["meta_x"] = [None if not (v == v) else float(v) for v in plan.meta_x]
+        if maker:
+            pos.extra["exec"] = plan.exec_mode
+            pos.extra["exec_ttl_ms"] = int(plan.ttl_ms)
         self.positions[d.symbol] = pos
         self._save(pos)
         sent = False  # becomes True once an order call was reached (it may have been accepted despite an exception)
         try:
             await self.account.prepare_symbol(d.symbol, sz.leverage)
             sent = True
-            if sig.entry_style is EntryStyle.LIMIT:
+            if maker:
+                # ROADMAP 7.7.2: post-only at the limit; one that would cross is dropped (no re-quote, no market order)
+                kw = {"fill_rule": "maker"} if getattr(self.account, "maker_fill_rule", False) else {}
+                res = await self.account.limit_order(d.symbol, d.side.order_side, sz.qty, entry_ref, post_only=True,
+                                                     client_id=cid, **kw)
+                if res.status in ("EXPIRED", "REJECTED"):
+                    self.stats.skipped["maker cross"] = self.stats.skipped.get("maker cross", 0) + 1
+                    res = None
+            elif sig.entry_style is EntryStyle.LIMIT:
                 price = norm_price(info, entry_ref, d.side.order_side)
                 res = await self.account.limit_order(d.symbol, d.side.order_side, sz.qty, price, post_only=True, client_id=cid)
                 if res.status in ("EXPIRED", "REJECTED"):
@@ -882,7 +1078,7 @@ class TradingEngine:
             s = self.ensemble.evaluate_alpha(pos.alpha, view, ctx)
             if s is not None and s.side is pos.side:
                 if (pos.allow_renewal and pos.max_hold_bars > 0 and s.max_hold_bars > 0 and self.entries_enabled
-                        and not self.risk.entries_blocked(now)):
+                        and not self.risk.entries_blocked(now) and not self.shock_halt(now, pos.alpha)):
                     pos.max_hold_bars = max(pos.max_hold_bars, pos.bars_held + s.max_hold_bars)
                     pos.extra["renewals"] = int(pos.extra.get("renewals", 0) or 0) + 1
                     pos.extra["renewed_at"] = now
@@ -986,6 +1182,10 @@ class TradingEngine:
                 # working order's fills arrive on the stream, crediting them from a poll could count them twice
                 await self._cancel_pending(pos, f"진입 주문이 거래소에서 종료됨 ({res.status})")
             return
+        halt = self.shock_halt(now, pos.alpha)
+        if halt:  # ROADMAP 7.8: resting entry limits are cancelled while the shock layer halts entries
+            await self._cancel_pending(pos, f"신규 진입 중단({halt})으로 대기 주문 취소")
+            return
         if age_bars < 2:
             return
         if pos.requotes >= 2:
@@ -1087,8 +1287,14 @@ class TradingEngine:
 
     @staticmethod
     def _entry_ttl_ms(pos: Position) -> int:
-        """How long a post-only entry with a signal TTL may rest (0 = no TTL: the default re-quote policy applies)."""
-        if pos.entry_style != EntryStyle.LIMIT.value or not pos.entry_ttl_bars or pos.entry_ttl_bars <= 0:
+        """How long a post-only entry with a signal TTL (or a maker entry's validity, F-pre-B) may rest (0 = no TTL: the
+        default re-quote policy applies)."""
+        if pos.entry_style != EntryStyle.LIMIT.value:
+            return 0
+        maker_ms = int((pos.extra or {}).get("exec_ttl_ms") or 0)
+        if maker_ms > 0:
+            return maker_ms
+        if not pos.entry_ttl_bars or pos.entry_ttl_bars <= 0:
             return 0
         return int(pos.entry_ttl_bars) * TF_MS.get(pos.timeframe, MS_MINUTE)
 
@@ -1099,8 +1305,11 @@ class TradingEngine:
         if not ttl:
             return ""
         if now - pos.pending_since >= ttl:
+            if (pos.extra or {}).get("exec_ttl_ms"):
+                return f"메이커 진입 유효 시간({ttl // MS_MINUTE}분) 만료로 주문 취소"
             return f"진입 유효 기간({pos.entry_ttl_bars}봉) 만료로 주문 취소"
         blocked = self.risk.entries_blocked(now) if self.entries_enabled else "entries disabled"
+        blocked = blocked or self.shock_halt(now, pos.alpha)
         return f"신규 진입 중단({blocked})으로 대기 주문 취소" if blocked else ""
 
     async def _settle_entry_order(self, pos: Position) -> OrderResult | None:

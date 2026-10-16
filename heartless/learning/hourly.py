@@ -757,7 +757,9 @@ def evaluate(alpha: HourlyAlpha, start: int, end: int, universe_db, symbols: lis
                 ok = (side != 0) & np.isfinite(stop) & ((stop - ref) * side < 0) & (hold >= 1)
                 target = np.where(np.isfinite(target) & ((target - ref) * side > 0), target, np.nan)
             if entry_filter is not None and ok.any():
-                ok &= np.asarray(entry_filter(sym, ct[cand]), dtype=bool)
+                # only the decisions are asked (a filter that counts what it blocks counts decisions, F-pre-B)
+                live = np.flatnonzero(ok)
+                ok[live] = np.asarray(entry_filter(sym, ct[cand][live]), dtype=bool)
             sel = np.flatnonzero(ok)
             n_dec += len(sel)
             if not len(sel):
@@ -937,11 +939,26 @@ def main_cli(settings, args) -> None:
             if not args.alpha:
                 raise ValueError("--alpha module:Class is required (or --equivalence)")
             alpha = load_alpha(args.alpha, args.set)
+            # F-pre-B (ROADMAP 7.8): the shock layer's entry halt is the entry filter (an alpha with shock_exempt takes
+            # none); S0 from the candle database's BTC bars when it has them, S1-S3 from universe.db
+            shock_filter, shock_doc = None, None
+            if getattr(settings, "shock_layer", False):
+                from heartless.strategy import shock as SH
+
+                sched = SH.schedule_for(settings, start, end)
+                shock_filter = SH.EntryFilter.for_alpha(alpha, sched)
+                shock_doc = {"exempt": shock_filter is None, "firings": sched.counts(start, end),
+                             "missing": sched.meta.get("missing", [])}
             res = evaluate(alpha, start, end, settings.universe_db_path, symbols=symbols, top=top, stress=args.stress,
-                           progress=lambda m: print(m, file=sys.stderr, flush=True))
+                           entry_filter=shock_filter, progress=lambda m: print(m, file=sys.stderr, flush=True))
             print(res.report())
+            if shock_doc is not None:
+                shock_doc["blocked_decisions"] = shock_filter.blocked if shock_filter is not None else 0
+                print(f"shock layer: {shock_doc['blocked_decisions']} decision(s) blocked; firings {shock_doc['firings']}"
+                      + (" (alpha exempt)" if shock_doc["exempt"] else ""), file=sys.stderr)
             doc = {**res.to_json(), "wave_f_period": trials.wave_f_period(start, end), "argv": list(args.argv),
-                   "git_commit": seal.git_commit(), "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+                   "git_commit": seal.git_commit(), "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                   "shock": shock_doc}
             tag = (args.tag or "").strip()
             if tag:
                 doc["trial"] = record(res, tag, extra={"argv": list(args.argv)})

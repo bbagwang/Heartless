@@ -31,6 +31,11 @@ log = logging.getLogger(__name__)
 # the stored settlements (a spacing longer than it).
 FUNDING_INTERVAL = 8 * MS_HOUR
 _NO_TIMES = np.zeros(0, dtype=np.int64)
+# ROADMAP 7.4 (F-pre-B): a position still open at its symbol's last traded hour leaves at that hour's close with 5x the
+# run's slippage (10x nominal under the doubled stress slippage); the same multiple and exit reason as the lab's
+# re-pricing (lab.DELIST_SLIP_MULT / DELIST_REASON), which only touches end-flattened trades, so never both
+DELIST_SLIP_MULT = 5.0
+DELIST_REASON = "delisting"
 
 
 def funding_schedule(times: np.ndarray, ts: int) -> tuple[int, int]:
@@ -233,8 +238,16 @@ class BarPaperAccount(PaperAccount):
 class Backtester:
     def __init__(self, settings: Settings, symbols: dict[str, SymbolInfo], candles: dict[str, CandleArrays],
                  funding: dict[str, list[tuple[int, float]]] | None = None, metrics: dict | None = None,
-                 market: ContextTable | None = None):
+                 market: ContextTable | None = None, shock="auto", delisted: dict[str, int] | None = None):
+        """`shock`: the shock layer's firings (strategy/shock.ShockEvents) the engine halts entries on; "auto" (the
+        default) builds them for the run's window when SHOCK_LAYER is on (shock.schedule_for: SHOCK_SCHEDULE, this run's
+        BTC bars or SHOCK_CANDLE_DB for S0, UNIVERSE_DB for S1-S3); None runs without the layer. `delisted`: {symbol:
+        close_time of its last traded hour's last minute} (universe.delisting_closes): a position open there is closed
+        at that close with DELIST_SLIP_MULT x the slippage and the symbol trades no more."""
         self.s = settings
+        self.shock = shock
+        self._shock_built = None
+        self.delisted = dict(delisted or {})
         self.symbols = symbols
         self.candles = {s: c for s, c in candles.items() if c.n > 300}
         self.funding = funding or {}
@@ -359,6 +372,55 @@ class Backtester:
         w = (t - (nxt - iv)) / iv
         return (1 - w) * prev + w * nrate, nxt, iv
 
+    def _shock_events(self):
+        """The shock layer's firings (None: layer off). "auto" builds them once over the whole loaded history (every
+        rule reads only the past, so each run's window sees the same firings as a schedule built for it alone) and
+        keeps them for every run of this backtester (a research cycle runs hundreds)."""
+        if self.shock != "auto":
+            return self.shock
+        if not getattr(self.s, "shock_layer", False):
+            return None
+        if self._shock_built is None:
+            from heartless.strategy import shock as SH
+
+            tl = self._timeline
+            btc = self.candles.get(SH.BTC)
+            btc_1m = (btc.view("close_time"), btc.view("close")) if btc is not None and btc.n else None
+            self._shock_built = SH.schedule_for(self.s, int(tl[0]), int(tl[-1]), btc_1m=btc_1m)
+        return self._shock_built
+
+    def _delist_bars(self) -> dict[str, int]:
+        """Per delisted symbol, the close_time of its last bar at or before the last traded hour's close. A symbol
+        whose own bars still trade (volume) more than a day after that close is not treated as delisted: a stale
+        inventory or a relisting must never stop a live symbol (the archive's flat zero-volume files after a delisting
+        do not count as trading)."""
+        out: dict[str, int] = {}
+        for sym, d_ms in self.delisted.items():
+            ca = self.candles.get(sym)
+            if ca is None or not ca.n:
+                continue
+            ct = ca.view("close_time")
+            k = int(np.searchsorted(ct, int(d_ms), side="right")) - 1
+            if k < 0:
+                continue
+            after = int(np.searchsorted(ct, int(d_ms) + 86_400_000, side="right"))
+            if after < ca.n and bool((ca.view("quote_volume")[after:] > 0).any()):
+                log.warning("%s: listed as delisted at %s but its bars trade after it; not closed there", sym, d_ms)
+                continue
+            out[sym] = int(ct[k])
+        return out
+
+    @staticmethod
+    async def _delisting_close(engine: TradingEngine, account: "BarPaperAccount", sym: str) -> None:
+        """Close what is open (or cancel what rests) on a delisted symbol at its last traded hour's close."""
+        if sym not in engine.positions:
+            return
+        account.slip_mult[sym] = DELIST_SLIP_MULT
+        try:
+            await engine.close_position(sym, DELIST_REASON)
+        finally:
+            account.slip_mult.pop(sym, None)
+
     def _prime_beta(self, beta, start: int) -> None:
         """Seed the allocator's BTC-beta estimator with the hourly closes before `start` (as the live app seeds it from
         its stored candles), at most its look-back; later hours are observed by the engine as the run proceeds."""
@@ -386,11 +448,14 @@ class Backtester:
             return BacktestResult(stats, [], [], initial_balance, params.version, only_alpha)
         account = BarPaperAccount(name="bt", initial_balance=initial_balance, taker_fee=self.s.taker_fee,
                                   maker_fee=self.s.maker_fee, clock=lambda: self.now,
-                                  slippage_bps=getattr(self.s, "backtest_slippage_bps", 1.5))
+                                  slippage_bps=getattr(self.s, "backtest_slippage_bps", 1.5),
+                                  maker_through=getattr(self.s, "maker_through_spread", 0.5),
+                                  maker_volume_mult=getattr(self.s, "maker_min_volume_mult", 20.0))
         account.set_symbols(self.symbols)
         engine = TradingEngine("bt", account, params, self.s, self.symbols, store=None, bus=None,
                                bandit=bandit or AlphaBandit(list(params.alphas), seed=7), only_alpha=only_alpha,
                                clock=lambda: self.now, persist=False, meta=self._make_meta())
+        engine.shock = self._shock_events()
         self.now = int(tl[lo])
         await engine.start()
         # per-symbol cursors into candle arrays
@@ -412,6 +477,7 @@ class Backtester:
         # F7: with ORDERBOOK_STREAM on, ctx.book is the conservative 1m-bar proxy the replay serves (ProxyBooks); off
         # (the default, as in live trading without the stream) it stays EMPTY_BOOK and nothing is computed
         book_on = bool(getattr(self.s, "orderbook_stream", False))
+        delist_at = self._delist_bars()
         for i in range(lo, hi):
             t = int(tl[i])
             self.now = t
@@ -463,6 +529,9 @@ class Backtester:
                 if pos is not None:
                     pos.extra["last_mark"] = c.close
                 await engine.on_bar(view, ctx)
+                if delist_at and delist_at.get(sym) == t:
+                    await self._delisting_close(engine, account, sym)
+                    cursors[sym] = ca.n  # nothing trades after the last traded hour
             if engine.allocator is not None:
                 # P3: every symbol's bar at t has been processed: rank and admit this close's entry candidates
                 await engine.flush_entries()
@@ -502,7 +571,7 @@ class Backtester:
 
 def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], since: int, until: int | None = None,
                     symbol_list: list[str] | None = None, warmup_ms: int = 0, lookahead: bool = True,
-                    market: ContextTable | str | None = "auto") -> Backtester:
+                    market: ContextTable | str | None = "auto", delisted: dict[str, int] | str | None = "auto") -> Backtester:
     """Build a Backtester from candles stored in the DB.
 
     Window use (an evaluation over [since, until], e.g. `heartless backtest --start/--end`): `warmup_ms` also loads
@@ -513,7 +582,9 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
 
     `market="auto"` attaches the stored market context of the window when a current table built from this candle
     database exists (CONTEXT_DB, default <data_dir>/context.db; nothing is built here), None runs without it, or pass a
-    ContextTable."""
+    ContextTable. `delisted="auto"` reads the delistings of the loaded symbols from UNIVERSE_DB when it exists
+    (universe.delisting_closes; a position open at a symbol's last traded hour closes there, ROADMAP 7.4), None skips
+    them, or pass {symbol: close ms}."""
     syms = symbol_list or store.candle_symbols()
     lo = since - max(0, int(warmup_ms))
     candles: dict[str, CandleArrays] = {}
@@ -537,7 +608,27 @@ def load_backtester(settings: Settings, store, symbols: dict[str, SymbolInfo], s
             del mrows  # a year of 5-minute rows is about 70 MB of row objects: not held while the next symbol loads
     if isinstance(market, str):
         market = stored_context(settings, store, list(candles), lo, until if until is not None else 2**62)
-    return Backtester(settings, symbols, candles, funding, metrics, market)
+    if isinstance(delisted, str):
+        delisted = stored_delistings(settings, list(candles), lo, until)
+    return Backtester(settings, symbols, candles, funding, metrics, market, delisted=delisted)
+
+
+def stored_delistings(settings: Settings, symbols: list[str], start: int, end: int | None) -> dict[str, int]:
+    """{symbol: close_time of its last traded hour} for the delisted `symbols` with that close in [start, end], from
+    UNIVERSE_DB (empty when the file does not exist)."""
+    from pathlib import Path
+
+    path = getattr(settings, "universe_db_path", None)
+    if not symbols or path is None or not Path(path).exists():
+        return {}
+    from heartless.core.store import Store
+    from heartless.data import universe as U
+
+    st = Store(path, readonly=True)
+    try:
+        return U.delisting_closes(st, symbols, start, end)
+    finally:
+        st.close()
 
 
 def _load_1m(store, symbol: str, lo: int, until: int | None) -> CandleArrays:

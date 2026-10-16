@@ -189,6 +189,44 @@ class Settings(BaseSettings):
     # N > 0 = only the N of them with the largest trailing 24h quote volume at that hour
     context_top_n: int = Field(default=0, alias="CONTEXT_TOP_N")
 
+    # --- F-pre-B: shock layer, execution modes, book guard (docs/SHOCK.md, docs/EXECUTION.md, ROADMAP 7.7.2 / 7.8) --
+    # The shock layer (heartless/strategy/shock.py): S0 (BTC 5-minute move >= 3% -> 15 minutes without new entries) and
+    # S1-S3 (hourly BTC price shock, volatility jump, correlation spike -> 2 hours without new entries, resting entry
+    # limits cancelled, shock_exempt alphas excluded). On by default from F-pre-B on (ROADMAP 7.8: responses 1 and 3
+    # only make entries rarer and switching an alpha off easier, so they need no gate); the definitions are constants.
+    shock_layer: bool = Field(default=True, alias="SHOCK_LAYER")
+    # 1m candle database whose BTCUSDT bars feed S0 in a backtest that does not load BTC itself (a lab job of another
+    # symbol); empty: <data_dir>/heartless.db. S1-S3 read UNIVERSE_DB (1h, point in time).
+    shock_candle_db: str = Field(default="", alias="SHOCK_CANDLE_DB")
+    # a prebuilt shock schedule (JSON, shock.save_schedule) that backtests read when it covers their window; one that
+    # is missing or too short is built and written. Empty: each process builds (and caches) its own.
+    shock_schedule: str = Field(default="", alias="SHOCK_SCHEDULE")
+    # Execution mode per alpha (ROADMAP 7.7.2), an engine setting and not an alpha parameter: "taker" (the default:
+    # orders exactly as before), "maker_m1" (a market signal becomes a post-only limit at the decision bar's close,
+    # cancelled after one decision bar, at most 60 minutes) or "maker_m2" (a retest limit 0.25 signal ATR behind the
+    # close, cancelled after three decision bars, at most 240 minutes). One mode for every alpha, or
+    # "alpha:mode,alpha:mode" (alphas not named stay taker). The trial ledger hashes it as `exec`.
+    exec_mode: str = Field(default="taker", alias="EXEC_MODE")
+    # conservative maker fill model (PaperAccount: backtests and paper alike): a resting maker limit fills only when a
+    # 1m bar trades through it by this fraction of the synthetic spread (0.5 nominal, 1.0 stress), never in the bar it
+    # was placed in, and not in a bar whose quote volume is below MAKER_MIN_VOLUME_MULT x the order notional
+    maker_through_spread: float = Field(default=0.5, alias="MAKER_THROUGH_SPREAD")
+    maker_min_volume_mult: float = Field(default=20.0, alias="MAKER_MIN_VOLUME_MULT")
+    # Book guard (ROADMAP 7.11): skip an entry while the symbol's spread is >= BOOK_GUARD_SPREAD_MULT x its own
+    # prior-24h median and >= BOOK_GUARD_MIN_SPREAD_BPS, or its depth within +-ORDERBOOK_DEPTH_BPS is below
+    # BOOK_GUARD_DEPTH_FRAC of its own prior-24h median. The live stream book when there is one, else the conservative
+    # 1m-bar proxy (backtests, replays, live without ORDERBOOK_STREAM): one rule everywhere.
+    book_guard: bool = Field(default=True, alias="BOOK_GUARD")
+    book_guard_spread_mult: float = Field(default=3.0, alias="BOOK_GUARD_SPREAD_MULT")
+    book_guard_min_spread_bps: float = Field(default=5.0, alias="BOOK_GUARD_MIN_SPREAD_BPS")
+    book_guard_depth_frac: float = Field(default=0.25, alias="BOOK_GUARD_DEPTH_FRAC")
+
+    @field_validator("exec_mode")
+    @classmethod
+    def _known_exec_mode(cls, v: str) -> str:
+        parse_exec_modes(v)  # raises on an unknown mode: a typo must not silently trade taker
+        return v
+
     @field_validator("telegram_owner_id", mode="before")
     @classmethod
     def _blank_owner_id_is_none(cls, v):
@@ -226,6 +264,39 @@ class Settings(BaseSettings):
     @property
     def universe_db_path(self) -> Path:
         return Path(self.universe_db) if self.universe_db else self.data_dir / "universe.db"
+
+    # F-pre-B
+    @property
+    def shock_candle_db_path(self) -> Path:
+        return Path(self.shock_candle_db) if self.shock_candle_db else self.db_path
+
+    @property
+    def exec_modes(self) -> tuple[str, dict[str, str]]:
+        """EXEC_MODE parsed: (mode of the alphas not named, {alpha: mode})."""
+        return parse_exec_modes(self.exec_mode)
+
+
+# ROADMAP 7.7.2: the execution modes an engine trades an alpha with (taker = the orders as before F-pre-B)
+EXEC_MODES = ("taker", "maker_m1", "maker_m2")
+
+
+def parse_exec_modes(text: str | None) -> tuple[str, dict[str, str]]:
+    """EXEC_MODE -> (default mode, {alpha: mode}). "maker_m1" sets every alpha; "a:maker_m1,b:maker_m2" names alphas
+    (the others stay taker, or take a bare mode given alongside). ValueError for an unknown mode."""
+    default, per = "taker", {}
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, mode = part.rpartition(":")
+        mode = mode.strip()
+        if mode not in EXEC_MODES:
+            raise ValueError(f"unknown execution mode {mode!r} in EXEC_MODE (one of {', '.join(EXEC_MODES)})")
+        if name.strip():
+            per[name.strip()] = mode
+        else:
+            default = mode
+    return default, per
 
 
 # E2: days of stored history beyond the research window and its warm-up (the research window ends at the newest stored
