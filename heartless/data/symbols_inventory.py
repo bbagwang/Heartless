@@ -632,7 +632,8 @@ def basis_series(store, symbol: str, start: int | None = None, end: int | None =
     * funding = the rate that becomes usable at this close, i.e. settled at T - 1h (NaN when there was none);
     * funding_last = the last rate usable at this close (settled at or before T - 1h);
     * funding_settled = the rate settled AT T, for PnL accounting only: a position open across T (entered at or before
-      the close at T - 1h, still open after T) pays or receives it. Never a decision input at T.
+      the close at T, the instant T - 1 ms before the settlement, and closed at a later close) pays or receives it, as
+      neutral.evaluate charges it (entry close <= s < exit close). Never a decision input at T.
     Red-team F-M1: funding / funding_last used to be one settlement early (the rate settled at T on the row of the
     close at T). Empty arrays when the symbol has no spot market or no stored blocks. `row`: the symbol's inventory
     row when the caller has it (read from the store otherwise)."""
