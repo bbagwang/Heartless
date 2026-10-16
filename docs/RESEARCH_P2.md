@@ -1,6 +1,8 @@
 # P2 연구 2차 결과 (ROADMAP P2)
 
 > 요약: 6개 가설 계열을 TRAIN(2022-01-13 ~ 2024-12-31, 확장 20종목)에서만 연구했고, 사전 등록한 TRAIN 관문을 넘은 후보 4개를 VALID(2026-01-13 ~ 2026-09-30)에서 **한 번씩** 평가했습니다. **VALID 관문(평균R > 0, t_day ≥ 1.0)을 통과한 알파는 없습니다.** `ts_trend_tsmom` -0.014R(t_day -0.26), `positioning_flow_oimom` -0.005R(-0.07), `discovery_daily_capdisp` -0.037R(-0.12)은 VALID에서 평균이 음수였고, `vol_breakout_dbox`(수축 필터 끔)는 +0.101R로 평균은 양수였지만 t_day 0.82로 기준에 못 미쳤습니다. `xs_rank`와 `funding_carry`는 TRAIN 후보조차 없었습니다. 네 후보는 모두 기본 비활성으로 남고, 증거 기록(`heartless/strategy/evidence.json`)에 `failed`로 올렸습니다. **출하 기본값에서 켜진 알파는 여전히 0개입니다.** 통과 알파가 없으므로 앙상블·공동 포트폴리오 실행(정보용)은 하지 않았습니다. 수익이 검증된 봇이 아닙니다. 실거래하지 마세요.
+>
+> **후속(2026-10-16 최종 검토)**: 이 문서는 2026-10-11 P2 관문 시점의 기록이고 수치는 그대로 둡니다. 그 뒤 바뀐 것: 2025년은 `vol_breakout_dbox` 단일 후보 확인 시험에 한 번 썼고 탈락했으며 봉인은 소진되었습니다([SEALED_2025.md](SEALED_2025.md)). P3 할당기는 기능만 넣고 기본 꺼짐입니다([PORTFOLIO.md](PORTFOLIO.md)). E2에서 `xs_rank_mom`·`funding_carry_xs`를 TRAIN 관문 탈락(`stage` `train`)으로 증거 기록에 올려, 시작 메시지의 OOS 요약은 이제 "15개 중 탈락 15, 통과 0"입니다(6절의 "13개"는 당시 값). 9절 4항의 도구 결함 중 처리된 것은 그 항 끝에 적었습니다.
 
 ## 1. 프로토콜 (사전 등록)
 
@@ -214,6 +216,15 @@ PF는 USDT 손익 기준이고 평균R은 R 기준이라 부호가 다를 수 �
    - TRAIN 후보가 없었던 `xs_rank_mom`, `funding_carry_xs`는 프로토콜대로 증거 기록을 바꾸지 않았으므로 `untested`입니다. 리서치 사이클이 이 둘을 켜는 챌린저를 제안하면 강화 기준이 아닌 일반 기준이 적용됩니다. TRAIN 결과(+0.003R / t_day 0.25, +0.038R / 1.36)를 근거로 `failed`로 올릴지는 메인 루프가 정할 일입니다.
    - 새 P2 알파 6개가 모두 등록되어 있어, 리서치 사이클이 4시간마다 이 알파들도 평가합니다(알파당 약 15분, P4 측정 기준). 탈락한 알파를 등록된 채 둘지는 통합 단계에서 정할 일입니다.
    - 시작 메시지의 OOS 요약 문구가 근거 문서로 `docs/OOS_2022_2024.md`만 표시합니다(`heartless/app.py`). P2 항목은 이 문서가 근거입니다.
+   - **후속(2026-10-16)**: 위 항목 중 처리된 것입니다. 나머지(`ctx.funding_rate` 보간, 발굴 엔진의 요일 피처·시간 청산 차이, lab 진행 표시·`git_dirty`·코드 해시 범위, 운영 일봉 ATR 이력 길이, 백테스트의 시장 충격 쿨다운, 2022년 평가 시작)는 그대로입니다.
+     - 불변식 검사: `tests/test_alpha_invariants.py`가 1시간 마감마다(4시간·UTC 일 마감 포함) 합성 시장 컨텍스트·포지셔닝과 함께 4h·1d 알파까지 검사합니다.
+     - 관리 봉의 결정, 같은 방향 연장, 손실 뒤 재진입, 펀딩 회피 청산: E1의 실행 옵트인 `exit_on_opposite`·`allow_renewal`·`cooldown_bars`·`avoid_funding=False`·`time_exit`(모두 기본 꺼짐, [PORTFOLIO.md](PORTFOLIO.md) 2.3절).
+     - 백테스터 펀딩: E1부터 저장된 정산 시각마다 부과합니다(8시간 버킷 아님, [PORTFOLIO.md](PORTFOLIO.md)).
+     - `heartless discover`의 캔들 DB 쓰기: E2부터 원본 캔들 DB를 읽기 전용으로 엽니다(`tests/test_e2_store_readonly.py`).
+     - 리서치 워커의 컨텍스트: C2-B부터 봇이 정시마다 기록하는 컨텍스트 저장소를 리서치 백테스트가 읽습니다([SELF_IMPROVEMENT.md](SELF_IMPROVEMENT.md)).
+     - `xs_rank_mom`·`funding_carry_xs`: E2에서 `failed`(TRAIN 관문 탈락)로 올려 강화 기준을 받습니다.
+     - 리서치 비용: 주기는 이제 2시간이고, 한 사이클은 켜진 알파·미탈락 알파·탈락 알파 순환 2개만 조정합니다([SELF_IMPROVEMENT.md](SELF_IMPROVEMENT.md) 3.1절).
+     - 시작 메시지 출처: Wave D 통합부터 `docs/OOS_2022_2024.md, docs/RESEARCH_P2.md` 둘 다 표시합니다.
 
 ## 10. 결과 파일
 
