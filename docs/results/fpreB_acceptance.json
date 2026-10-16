@@ -1,0 +1,544 @@
+{
+ "purpose": "F-pre-B acceptance (ROADMAP 7.12): identity of the lab trade list with exec taker, shock layer off and book guard off; counts of trades changed by each feature and by the shipped defaults; TRAIN-F shock firings and blocked decisions (ROADMAP 7.8). Identity and counts only, no performance figures.",
+ "identity": {
+  "command": "heartless lab --alpha htf_trend --start 2026-05-01 --end 2026-07-01 --universe core --workers 1 (scratch copy of data/research/heartless.db; SHOCK_LAYER=false BOOK_GUARD=false EXEC_MODE=taker)",
+  "sha256_trades": "a6accc69a928d6df96fb705fd374b1475828e993bc29f764db23671638d851f4",
+  "trades": 111,
+  "expected": "a6accc69a928d6df96fb705fd374b1475828e993bc29f764db23671638d851f4",
+  "verified_at_commit": "ddbe7a0"
+ },
+ "lab_counts": {
+  "window": [
+   "2026-05-01",
+   "2026-07-01"
+  ],
+  "universe": "core (12)",
+  "universe_db": "data/longhist/universe.db (read-only)",
+  "columns": {
+   "n": "taker, shock layer off, book guard off",
+   "shock": "SHOCK_LAYER=true",
+   "guard": "BOOK_GUARD=true",
+   "both": "shipped defaults (SHOCK_LAYER=true, BOOK_GUARD=true, EXEC_MODE=taker)",
+   "m1": "EXEC_MODE=maker_m1",
+   "m2": "EXEC_MODE=maker_m2"
+  },
+  "removed_added": "trades of the baseline missing in the variant / trades of the variant not in the baseline, by (symbol, entry_time, side)",
+  "note": "2026 window, every alpha is code that has seen 2026: counts only, never used for a verdict",
+  "rows": [
+   {
+    "alpha": "trend_pullback",
+    "n": 567,
+    "shock": {
+     "n": 534,
+     "removed": 71,
+     "added": 38
+    },
+    "guard": {
+     "n": 565,
+     "removed": 8,
+     "added": 6
+    },
+    "both": {
+     "n": 532,
+     "removed": 79,
+     "added": 44
+    },
+    "m1": {
+     "n": 537,
+     "maker_entries_dated_like_taker": 59
+    },
+    "m2": {
+     "n": 550,
+     "maker_entries_dated_like_taker": 59
+    }
+   },
+   {
+    "alpha": "squeeze_breakout",
+    "n": 74,
+    "shock": {
+     "n": 61,
+     "removed": 16,
+     "added": 3
+    },
+    "guard": {
+     "n": 72,
+     "removed": 2,
+     "added": 0
+    },
+    "both": {
+     "n": 60,
+     "removed": 17,
+     "added": 3
+    },
+    "m1": {
+     "n": 69,
+     "maker_entries_dated_like_taker": 0
+    },
+    "m2": {
+     "n": 67,
+     "maker_entries_dated_like_taker": 0
+    }
+   },
+   {
+    "alpha": "mean_reversion",
+    "n": 45,
+    "shock": {
+     "n": 43,
+     "removed": 2,
+     "added": 0
+    },
+    "guard": {
+     "n": 44,
+     "removed": 1,
+     "added": 0
+    },
+    "both": {
+     "n": 42,
+     "removed": 3,
+     "added": 0
+    },
+    "m1": {
+     "n": 42,
+     "maker_entries_dated_like_taker": 0
+    },
+    "m2": {
+     "n": 27,
+     "maker_entries_dated_like_taker": 0
+    }
+   },
+   {
+    "alpha": "momentum_burst",
+    "n": 93,
+    "shock": {
+     "n": 48,
+     "removed": 45,
+     "added": 0
+    },
+    "guard": {
+     "n": 93,
+     "removed": 0,
+     "added": 0
+    },
+    "both": {
+     "n": 48,
+     "removed": 45,
+     "added": 0
+    },
+    "m1": {
+     "n": 88,
+     "maker_entries_dated_like_taker": 0
+    },
+    "m2": {
+     "n": 72,
+     "maker_entries_dated_like_taker": 0
+    }
+   },
+   {
+    "alpha": "funding_fade",
+    "n": 78,
+    "shock": {
+     "n": 73,
+     "removed": 5,
+     "added": 0
+    },
+    "guard": {
+     "n": 78,
+     "removed": 1,
+     "added": 1
+    },
+    "both": {
+     "n": 73,
+     "removed": 6,
+     "added": 1
+    },
+    "m1": {
+     "n": 75,
+     "maker_entries_dated_like_taker": 9
+    },
+    "m2": {
+     "n": 75,
+     "maker_entries_dated_like_taker": 9
+    }
+   },
+   {
+    "alpha": "sweep_reversal",
+    "n": 716,
+    "shock": {
+     "n": 643,
+     "removed": 82,
+     "added": 9
+    },
+    "guard": {
+     "n": 695,
+     "removed": 25,
+     "added": 4
+    },
+    "both": {
+     "n": 627,
+     "removed": 100,
+     "added": 11
+    },
+    "m1": {
+     "n": 611,
+     "maker_entries_dated_like_taker": 22
+    },
+    "m2": {
+     "n": 645,
+     "maker_entries_dated_like_taker": 23
+    }
+   },
+   {
+    "alpha": "discovery_daily_capdisp",
+    "n": 4,
+    "shock": {
+     "n": 1,
+     "removed": 3,
+     "added": 0
+    },
+    "guard": {
+     "n": 4,
+     "removed": 0,
+     "added": 0
+    },
+    "both": {
+     "n": 1,
+     "removed": 3,
+     "added": 0
+    },
+    "m1": {
+     "n": 4,
+     "maker_entries_dated_like_taker": 0
+    },
+    "m2": {
+     "n": 4,
+     "maker_entries_dated_like_taker": 0
+    }
+   },
+   {
+    "alpha": "funding_carry_xs",
+    "n": 4,
+    "shock": {
+     "n": 4,
+     "removed": 0,
+     "added": 0
+    },
+    "guard": {
+     "n": 4,
+     "removed": 0,
+     "added": 0
+    },
+    "both": {
+     "n": 4,
+     "removed": 0,
+     "added": 0
+    },
+    "m1": {
+     "n": 4,
+     "maker_entries_dated_like_taker": 0
+    },
+    "m2": {
+     "n": 3,
+     "maker_entries_dated_like_taker": 0
+    }
+   },
+   {
+    "alpha": "htf_trend",
+    "n": 111,
+    "shock": {
+     "n": 110,
+     "removed": 4,
+     "added": 3
+    },
+    "guard": {
+     "n": 111,
+     "removed": 0,
+     "added": 0
+    },
+    "both": {
+     "n": 110,
+     "removed": 4,
+     "added": 3
+    },
+    "m1": {
+     "n": 102,
+     "maker_entries_dated_like_taker": 7
+    },
+    "m2": {
+     "n": 104,
+     "maker_entries_dated_like_taker": 7
+    }
+   },
+   {
+    "alpha": "intraday_levels",
+    "n": 70,
+    "shock": {
+     "n": 42,
+     "removed": 28,
+     "added": 0
+    },
+    "guard": {
+     "n": 70,
+     "removed": 0,
+     "added": 0
+    },
+    "both": {
+     "n": 42,
+     "removed": 28,
+     "added": 0
+    },
+    "m1": {
+     "n": 69,
+     "maker_entries_dated_like_taker": 4
+    },
+    "m2": {
+     "n": 69,
+     "maker_entries_dated_like_taker": 4
+    }
+   },
+   {
+    "alpha": "positioning",
+    "n": 85,
+    "shock": {
+     "n": 72,
+     "removed": 13,
+     "added": 0
+    },
+    "guard": {
+     "n": 83,
+     "removed": 2,
+     "added": 0
+    },
+    "both": {
+     "n": 71,
+     "removed": 14,
+     "added": 0
+    },
+    "m1": {
+     "n": 74,
+     "maker_entries_dated_like_taker": 18
+    },
+    "m2": {
+     "n": 78,
+     "maker_entries_dated_like_taker": 18
+    }
+   },
+   {
+    "alpha": "positioning_flow_oimom",
+    "n": 9,
+    "shock": {
+     "n": 7,
+     "removed": 2,
+     "added": 0
+    },
+    "guard": {
+     "n": 9,
+     "removed": 1,
+     "added": 1
+    },
+    "both": {
+     "n": 7,
+     "removed": 3,
+     "added": 1
+    },
+    "m1": {
+     "n": 9,
+     "maker_entries_dated_like_taker": 0
+    },
+    "m2": {
+     "n": 9,
+     "maker_entries_dated_like_taker": 0
+    }
+   },
+   {
+    "alpha": "ts_trend_tsmom",
+    "n": 55,
+    "shock": {
+     "n": 50,
+     "removed": 22,
+     "added": 17
+    },
+    "guard": {
+     "n": 55,
+     "removed": 0,
+     "added": 0
+    },
+    "both": {
+     "n": 50,
+     "removed": 22,
+     "added": 17
+    },
+    "m1": {
+     "n": 54,
+     "maker_entries_dated_like_taker": 0
+    },
+    "m2": {
+     "n": 41,
+     "maker_entries_dated_like_taker": 0
+    }
+   },
+   {
+    "alpha": "vol_breakout_dbox",
+    "n": 18,
+    "shock": {
+     "n": 18,
+     "removed": 0,
+     "added": 0
+    },
+    "guard": {
+     "n": 18,
+     "removed": 0,
+     "added": 0
+    },
+    "both": {
+     "n": 18,
+     "removed": 0,
+     "added": 0
+    },
+    "m1": {
+     "n": 17,
+     "maker_entries_dated_like_taker": 0
+    },
+    "m2": {
+     "n": 11,
+     "maker_entries_dated_like_taker": 0
+    }
+   },
+   {
+    "alpha": "xs_rank_mom",
+    "n": 139,
+    "shock": {
+     "n": 136,
+     "removed": 10,
+     "added": 7
+    },
+    "guard": {
+     "n": 137,
+     "removed": 7,
+     "added": 5
+    },
+    "both": {
+     "n": 134,
+     "removed": 17,
+     "added": 12
+    },
+    "m1": {
+     "n": 119,
+     "maker_entries_dated_like_taker": 0
+    },
+    "m2": {
+     "n": 60,
+     "maker_entries_dated_like_taker": 0
+    }
+   }
+  ]
+ },
+ "train_f_shock": {
+  "window": [
+   1642032000000,
+   1767225599999
+  ],
+  "sources": {
+   "candle_db": "/home/user/Heartless/data/longhist/heartless.db",
+   "universe_db": "/home/user/Heartless/data/longhist/universe.db",
+   "hourly_source": "universe.db"
+  },
+  "counts": {
+   "S0": 143,
+   "S1": 314,
+   "S2": 1143,
+   "S3": 288,
+   "hours_fired": 1472,
+   "shock_state_hours": 6195,
+   "halt_hours": 1746
+  },
+  "by_year": {
+   "2022": {
+    "S0": 79,
+    "S1": 84,
+    "S2": 306,
+    "S3": 17,
+    "hours_fired": 366,
+    "shock_state_hours": 1446,
+    "halt_hours": 426
+   },
+   "2023": {
+    "S0": 29,
+    "S1": 76,
+    "S2": 438,
+    "S3": 144,
+    "hours_fired": 525,
+    "shock_state_hours": 1717,
+    "halt_hours": 591
+   },
+   "2024": {
+    "S0": 26,
+    "S1": 80,
+    "S2": 230,
+    "S3": 87,
+    "hours_fired": 324,
+    "shock_state_hours": 1492,
+    "halt_hours": 398
+   },
+   "2025": {
+    "S0": 9,
+    "S1": 74,
+    "S2": 169,
+    "S3": 40,
+    "hours_fired": 257,
+    "shock_state_hours": 1518,
+    "halt_hours": 331
+   }
+  },
+  "reference_alpha_decisions": {
+   "decisions_without_layer": 28503,
+   "decisions_with_layer": 27115,
+   "blocked_decisions": 1388,
+   "trades_without": 28503,
+   "trades_with": 27115
+  },
+  "reference_alpha": "hourly.ReferenceAlpha (long at every 24th hour close, 2 ATR stop, 12 h exit) on the 20 long-history symbols",
+  "s3_definition": "point-in-time top 40 of the research context (2026-10-16 amendment)"
+ },
+ "vwap_z": {
+  "frames": "12 core symbols x 1m..1d, 2026-04-01..06-30, research DB copy",
+  "feature_columns_digest_before_and_after": "2a797dad53c9815e8bdcf786ea638cf5b911eace15e1f208b0f366c42ada5b02 (72 frames, identical)",
+  "bars_changed_vs_old_expression": {
+   "1m": {
+    "bars": 1555200,
+    "changed": 113,
+    "changed_single_session": 113,
+    "single_bar_sessions": 1080
+   },
+   "5m": {
+    "bars": 311040,
+    "changed": 87,
+    "changed_single_session": 87,
+    "single_bar_sessions": 1080
+   },
+   "15m": {
+    "bars": 103680,
+    "changed": 84,
+    "changed_single_session": 84,
+    "single_bar_sessions": 1080
+   },
+   "1h": {
+    "bars": 25920,
+    "changed": 108,
+    "changed_single_session": 108,
+    "single_bar_sessions": 1080
+   },
+   "4h": {
+    "bars": 6480,
+    "changed": 106,
+    "changed_single_session": 106,
+    "single_bar_sessions": 1080
+   },
+   "1d": {
+    "bars": 1080,
+    "changed": 95,
+    "changed_single_session": 95,
+    "single_bar_sessions": 1080
+   }
+  }
+ }
+}
