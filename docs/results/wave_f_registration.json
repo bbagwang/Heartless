@@ -225,7 +225,7 @@
    "kind": "neutral",
    "source": "spot long + perp short collecting funding (delta neutral); no price forecast; the reverse leg (perp long + spot short) needs spot borrowing and is not traded",
    "data": "universe.db perp and spot 1h, funding (symbols_inventory.basis_series)",
-   "universe": "top-40 members of month m that have a spot USDT market passing the pairing check (docs/results/f0_spot_coverage.json) and a prior-month median daily spot quote volume >= 5,000,000 USDT",
+   "universe": "top-40 members of month m that have a spot USDT market passing the pairing check point in time (median |basis| < 5% over the hours of month m-1 both markets traded, symbols_inventory.paired_as_of; amended 2026-10-16, the whole-history check of docs/results/f0_spot_coverage.json is a data report) and a prior-month median daily spot quote volume >= 5,000,000 USDT",
    "evaluator": "two_leg_neutral",
    "decision": "for each settlement time s of the symbol, at the first close after it (the close at s + 1h), the s rate known; inputs: settled funding up to s, basis at the decision, both markets' 1h history; no predicted funding (not in the archive)",
    "rule": "enter when the annualized mean of the last k settled rates (by the symbol's interval) >= A_in and basis >= -0.5% (no entry when the perp trades more than 0.5% below spot: a basis returning to 0 loses); exit when it is <= A_out; more candidates than slots: highest annualized value first; at most 8 positions",
@@ -739,7 +739,7 @@
   },
   "incremental_features": true,
   "orderbook_stream": "on while an enabled alpha reads ctx.book or trades with maker execution",
-  "book_guard": "skip an entry when the spread >= 3 x its own prior-24h median and >= 5 bp, or depth within +-10 bp < 25% of its own prior-24h median; history uses the conservative bar_book_proxy (relative thresholds keep the meaning); same rule in backtest and live (F-pre-B)",
+  "book_guard": "skip an entry when the spread >= 3 x its own prior-24h median and >= 5 bp, or depth within +-10 bp < 25% of its own prior-24h median, or (amended 2026-10-16) while ORDERBOOK_STREAM is on the book is missing, unsynced, older than 3 s, NaN or does not reach +-10 bp (orderbook.usable_book false); history uses the conservative bar_book_proxy (relative thresholds keep the meaning); same rule in backtest and live (F-pre-B)",
   "data_budget": "new data hourly by default in universe.db; 1m only for member months (+ warm-up) of 1m-decision classes"
  },
  "prerequisites": [
@@ -808,7 +808,8 @@
     "heartless fetch (no code change)"
    ],
    "content": "1m candles of member months for 1m-decision classes: TRAIN-F 206 symbols / 1,130 symbol-months and VALID-F 89 / 223 not in the long-history DB; with 1-3 months of warm-up TRAIN-F 1,488-1,949 symbol-months (about 6.1 MB each, about 9-12 GB) and VALID-F 320-485 (about 2-3 GB, needed only for discovery_f confirmations)",
-   "acceptance": "free disk >= estimate + 3 GB before downloading; otherwise maker_exec in rolling-year mode (about 2.5-3.5 GB a year); otherwise recorded as blocked_data and no substitute universe is used"
+   "acceptance": "free disk >= estimate + 3 GB before downloading; otherwise maker_exec in rolling-year mode (about 2.5-3.5 GB a year); otherwise recorded as blocked_data and no substitute universe is used",
+   "coverage_rule": "amended 2026-10-16: a topN lab / discover run is refused (blocked_data) when more than 2% of its member-months (clipped to the window and the last traded hour; covered with >= 90% of their minutes stored) or of its membership spans' 12-day 1m warm-ups are missing; --allow-partial runs are never recorded in the trial ledger and never part of a FORWARD command"
   }
  ],
  "execution_order": [
@@ -917,6 +918,15 @@
     "parallelism beyond 2 agents with disjoint worktrees"
    ],
    "seen": "no neutral/pairs/context-class results"
+  },
+  {
+   "date": "2026-10-16",
+   "what": [
+    "topN lab/discover refuse a partial member set (> 2% of member-months or warm-ups without 1m data): blocked_data",
+    "book_guard also skips entries while the stream book is missing, unsynced, stale (> 3 s), NaN or short of +-10 bp",
+    "carry_neutral spot pairing check point in time (month m-1)"
+   ],
+   "seen": "no Wave F hypothesis result; only member-month / warm-up counts, context candidate counts, timing, memory and a lab trade-list hash"
   }
  ]
 }

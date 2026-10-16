@@ -298,6 +298,11 @@ def _top_universe(settings, args, cmd: str) -> dict | None:
         print(f"note: {len(cov['missing_member_months'])} of {cov['member_months']} member-months and "
               f"{len(cov['missing_warmups'])} of {cov['warmups']} warm-ups lack 1m candles (within the "
               f"{U.MAX_MISSING_SHARE:.0%} allowance): {', '.join(gaps[:10])}", file=sys.stderr, flush=True)
+    relist = res.get("relisted_in_member_months") or {}
+    if relist:  # ROADMAP section 6 (F-L1 deferred): a position open across such a gap is held through it
+        print(f"note: {len(relist)} member(s) were relisted inside a member month (a trading stop of >= "
+              f"{U.RELIST_GAP_DAYS} days before it is not a delisting close): "
+              f"{', '.join(f'{s} {_iso(t[0])[:10]}' for s, t in sorted(relist.items()))}", file=sys.stderr, flush=True)
     lab.UNIVERSES[args.universe] = res["symbols"]
     print(f"universe {args.universe}: {len(res['research'])} symbols were top {n} in a month of the "
           f"{'window' if cmd == 'lab' else 'TRAIN window'}; {len(res['symbols'])} have stored 1m candles in it; "
@@ -331,7 +336,8 @@ def _note_top_universe(args, res: dict | None) -> None:
                                                       "member_share")}
     doc["universe_resolution"].update({k: res[k] for k in ("member_months", "member_months_total",
                                                           "skipped_member_months", "delisted", "coverage",
-                                                          "allow_partial", "partial") if k in res})
+                                                          "relisted_in_member_months", "allow_partial", "partial")
+                                               if k in res})
     # membership spans as [first ms, last ms] per evaluated symbol: the trades entered inside them are the ones free of
     # the union's look-ahead (heartless.data.universe.member_trades)
     doc["universe_resolution"]["windows"] = {s: [list(w) for w in ws] for s, ws in res["windows"].items()}

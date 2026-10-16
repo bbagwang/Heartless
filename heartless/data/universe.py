@@ -424,6 +424,18 @@ def member_coverage(candle_db, members: dict[str, list[str]], start: int, end: i
             "max_missing_share": MAX_MISSING_SHARE}
 
 
+def relisted_in_spans(relisted: dict[str, list[int]], windows: dict[str, list[tuple[int, int]]]) -> dict[str, list[int]]:
+    """Per member, the relistings (first trade after >= RELIST_GAP_DAYS without one) inside its membership spans: a
+    position open when trading stopped is held through the gap, because only the last traded hour of a symbol is a
+    delisting close (red-team F-L1, deferred in ROADMAP section 6): such members are reported, not silently mixed in."""
+    out = {}
+    for sym, spans in windows.items():
+        hits = [int(t) for t in relisted.get(sym, ()) if any(a <= t <= b for a, b in spans)]
+        if hits:
+            out[sym] = hits
+    return out
+
+
 def coverage_problem(coverage: dict | None, max_share: float = MAX_MISSING_SHARE) -> str | None:
     """Why a topN run's member set is too incomplete to stand for the rule (blocked_data), or None."""
     if not coverage:
@@ -580,6 +592,7 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int, cove
         # the last traded hour: month m ranks on m-1's volume): the lab runs no job after it (lab.evaluate)
         delisted = delisting_closes(store, res["symbols"], None, end)
         listed: dict[str, list[int]] = {}
+        relisted: dict[str, list[int]] = {}
         if coverage:
             inv = {r["symbol"]: r for r in store.load_symbol_inventory()}
             relisted = relistings(store, inv)
@@ -600,6 +613,7 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int, cove
             # members whose trading ended by the window end (delisting close, docs/ROADMAP.md 7.4)
             "member_months": months, "member_months_total": sum(months.values()),
             "skipped_member_months": sum(skipped_months.values()), "delisted": delisted,
-            **({"coverage": cov} if cov is not None else {}),
+            **({"coverage": cov, "relisted_in_member_months": relisted_in_spans(relisted, windows)}
+               if cov is not None else {}),
             "member_share": round(sum(b - a + 1 for w in windows.values() for a, b in w)
                                   / max(1, len(symbols) * (int(end) - int(start) + 1)), 4)}

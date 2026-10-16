@@ -131,3 +131,15 @@ def test_a_forward_command_never_carries_allow_partial():
         with pytest.raises(forward.ForwardError):
             forward.normalize_command(f"lab --alpha b --universe top40 {bad}")
 
+
+
+def test_relistings_inside_member_spans_are_reported():
+    spans = {"AUSDT": [(100, 200), (400, 500)], "BUSDT": [(100, 200)]}
+    relisted = {"AUSDT": [50, 150, 450, 600], "BUSDT": [250], "CUSDT": [150]}
+    assert U.relisted_in_spans(relisted, spans) == {"AUSDT": [150, 450]}
+
+
+def test_the_resolution_lists_relisted_members(dbs):
+    udb, cdb = dbs
+    res = U.resolve_for_run(udb, cdb, M("2023-12"), M("2024-02") - 1, 2, coverage=True)
+    assert res["relisted_in_member_months"] == {}  # no relisting in the fixture's member months
