@@ -150,7 +150,8 @@ def main(argv: list[str] | None = None) -> None:
 
         replay_main(settings, args)
     elif cmd == "doctor":
-        asyncio.run(_doctor(settings))
+        if not asyncio.run(_doctor(settings)):
+            sys.exit(1)  # scripts / deploy checks read the exit status, not the printed verdict
     elif cmd == "params":
         from heartless.core.store import Store
         from heartless.learning.research import ResearchManager
@@ -804,7 +805,7 @@ def _coverage(settings, args) -> None:
           f"expected minutes between each symbol's first and last candle; wrote {out}")
 
 
-async def _doctor(settings) -> None:
+async def _doctor(settings) -> bool:
     from heartless.exchange.binance_rest import BinanceError, BinanceRest
 
     ok = True
@@ -841,6 +842,9 @@ async def _doctor(settings) -> None:
             r = await httpx.AsyncClient(timeout=15).get(f"https://api.telegram.org/bot{settings.telegram_bot_token}/getMe")
             d = r.json()
             print(f"  telegram: {'OK @' + d['result']['username'] if d.get('ok') else 'FAILED ' + str(d)}")
+            ok = ok and bool(d.get("ok"))
         except Exception as e:  # noqa: BLE001
+            ok = False
             print(f"  telegram error: {e}")
     print("  result:", "OK" if ok else "PROBLEMS FOUND")
+    return ok

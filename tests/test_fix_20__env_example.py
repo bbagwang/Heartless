@@ -90,6 +90,7 @@ def test_load_settings_from_copied_example_in_cwd(tmp_path, monkeypatch):
     """`heartless doctor` / `params` / `run` all call load_settings() first, with the .env found in the cwd."""
     (tmp_path / ".env").write_text(_example_text(), encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(Settings.model_config, "env_file", ".env")  # tests/conftest.py turns the cwd .env off
     s = load_settings(HEARTLESS_DATA_DIR=str(tmp_path / "data"))
     assert s.telegram_owner_id is None
     assert (tmp_path / "data").is_dir()
