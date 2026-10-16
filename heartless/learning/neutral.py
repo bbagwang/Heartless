@@ -24,7 +24,10 @@ Account (one pool of cash C, spot and futures wallets together; transfers are fr
   is charged when entry close <= s < exit close, at the close before s (PaperAccount.apply_funding).
 * delisting: an instrument's data ends at its last traded hour; positions with a leg on it are closed at that close,
   that leg with 5x the slippage. Positions still open at the end of the window are closed at its last close, and so
-  are positions with a leg whose stored data stops earlier without a delisting ("data_end", nominal costs).
+  are positions with a leg whose stored data stops earlier without a delisting ("data_end", nominal costs). Entries
+  are never refused because a bar is an instrument's last one (that is only known when the next bar does not come):
+  a position entered at that close is closed at the next hour close, its leg on the stopped instrument at the last
+  close (with 5x the slippage for a delisting), the other legs at that next close.
 * entries only in the months the symbols are members of the topN research universe (or the given symbols); open
   positions keep their exit rules after membership ends. Decisions see only bars that closed by the decision.
 
@@ -587,6 +590,11 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
                 out[(l.symbol, l.market)] = float(ctx.series[(l.symbol, l.market)].close[k])
         return out
 
+    def data_ended(symbol: str, market: str, T: int) -> bool:
+        """The instrument's last bar closed at or before T (only the close step reads this; entries do not)."""
+        b = ctx.series[(symbol, market)]
+        return (int(T) - MS_H - int(b.t[0])) // MS_H >= ctx.last_bar.get((symbol, market), 10**12)
+
     def finish(pos: Position, T: int, reason: str, slip: dict | None = None) -> None:
         book.close_position(pos, T, closes_at(T, [pos]), reason, slip)
         pct = 100.0 / book.capital
@@ -626,11 +634,11 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
         # 3) delistings and the window end: positions on an instrument at its last bar close there. An instrument whose
         #    stored data stops before the window end without being a delisting (a market built to an earlier end, a
         #    delisting inside the inventory's 3-day slack) also closes the position at its last bar ("data_end"):
-        #    held on, its leg would keep a frozen price while the other leg moves, an unhedged PnL that never existed
+        #    held on, its leg would keep a frozen price while the other leg moves, an unhedged PnL that never existed.
+        #    A position entered at that last close (entries never know a bar is the last one) closes at the next hour
+        #    close, when the missing bar shows the instrument has stopped: that leg at its last close (closes_at)
         for pos in list(book.open.values()):
-            ends = [(l.symbol, l.market) for l in pos.legs if l.alive
-                    and ctx.idx(l.symbol, l.market, T) is not None
-                    and ctx.idx(l.symbol, l.market, T) >= ctx.last_bar.get((l.symbol, l.market), 10**12)]
+            ends = [(l.symbol, l.market) for l in pos.legs if l.alive and data_ended(l.symbol, l.market, T)]
             dl = {k: costs.delist_mult for k in ends if ctx.delisted.get(k)}
             if dl:
                 finish(pos, T, "delisting", dl)
@@ -661,10 +669,10 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
                     syms = {s.symbol for s in c.legs}
                     if not syms <= members or not all(strategy.eligible(ctx, s, T) for s in syms):
                         continue
-                    if any(ctx.idx(s.symbol, s.market, T) is None
-                           or ctx.idx(s.symbol, s.market, T) >= ctx.last_bar.get((s.symbol, s.market), -1)
-                           for s in c.legs):
-                        continue  # no bar at T, or T is the instrument's last bar: nothing trades after it
+                    if any(ctx.idx(s.symbol, s.market, T) is None for s in c.legs):
+                        continue  # no bar at T: the instrument does not trade (yet, or any more)
+                    # not refused at an instrument's last bar: that it is the last one is only known an hour later
+                    # (step 3 then closes the position as a delisting / data_end)
                     if entry_filter is not None and not all(entry_filter(s, T) for s in syms):
                         continue
                     cands.append(c)

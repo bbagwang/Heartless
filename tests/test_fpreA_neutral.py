@@ -241,10 +241,52 @@ def test_delisting_closes_the_position_with_5x_slippage_on_that_leg():
     perp_cash = -q * c.fill("perp", 100.0, False) * 5e-4 + q * (c.fill("perp", 100.0, False) - 100) \
         - q * buy5 * 5e-4 - q * (buy5 - 100)
     assert pos["legs"][1]["pnl_pct"] == pytest.approx(perp_cash / 10_000 * 100, rel=1e-9)
-    # nothing is entered on an instrument's last bar
-    ctx2 = _ctx(n)
-    ctx2.last_bar[("AUSDT", "perp")] = 8
-    assert _run(Scripted(enter=_close(8), leave=_close(15)), ctx2).positions == []
+
+
+def test_an_entry_on_an_instruments_last_bar_is_taken_and_closed_when_the_next_bar_is_missing():
+    """Regression (2026-10-16): the frame refused entries on an instrument's last traded bar, which only the bar that
+    never comes can tell (future knowledge; ROADMAP 7.4: entries are never blocked in advance). The entry at that close
+    is now the same as on an instrument that trades on; the next hour close finds the bar missing and closes the
+    position there: the stopped leg at its last close (5x the slippage for a delisting), the other leg at that next
+    close. A position opened before the last bar still closes at the last bar itself."""
+    n = 20
+    px = 100.0 + np.arange(n)  # a distinct close per bar shows which close each leg used
+
+    def ctx_(last=None, delisted=False):
+        ctx = _ctx(n, perp=px, spot=px)
+        if last is not None:
+            ctx.last_bar[("AUSDT", "perp")] = last
+            ctx.delisted[("AUSDT", "perp")] = delisted
+        return ctx
+
+    # the decision at the close of bar 8 does not depend on whether bar 8 is the perp's last one
+    live = _run(Scripted(enter=_close(8), leave=_close(12)), ctx_())
+    dead = _run(Scripted(enter=_close(8), leave=_close(12)), ctx_(8, True))
+    assert len(live.positions) == len(dead.positions) == 1
+    assert live.positions[0]["opened"] == dead.positions[0]["opened"] == N._iso(_close(8))
+    assert live.positions[0]["reason"] == "rule" and live.positions[0]["closed"] == N._iso(_close(12))
+    pos = dead.positions[0]
+    assert pos["reason"] == "delisting" and pos["closed"] == N._iso(_close(9))
+    c = N.LegCosts.of()
+    # perp short sold and bought back at bar 8's close (its last), the buy with 5x the slippage
+    sell, buy5 = c.fill("perp", px[8], False), c.fill("perp", px[8], True, 5.0)
+    q = 1000.0 / sell
+    perp_cash = -q * sell * 5e-4 + q * (sell - px[8]) - q * buy5 * 5e-4 - q * (buy5 - px[8])
+    assert pos["legs"][1]["pnl_pct"] == pytest.approx(perp_cash / 10_000 * 100, rel=1e-9)
+    # spot long bought at bar 8's close and sold at bar 9's (the hour the stop shows), nominal costs
+    buy, sold = c.fill("spot", px[8], True), c.fill("spot", px[9], False)
+    qs = 1000.0 / buy
+    spot_cash = -qs * buy * 10e-4 - qs * buy + qs * sold - qs * sold * 10e-4
+    assert pos["legs"][0]["pnl_pct"] == pytest.approx(spot_cash / 10_000 * 100, rel=1e-9)
+    assert sum(dead.daily.values()) == pytest.approx(perp_cash + spot_cash, rel=1e-9)
+    # a position opened before the last bar closes at the last bar itself, as before
+    early = _run(Scripted(enter=_close(2), leave=_close(12)), ctx_(8, True)).positions
+    assert [(p["reason"], p["closed"]) for p in early] == [("delisting", N._iso(_close(8)))]
+    # stored data that just stops (no delisting): the same timing at nominal costs
+    de = _run(Scripted(enter=_close(8), leave=_close(12)), ctx_(8, False)).positions
+    assert [(p["reason"], p["closed"]) for p in de] == [("data_end", N._iso(_close(9)))]
+    # after the last bar there is no bar at T: nothing is entered
+    assert _run(Scripted(enter=_close(9), leave=_close(12)), ctx_(8, True)).positions == []
 
 
 def test_a_leg_whose_data_ends_early_closes_the_position_there():
@@ -262,7 +304,7 @@ def test_a_leg_whose_data_ends_early_closes_the_position_there():
     assert pos["reason"] == "data_end" and pos["closed"] == N._iso(_close(39))
     flat = _run(Scripted(enter=_close(10), leave=_close(39)), _ctx(n=96))  # the same round trip at constant prices
     assert r.stats()["total_pct"] == pytest.approx(flat.stats()["total_pct"], abs=1e-9)
-    # the spot market cannot be entered on its last bar, so nothing reopens after it
+    # the scripted strategy enters once: one position
     assert len(r.positions) == 1
     # visible in the statistics and the report (a lagging market build is not a silently flat tail)
     assert r.stats()["data_end_closes"] == 1 and "data_end=1" in r.report()

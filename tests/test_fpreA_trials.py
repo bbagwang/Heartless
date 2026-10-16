@@ -22,19 +22,27 @@ def ledger(tmp_path, monkeypatch):
 
 
 def test_every_p2_hash_is_reproduced_with_the_exec_default():
-    """The committed P2 ledger (135 lines, all taker): hashing each stored configuration gives its stored hash, also
-    with an explicit exec=taker; a maker variant of any of them is a different configuration."""
+    """The committed ledger: every stored configuration hashes to its stored hash. The P2-era lines (135, recorded
+    before the field existed, so without a wave_f label) carry no exec; a Wave F line may carry one (the neutral frame
+    writes exec="taker"). A taker configuration keeps its hash with an explicit exec=taker, and a maker variant of it
+    is a different configuration."""
     lines = [json.loads(x) for x in LEDGER.read_text().splitlines() if x.strip()]
-    assert len(lines) >= 135
+    p2 = [e for e in lines if "wave_f" not in e]
+    assert len(p2) >= 135
     for e in lines:
         cfg = e["config"]
-        assert "exec" not in cfg
+        if "wave_f" not in e:
+            assert "exec" not in cfg
         assert trials.config_hash(cfg) == e["config_hash"]
+        mode = trials.exec_of(cfg)
+        if any(m != "taker" for m in (mode.values() if isinstance(mode, dict) else [mode])):
+            assert trials.config_hash({**cfg, "exec": "taker"}) != e["config_hash"]
+            continue
         assert trials.config_hash({**cfg, "exec": "taker"}) == e["config_hash"]
         assert trials.config_hash({**cfg, "exec": {"x": "taker"}}) == e["config_hash"]
         assert trials.config_hash({**cfg, "exec": "maker_m1"}) != e["config_hash"]
-    # the families' N are those of ROADMAP 7.7.2 (n_for_gate), unchanged by the new code
-    s = trials.summary(lines)
+    # the P2 families' N are those of ROADMAP 7.7.2 (n_for_gate), unchanged by the new code
+    s = trials.summary(p2)
     assert {f: s[f]["n_tests"] for f in ("ts_trend", "positioning_flow", "vol_breakout", "discovery_daily",
                                          "xs_rank", "funding_carry")} == {
         "ts_trend": 27, "positioning_flow": 21, "vol_breakout": 23, "discovery_daily": 105068, "xs_rank": 20,
