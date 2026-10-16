@@ -21,7 +21,7 @@ from heartless.data.context import WARMUP_HOURS as CONTEXT_WARMUP_HOURS
 from heartless.data.context import MarketContextTracker, hour_close, hour_of
 from heartless.data.extras import MetricsSeries
 from heartless.data.features import LIVE_WINDOW, MarketView
-from heartless.data.universe import live_selection, select_universe
+from heartless.data.universe import eligibility, live_selection, select_universe
 from heartless.exchange.binance_rest import BinanceError, BinanceRest
 from heartless.exchange.binance_ws import MarketStream
 from heartless.exchange.live import LiveAccount
@@ -182,6 +182,7 @@ class Heartless:
         self.startup_timings: dict[str, float] = {}  # startup check -> milliseconds
         self.books = None  # exchange.orderbook.OrderBooks (ORDERBOOK_STREAM); the replay installs its 1m-bar proxy
         self.book_stream = None  # exchange.binance_ws.BookStream feeding it
+        self._book_warned_ms = -10**15  # last WARNING about a failing book read (rate limit)
         if settings.orderbook_stream:
             from heartless.exchange.binance_ws import BookStream
             from heartless.exchange.orderbook import OrderBooks
@@ -418,6 +419,14 @@ class Heartless:
                 await self.archive.close()
             except Exception:  # noqa: BLE001
                 pass
+        # F7: the depth streams and the diff books' snapshot tasks before the REST client they fetch through
+        # (red-team F-L7: they kept retrying against the closed client until the loop was torn down)
+        for closer in (getattr(self.book_stream, "stop", None), getattr(self.books, "close", None)):
+            if closer is not None:
+                try:
+                    await closer()
+                except Exception:  # noqa: BLE001
+                    log.debug("order book shutdown failed", exc_info=True)
         await self.rest.close()
         if self._ctx_fill_task is not None:
             self._ctx_fill_task.cancel()
@@ -495,20 +504,34 @@ class Heartless:
 
     def _keep_members(self, new: list[str], tickers: list[dict]) -> None:
         """Universe hysteresis (UNIVERSE_KEEP_FRACTION): current members that fell out of `new` only because their 24h
-        volume dipped a little under the entry threshold are kept, best volume first, within the universe size."""
+        volume dipped a little under the entry threshold are kept, best volume first, within the universe size.
+
+        A kept member must pass every other live rule (eligibility with the lowered volume floor): before the red-team
+        fix F-M7 any TRADING member above the floor came back, a tick- or age-rejected one included, so a long-running
+        process traded symbols a restarted one (no hysteresis at start) rejects. The spread rule needs book tickers,
+        which the selection does not fetch yet (UNIVERSE.md section 10)."""
         vol: dict[str, float] = {}
+        last: dict[str, float] = {}
         for t in tickers:
             try:
                 vol[t["symbol"]] = float(t.get("quoteVolume", 0.0) or 0.0)
+                last[t["symbol"]] = float(t.get("lastPrice", 0.0) or 0.0)
             except (KeyError, TypeError, ValueError):
                 continue
         keep_min = self.s.universe_min_quote_volume * UNIVERSE_KEEP_FRACTION
+        now = now_ms()
         for sym in sorted((s for s in self.universe if s not in new), key=lambda s: -vol.get(s, 0.0)):
             info = self.symbols.get(sym)
             if len(new) >= self.s.universe_size:
                 break
-            if info is not None and info.status == "TRADING" and vol.get(sym, 0.0) >= keep_min:
+            if info is None:
+                continue
+            why = eligibility(info, vol.get(sym, 0.0), now, keep_min, self.s.universe_min_age_days,
+                              last.get(sym, 0.0), self.s.universe_max_tick_bps, None, self.s.universe_max_spread_bps)
+            if why is None:
                 new.append(sym)
+            else:
+                log.info("universe hysteresis does not keep %s: %s", sym, why)
 
     async def _backfill(self, symbols: list[str]) -> set[str]:
         """Fetch the missing 1m history (and funding) into the store. Returns the symbols whose fetch failed; they
@@ -1401,7 +1424,13 @@ class Heartless:
         try:
             return self.books.features(sym, now)
         except Exception:  # noqa: BLE001 - a book problem must never stop a decision
-            log.debug("order book features failed for %s", sym, exc_info=True)
+            # visible, but at most once a minute: a broken book would otherwise log on every decision of every symbol
+            # (red-team F-M6: at DEBUG a book that never works went unnoticed)
+            t = now_ms()
+            if t - self._book_warned_ms >= 60_000:
+                self._book_warned_ms = t
+                log.warning("order book features failed for %s (EMPTY_BOOK served; further failures within a minute "
+                            "are not logged)", sym, exc_info=True)
             return EMPTY_BOOK
 
     def _f7_book_symbols(self) -> None:

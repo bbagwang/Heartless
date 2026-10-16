@@ -14,8 +14,10 @@ import pytest
 from heartless.data.candles import CandleArrays
 from heartless.data.features import FeatureFrame
 from heartless.exchange.binance_ws import BookStream
-from heartless.exchange.orderbook import (EMPTY_BOOK, PROXY_DEPTH_FRAC, PROXY_SPREAD_FRAC, BookFeatures, LocalBook,
-                                          OrderBooks, bar_book_proxy, book_of, features_from_levels, proxy_from_frame)
+from heartless.exchange import orderbook
+from heartless.exchange.orderbook import (EMPTY_BOOK, PROXY_DEPTH_FRAC, PROXY_SPREAD_FRAC, SNAPSHOT_LIMIT, BookFeatures,
+                                          LocalBook, OrderBooks, bar_book_proxy, book_of, features_from_levels,
+                                          proxy_from_frame)
 
 SYM = "BTCUSDT"
 
@@ -140,7 +142,8 @@ def test_features_by_hand():
     assert math.isnan(crossed.spread_bps) and crossed.source == "stream"
     assert math.isnan(EMPTY_BOOK.spread_bps) and EMPTY_BOOK.source == "none"
     assert set(EMPTY_BOOK.as_dict()) == {"spread_bps", "imbalance", "depth_bid_k", "depth_ask_k", "staleness_ms", "mid",
-                                         "k_bps", "levels", "source"}
+                                         "k_bps", "levels", "source", "covered_bps"}
+    assert f.covered_bps == pytest.approx((101.0 - mid) / mid * 1e4)  # the thinner side: asks end at 101.0
 
 
 def test_the_manager_fetches_snapshots_spaced_and_resyncs_after_gaps_and_reconnects():
@@ -159,11 +162,11 @@ def test_the_manager_fetches_snapshots_spaced_and_resyncs_after_gaps_and_reconne
         await books.on_message(ev(102, 104, 101))
         await asyncio.sleep(0.01)
         b = books.books[SYM]
-        assert b.synced and b.last_u == 104 and calls == [(SYM, 100)]
+        assert b.synced and b.last_u == 104 and calls == [(SYM, SNAPSHOT_LIMIT)] and SNAPSHOT_LIMIT == 1000
         f = books.features(SYM)
         assert f.source == "stream" and f.spread_bps > 0
-        await books.on_message(ev(200, 206, 199))  # a gap: resync with a second snapshot
-        await asyncio.sleep(0.6)
+        await books.on_message(ev(200, 206, 199))  # a gap: resync with a second snapshot (spaced by the gate)
+        await asyncio.sleep(0.6 + orderbook.SNAPSHOT_MIN_GAP_S)
         assert len(calls) == 2 and b.synced and b.last_u == 206
         books.on_reset([SYM])  # the depth connection dropped
         assert not b.synced and books.features(SYM).source == "stream" and math.isnan(books.features(SYM).spread_bps)
@@ -182,8 +185,10 @@ def test_partial_manager_needs_no_snapshot():
         await books.on_message(ev(1, 2, 1, b=BIDS, a=ASKS))
         f = books.features(SYM)
         assert f.source == "stream" and f.k_bps == 5.0 and f.depth_bid_k == pytest.approx(100.0)  # 99.9 is 15 bps out
-        books.on_reset([SYM])  # partial books only age
-        assert books.books[SYM].synced
+        books.on_reset([SYM])  # the depth connection dropped: the last figures are no longer the market (F-M6)
+        assert not books.books[SYM].synced and math.isnan(books.features(SYM).spread_bps)
+        await books.on_message(ev(3, 4, 3, b=BIDS, a=ASKS))  # the next message brings it back
+        assert books.books[SYM].synced and books.features(SYM).depth_bid_k == pytest.approx(100.0)
 
     asyncio.run(main())
     with pytest.raises(ValueError):

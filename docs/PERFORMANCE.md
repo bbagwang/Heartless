@@ -128,17 +128,23 @@ python -m heartless.util.perf bench --db data/research/heartless.db --symbols BT
   - 구독: `<symbol>@depth20@100ms`
   - 메시지마다 상위 20호가로 책을 교체합니다. REST 스냅샷이 필요 없습니다.
   - 20번째 호가 밖의 깊이는 보이지 않습니다(`levels`가 몇 호가를 봤는지 알려 줍니다).
+  - **틱이 촘촘한 종목에서는 ±10bp 깊이를 잴 수 없습니다.** BTC(틱 0.1 USD, 약 6만 USD)는 20호가가 한쪽 0.3bp 안팎입니다. 이때 `depth_*`·`imbalance`는 NaN입니다(아래 `covered_bps`). ±k bp 깊이가 필요하면 diff 모드를 씁니다.
 - **diff**
   - 구독: `<symbol>@depth@100ms`
   - Binance USD-M 절차를 따릅니다.
     1. 스트림을 버퍼에 쌓습니다.
-    2. REST 스냅샷(`/fapi/v1/depth`, 100호가, 가중치 5)을 받습니다.
+    2. REST 스냅샷(`/fapi/v1/depth`, 1,000호가, 가중치 20)을 받습니다. 100호가(가중치 5)는 BTC에서 2bp도 안 되어 스냅샷 끝과 k 사이가 비었습니다(2026-10-16 레드팀 F-M5).
     3. `u < lastUpdateId` 이벤트는 버립니다.
     4. 첫 이벤트는 `U ≤ lastUpdateId ≤ u`이거나 `pu == lastUpdateId`여야 합니다.
     5. 이후는 `pu == 직전 u` 사슬을 확인합니다.
     6. 이미 반영한 이벤트(중복·늦게 도착)는 무시합니다.
     7. 사슬이 끊기거나(유실·순서 뒤바뀜) 재접속하면 책을 버리고 스냅샷부터 다시 맞춥니다.
-  - 재접속 때 모든 종목이 한꺼번에 스냅샷을 요청하지 않도록 0.25초 간격으로 보냅니다.
+  - 재접속 때 모든 종목이 한꺼번에 스냅샷을 요청하지 않도록 1초 간격으로 보냅니다. 가중치 20 × 초당 1회 = 분당 1,200으로, 모든 책이 계속 다시 맞추더라도 IP 가중치 한도(분당 2,400)의 절반입니다(0.25초 간격이면 분당 4,800까지 가능했음). 16종목 재접속은 16초에 다시 맞춥니다.
+  - 스냅샷을 기다리는 동안 버퍼는 600 이벤트(100ms 기준 60초)까지만 둡니다. 스냅샷은 자기 요청보다 오래된 이벤트가 필요 없고, 이전 한도 5,000은 스냅샷이 계속 실패하면 종목당 약 46MB를 잡았습니다(F-L6).
+- **연결이 끊기면 두 모드 모두 그 연결의 책을 동기화 해제합니다**(F-M6). 이전에는 partial 책이 동기화 상태로 남아 마지막 스프레드·깊이를 계속 내놓고 `staleness_ms`만 커졌습니다. 다음 메시지(partial) 또는 새 스냅샷(diff)이 올 때까지 값은 NaN입니다.
+- **갱신이 3초(`MAX_BOOK_AGE_MS`) 넘게 없으면** `OrderBooks.features`가 NaN 값과 source `"stale"`을 돌려줍니다.
+- 앱의 책 읽기가 예외를 내면 `EMPTY_BOOK`을 주고 WARNING을 남깁니다(1분에 한 번). 이전에는 DEBUG라 고장 난 책이 보이지 않았습니다.
+- `stop()`은 REST 클라이언트를 닫기 전에 깊이 스트림과 책(diff 스냅샷 작업)을 닫습니다(F-L7).
 - 깊이 스트림은 1분봉 스트림과 다른 연결(연결당 50종목)을 씁니다. 1분봉 연결의 URL과 메시지량은 그대로이고, 깊이 연결이 끊겨도 봉은 끊기지 않습니다.
 - 처리 비용(이 머신, 표준 json):
   - partial 20호가 메시지 해석·반영 13µs
@@ -156,9 +162,11 @@ python -m heartless.util.perf bench --db data/research/heartless.db --symbols BT
 | `imbalance` | (매수 깊이 − 매도 깊이) / 합, −1 ~ 1 |
 | `depth_bid_k`, `depth_ask_k` | 중간가에서 k bps 안의 호가 명목 금액(USDT). k = `ORDERBOOK_DEPTH_BPS` |
 | `staleness_ms` | 책이 마지막으로 갱신된 뒤 지난 시간. 읽는 순간의 로컬 시계 − 갱신이 도착한 로컬 시각입니다(결정하는 봉의 마감 시각과 무관) |
-| `mid`, `k_bps`, `levels`, `source` | 보조 정보. `source`는 `"stream"` / `"proxy"` / `"none"` |
+| `covered_bps` | 책의 호가가 중간가에서 얼마나 멀리까지 닿는지(얇은 쪽 기준, bps). **k보다 작으면 `depth_*`·`imbalance`는 NaN**입니다. 닿지 않는 범위의 깊이는 가진 호가의 합이 아니라 모르는 값입니다 |
+| `mid`, `k_bps`, `levels`, `source` | 보조 정보. `source`는 `"stream"` / `"proxy"` / `"stale"` / `"none"` |
 
 - 책이 없으면 `EMPTY_BOOK`(값은 NaN, source `"none"`)입니다.
+- **`usable_book(ctx.book)`**: 책 규칙(등록된 `book_guard`)이 쓸 수 있는 책인지 판정합니다. 동기화되고, 3초 안에 갱신되었고, 양쪽 모두 k까지 닿은 스트림 책(값이 모두 유한), 또는 모형 대용치(`proxy`, `covered_bps` = k)만 참입니다. NaN 값끼리 비교하면 항상 거짓이라 가드가 아무것도 거르지 못하므로, 가드는 이 함수가 거짓이면 진입을 건너뛰어야 합니다(ROADMAP 6절 2026-10-16).
 - 꺼져 있을 때도 운영 앱은 `ctx.book = EMPTY_BOOK`을 넣습니다.
 - `Context.book`은 필드입니다(기본 `EMPTY_BOOK`). `book_of(ctx)`는 `book`이 없는 컨텍스트(테스트의 대역 등)에서도 `EMPTY_BOOK`을 돌려줍니다.
 

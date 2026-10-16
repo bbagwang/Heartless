@@ -16,6 +16,15 @@ Features (`BookFeatures`, all from the same book at one instant): spread in bps 
 within k bps of the mid on each side (k = ORDERBOOK_DEPTH_BPS), the imbalance of those two depths, and the book's age.
 A symbol without a usable book reads `EMPTY_BOOK` (NaN figures, source "none").
 
+What the figures can and cannot say (red-team F-M5 / F-M6, 2026-10-16):
+* `covered_bps` is how far from the mid the book's levels reach on its thinner side. When it is below k the depth and
+  imbalance are NaN: a sum over levels that stop short of k is not the depth within k. The partial stream's 20 levels
+  span a fraction of a bp on fine-tick symbols (BTC: 20 ticks of 0.1 USD), so partial mode cannot measure +-10 bp depth
+  there; diff mode can once its snapshot (SNAPSHOT_LIMIT levels) reaches k.
+* a book whose depth connection dropped is unsynced in both modes (its last figures are no longer the market), and
+  one without an update for more than MAX_BOOK_AGE_MS reads NaN with source "stale". `usable_book()` is the check a
+  book guard applies: anything but a fresh, synced, fully covered stream book (or the modelled proxy) is no book.
+
 History has no order book. `bar_book_proxy()` derives a deliberately conservative stand-in from closed 1m bars (wider
 spread, thinner depth, no imbalance; docs/PERFORMANCE.md), used by the replay (`heartless/replay/book.py`) and meant for
 the backtester, so an alpha sees the same field names everywhere and a rule that needs a tight, deep book is not
@@ -34,9 +43,17 @@ from heartless.util.timeutil import now_ms
 log = logging.getLogger(__name__)
 
 NAN = float("nan")
-SNAPSHOT_LIMIT = 100  # levels per side of a resync snapshot (request weight 5; 1000 levels cost 20)
-SNAPSHOT_MIN_GAP_S = 0.25  # at most ~4 snapshot requests a second across symbols (a reconnect resyncs all of them)
-BUFFER_MAX = 5_000  # diff events kept while waiting for a snapshot
+# levels per side of a diff-mode resync snapshot: 1000 (request weight 20) so the book reaches k = 10 bp on fine-tick
+# symbols (100 levels of BTC's 0.1 USD tick cover under 2 bp, leaving a hole between the snapshot's edge and k)
+SNAPSHOT_LIMIT = 1000
+# at most one snapshot a second across symbols: 20 weight/s = 1,200/min even if every book kept resyncing, half of the
+# 2,400/min IP request-weight budget (a 0.25 s gap with weight 20 would have allowed 4,800/min); a reconnect of 16
+# symbols resyncs in 16 s
+SNAPSHOT_MIN_GAP_S = 1.0
+# diff events kept per unsynced book while waiting for a snapshot: 60 s at 100 ms. A snapshot never needs events older
+# than its own fetch, and 5,000 parsed events held ~46 MB per symbol while snapshots kept failing (red-team F-L6)
+BUFFER_MAX = 600
+MAX_BOOK_AGE_MS = 3_000  # a stream book without an update for longer reads as stale (NaN figures, source "stale")
 PRUNE_LEVELS = 4_000  # a side holding more levels drops those further than PRUNE_FRAC from the mid
 PRUNE_FRAC = 0.05
 
@@ -51,7 +68,8 @@ class BookFeatures:
     mid: float = NAN
     k_bps: float = NAN
     levels: int = 0  # levels per side the figures could see (partial stream: at most 20)
-    source: str = "none"  # "stream", "proxy" or "none"
+    source: str = "none"  # "stream", "proxy", "stale" or "none"
+    covered_bps: float = NAN  # how far from the mid the levels reach on the thinner side; depth / imbalance need >= k
 
     def as_dict(self) -> dict[str, Any]:
         return {k: getattr(self, k) for k in self.__slots__}
@@ -74,13 +92,30 @@ def features_from_levels(bids: dict[float, float], asks: dict[float, float], k_b
     if not (bb > 0 and ba > bb):  # crossed or locked: a transient state of an out-of-sync book, not a price
         return BookFeatures(staleness_ms=age_ms, k_bps=k_bps, source=source)
     mid = (bb + ba) / 2
+    covered = min(mid - min(bids), max(asks) - mid) / mid * 1e4
+    spread = (ba - bb) / mid * 1e4
+    if covered < k_bps:  # the levels stop short of k: the band's depth is unknown, not the sum of what is held
+        return BookFeatures(spread_bps=spread, staleness_ms=age_ms, mid=mid, k_bps=k_bps,
+                            levels=min(len(bids), len(asks)), source=source, covered_bps=covered)
     lo, hi = mid * (1 - k_bps / 1e4), mid * (1 + k_bps / 1e4)
     db = sum(p * q for p, q in bids.items() if p >= lo)
     da = sum(p * q for p, q in asks.items() if p <= hi)
     tot = db + da
-    return BookFeatures(spread_bps=(ba - bb) / mid * 1e4, imbalance=(db - da) / tot if tot > 0 else 0.0,
+    return BookFeatures(spread_bps=spread, imbalance=(db - da) / tot if tot > 0 else 0.0,
                         depth_bid_k=db, depth_ask_k=da, staleness_ms=age_ms, mid=mid, k_bps=k_bps,
-                        levels=min(len(bids), len(asks)), source=source)
+                        levels=min(len(bids), len(asks)), source=source, covered_bps=covered)
+
+
+def usable_book(f: BookFeatures, max_age_ms: float = MAX_BOOK_AGE_MS) -> bool:
+    """Whether a book can back a book rule (the registered book_guard): a stream book that is synced, fresh (staleness
+    <= max_age_ms) and reaches k on both sides (finite depth), or the modelled 1m-bar proxy. A missing, unsynced,
+    stale or uncovered book is not one: a guard comparing NaN figures would never skip anything."""
+    if f.source == "proxy":
+        return f.depth_bid_k == f.depth_bid_k and f.spread_bps == f.spread_bps
+    if f.source != "stream":
+        return False
+    figs = (f.spread_bps, f.depth_bid_k, f.depth_ask_k, f.imbalance, f.staleness_ms)
+    return all(x == x for x in figs) and f.staleness_ms <= max_age_ms
 
 
 def _levels(rows) -> dict[float, float]:
@@ -234,11 +269,12 @@ class OrderBooks:
     """The local books of the traded symbols, fed by BookStream messages (heartless/exchange/binance_ws.py)."""
 
     def __init__(self, mode: str = "partial", depth_bps: float = 10.0, fetch_snapshot: SnapshotFetch | None = None,
-                 snapshot_limit: int = SNAPSHOT_LIMIT):
+                 snapshot_limit: int = SNAPSHOT_LIMIT, max_age_ms: float = MAX_BOOK_AGE_MS):
         if mode not in ("partial", "diff"):
             raise ValueError(f"order book mode {mode!r}: expected 'partial' or 'diff'")
         self.mode = mode
         self.depth_bps = float(depth_bps)
+        self.max_age_ms = float(max_age_ms)
         self.fetch_snapshot = fetch_snapshot
         self.snapshot_limit = snapshot_limit
         self.books: dict[str, LocalBook] = {}
@@ -259,9 +295,9 @@ class OrderBooks:
             self.books.setdefault(s, LocalBook(s, self.mode))
 
     def on_reset(self, symbols: list[str] | None = None) -> None:
-        """A depth connection dropped: diff books are out of sequence from here on, partial books just age."""
-        if self.mode != "diff":
-            return
+        """A depth connection dropped: every book of it is unsynced until its stream delivers again (diff: from a new
+        snapshot; partial: the next message). A partial book used to stay synced and keep serving its last spread and
+        depth while only its age grew (red-team F-M6)."""
         for s in symbols if symbols is not None else list(self.books):
             b = self.books.get(s)
             if b is not None:
@@ -324,7 +360,11 @@ class OrderBooks:
         book = self.books.get(symbol)
         if book is None:
             return EMPTY_BOOK
-        return book.features(now_ms(), self.depth_bps)
+        t = now_ms()
+        if book.synced and t - book.recv_ms > self.max_age_ms:  # no update for too long: not the market any more
+            return BookFeatures(staleness_ms=float(t - book.recv_ms), k_bps=self.depth_bps,
+                                levels=min(len(book.bids), len(book.asks)), source="stale")
+        return book.features(t, self.depth_bps)
 
     def status(self) -> dict[str, Any]:
         synced = sum(1 for b in self.books.values() if b.synced)
@@ -368,7 +408,7 @@ def bar_book_proxy(high, low, close, quote_volume, close_time: int, now: int, k_
     depth = PROXY_DEPTH_FRAC * qv_med * scale
     return BookFeatures(spread_bps=spread, imbalance=0.0, depth_bid_k=depth, depth_ask_k=depth,
                         staleness_ms=float(max(now - close_time, 0)), mid=mid, k_bps=k_bps, levels=0,
-                        source="proxy")
+                        source="proxy", covered_bps=k_bps)  # the modelled depth is defined within k
 
 
 def proxy_from_frame(frame, now: int, k_bps: float, tick_size: float = 0.0) -> BookFeatures:

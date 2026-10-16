@@ -276,9 +276,9 @@ def test_context_carries_the_book_features():
     on.symbols = dict(off.symbols)
     on.books.set_symbols(["BTCUSDT"])
     asyncio.run(on.books.on_message({"e": "depthUpdate", "s": "BTCUSDT", "u": 3, "U": 1, "pu": 0,
-                                     "b": [["100.0", "2"]], "a": [["100.1", "1"]]}))
-    b = on._context("BTCUSDT", 1_000).book
-    assert b.source == "stream" and b.k_bps == 25 and b.depth_bid_k == pytest.approx(200.0)
+                                     "b": [["100.0", "2"], ["99.0", "1"]], "a": [["100.1", "1"], ["101.0", "1"]]}))
+    b = on._context("BTCUSDT", 1_000).book  # levels reach past 25 bp on both sides: the depth within k is known
+    assert b.source == "stream" and b.k_bps == 25 and b.depth_bid_k == pytest.approx(200.0) and b.covered_bps > 25
     assert "orderbook" in on._f7_health() and "latency" in on._f7_health() and "features" in off._f7_health()
     assert off._f7_health() is off._f7_health()  # refreshed at most once a minute
     for a in (off, on):
