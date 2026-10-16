@@ -53,7 +53,7 @@ ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코�
 |---|---|---|
 | 백테스터 (`learning/backtester.py`) | `Backtester(shock="auto")`: SHOCK_LAYER 가 켜져 있으면 불러온 이력 전체에 대해 한 번 계산해 모든 실행에 씁니다. S0 는 실행 자신의 BTCUSDT 1분봉, 없으면 SHOCK_CANDLE_DB 의 BTC. S1~S3 는 UNIVERSE_DB | 완료 |
 | lab (`learning/lab.py`) | 작업자마다 Backtester 가 위 규칙으로 일정을 만듭니다(프로세스 안 캐시). SHOCK_SCHEDULE 을 주면 그 파일을 읽고, 없으면 써 둡니다 | 동작함. 부모 프로세스에서 한 번 만드는 연결은 6절 |
-| 시간 단위 평가기 (`learning/hourly.py`) | `heartless hourly` 가 `EntryFilter.for_alpha(alpha, schedule)` 를 `entry_filter` 로 넘깁니다. 결과 JSON 과 원장 줄의 `shock` 에 발동 수와 막힌 결정 수. 층은 평가기의 정책이라(`EntryFilter.evaluator_policy`) 구성 해시에 넣지 않습니다. lab 해시도 층을 담지 않으므로, 한 구성의 TRAIN·스트레스·VALID·FORWARD 실행이 층 도입 전후로 같은 해시입니다. | 완료 |
+| 시간 단위 평가기 (`learning/hourly.py`) | `heartless hourly` 가 `EntryFilter.for_alpha(alpha, schedule)` 를 `entry_filter` 로 넘깁니다. 결과 JSON 과 원장 줄의 `shock` 에 발동 수와 막힌 결정 수. 층은 평가기의 정책이라(`EntryFilter.evaluator_policy`) 구성 해시에 넣지 않습니다. lab 해시도 층을 담지 않으므로, 한 구성의 TRAIN·스트레스·VALID·FORWARD 실행이 층 도입 전후로 같은 해시입니다. 그래서 `--tag` 실행(원장 기록)은 `SHOCK_LAYER` 가 켜져 있어야 하고, 꺼져 있으면 평가 전에 거부합니다(`shock_exempt` 알파는 예외, 검토에서 추가). 규칙이 평가되지 못하면(BTC 데이터 없음) 경고하고 `shock.missing` 에 남깁니다 | 완료 |
 | 두 다리 중립 평가기 (`learning/neutral.py`) | `EntryFilter` 는 스칼라 시각도 받습니다(`entry_filter(symbol, T) -> bool`) | 연결은 6절 |
 | 킬 스위치·리서치 창 (`learning/research.py`) | `AlphaKillSwitch.evaluate` 의 경보선은 `shock_kill_switch_h(app, now, KILL_SWITCH_H)`, 리서치 사이클 창은 `ResearchManager.lookback_days(now)`. 둘 다 앱의 `app.shock`(운영 감지기)에게 묻고, 없거나 SHOCK_LAYER 가 꺼져 있으면 설정값 그대로 | 완료. 앱이 `app.shock` 을 붙이면 작동(5절) |
 | 운영 (`app.py`) | `ShockDetector` 를 `app.shock` 과 모든 엔진의 `TradingEngine.shock` 으로 | F6, 5절 |

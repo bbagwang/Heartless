@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from heartless.config import Settings
 from heartless.learning import hourly as Hr
@@ -39,19 +40,47 @@ def test_hourly_cli_applies_the_layer(tmp_path, capsys):
     args = SimpleNamespace(period=None, start="2024-01-02", end="2024-01-09", universe=None, symbols="AUSDT",
                            equivalence=False, alpha="heartless.learning.hourly:ReferenceAlpha", set=["hold_h=6"],
                            stress=False, tag=None, trades_out=None, out=str(out), workers=1, argv=["heartless", "hourly"])
-    hashes = {}
+    from heartless.learning import trials
+
+    configs = {}
     for on in (True, False):
         SH._CACHE.clear()
         s = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(tmp_path), UNIVERSE_DB=db, SHOCK_LAYER=on)
-        Hr.main_cli(s, SimpleNamespace(**{**vars(args), "tag": "fpreb_test"}))
+        Hr.main_cli(s, SimpleNamespace(**{**vars(args), "tag": "fpreb_test" if on else None}))
         doc = json.loads(out.read_text())
-        hashes[on] = doc["trial"]["config_hash"]
+        configs[on] = doc["config"]
         assert "entry_filter" not in doc["config"]
         if on:
             # no BTC anywhere in these databases: nothing can be evaluated, nothing is blocked, the run says so
             assert doc["shock"]["missing"] == ["S0", "S1", "S2", "S3"] and doc["shock"]["blocked_decisions"] == 0
             assert doc["trial"]["shock"] == doc["shock"]  # the ledger line records the layer
-            assert "shock layer: 0 decision(s) blocked" in capsys.readouterr().err
+            err = capsys.readouterr().err
+            assert "shock layer: 0 decision(s) blocked" in err and "S0, S1, S2, S3 not evaluated" in err
+            assert doc["trial"]["config_hash"] == trials.config_hash(doc["config"])
         else:
-            assert doc["shock"] is None and doc["trial"]["shock"] is None
-    assert hashes[True] == hashes[False]  # one configuration, with or without the layer
+            assert doc["shock"] is None and "trial" not in doc
+    assert configs[True] == configs[False]  # one configuration, with or without the layer
+    # ... so a trial runs with the layer: SHOCK_LAYER=false with --tag is refused before anything is evaluated or recorded
+    n_lines = trials.family_tests("fpreb_test")
+    s = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(tmp_path), UNIVERSE_DB=db, SHOCK_LAYER=False)
+    with pytest.raises(SystemExit) as e:
+        Hr.main_cli(s, SimpleNamespace(**{**vars(args), "tag": "fpreb_test", "out": None}))
+    assert e.value.code == 2 and "SHOCK_LAYER=false runs only without --tag" in capsys.readouterr().err
+    assert trials.family_tests("fpreb_test") == n_lines
+
+
+def test_an_exempt_alpha_may_record_without_the_layer(tmp_path, capsys):
+    """A shock_exempt alpha takes no entry filter either way, so its trial does not depend on SHOCK_LAYER."""
+    db = make_db(tmp_path / "u.db", {"AUSDT": {"start": T0, "c": np.round(100 + np.sin(np.arange(240) / 3), 4)}})
+    out = tmp_path / "r.json"
+    args = SimpleNamespace(period=None, start="2024-01-02", end="2024-01-09", universe=None, symbols="AUSDT",
+                           equivalence=False, alpha="tests.test_fpreB_hourly:ExemptReference", set=["hold_h=6"],
+                           stress=False, tag="fpreb_exempt", trades_out=None, out=str(out), workers=1,
+                           argv=["heartless", "hourly"])
+    Hr.main_cli(Settings(_env_file=None, HEARTLESS_DATA_DIR=str(tmp_path), UNIVERSE_DB=db, SHOCK_LAYER=False), args)
+    doc = json.loads(out.read_text())
+    assert doc["trial"]["family"] == "fpreb_exempt" and doc["shock"] is None
+
+
+class ExemptReference(Hr.ReferenceAlpha):
+    shock_exempt = True

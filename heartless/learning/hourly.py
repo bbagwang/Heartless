@@ -941,6 +941,13 @@ def main_cli(settings, args) -> None:
             if not args.alpha:
                 raise ValueError("--alpha module:Class is required (or --equivalence)")
             alpha = load_alpha(args.alpha, args.set)
+            tag = (args.tag or "").strip()
+            if tag and not getattr(settings, "shock_layer", False) and not getattr(alpha, "shock_exempt", False):
+                # ROADMAP 7.8: from F-pre-B on every evaluation runs with the shock layer, and the trial config hash
+                # leaves the layer out (evaluator policy): a trial without it would be recorded under the hash of the
+                # same configuration evaluated with it
+                raise ValueError("SHOCK_LAYER=false runs only without --tag: a trial is evaluated with the shock layer "
+                                 "(ROADMAP 7.8; the trial config hash does not hold it)")
             # F-pre-B (ROADMAP 7.8): the shock layer's entry halt is the entry filter (an alpha with shock_exempt takes
             # none); S0 from the candle database's BTC bars when it has them, S1-S3 from universe.db
             shock_filter, shock_doc = None, None
@@ -958,10 +965,13 @@ def main_cli(settings, args) -> None:
                 shock_doc["blocked_decisions"] = shock_filter.blocked if shock_filter is not None else 0
                 print(f"shock layer: {shock_doc['blocked_decisions']} decision(s) blocked; firings {shock_doc['firings']}"
                       + (" (alpha exempt)" if shock_doc["exempt"] else ""), file=sys.stderr)
+                if shock_doc["missing"] and not shock_doc["exempt"]:
+                    print(f"warning: shock layer rules {', '.join(shock_doc['missing'])} not evaluated (no BTC data: "
+                          f"SHOCK_CANDLE_DB for S0, UNIVERSE_DB for S1-S3)"
+                          + ("; the trial records it under 'shock'" if tag else ""), file=sys.stderr)
             doc = {**res.to_json(), "wave_f_period": trials.wave_f_period(start, end), "argv": list(args.argv),
                    "git_commit": seal.git_commit(), "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                    "shock": shock_doc}
-            tag = (args.tag or "").strip()
             if tag:
                 doc["trial"] = record(res, tag, extra={"argv": list(args.argv), "shock": shock_doc})
                 n_fam = trials.family_tests(tag)
