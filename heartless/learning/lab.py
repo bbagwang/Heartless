@@ -16,6 +16,10 @@
   its symbol's rows, so alphas see the same ctx.market as in live trading. Multi-chunk runs give every job a fresh
   worker process, so a long multi-year run never accumulates memory across jobs.
 * `--tag FAMILY` appends the run to the P2 trial ledger (heartless.learning.trials).
+* `--universe topN` (Wave F, docs/ROADMAP.md 7.4) evaluates each member only inside its membership spans: one job per
+  (symbol, member span x chunk), started flat at the span, so only entries made while the symbol was a member exist;
+  a position open when membership ends runs on to its own exit (run-off), and one still open when the symbol stops
+  trading is force-closed at its last traded hour with 5x the nominal slippage (10x under --stress).
 
 CLI: `heartless lab --alpha trend_pullback --split train --set trend_pullback.adx_min=24`
      `heartless lab --alpha htf_trend --years 2022,2023,2024 --by-side --out docs/results/htf_2022_2024.json`
@@ -52,6 +56,10 @@ LOOKBACK_MARGIN_MS = 2 * MS_DAY
 RESEARCH_SETTINGS = {"DAILY_LOSS_LIMIT_PCT": 1000.0, "WEEKLY_LOSS_LIMIT_PCT": 1000.0, "MAX_DRAWDOWN_HALT_PCT": 1000.0}
 # cost stress test: 1.5x fees and 2x slippage; an edge that only exists at nominal costs is not an edge
 STRESS_SETTINGS = {"TAKER_FEE": 0.00075, "MAKER_FEE": 0.0003, "BACKTEST_SLIPPAGE_BPS": 3.0}
+# a position still open when its symbol stops trading (delisting) leaves at the last traded hour's close with this
+# multiple of the run's slippage (ROADMAP 7.4: 5x nominal, and 5x the doubled stress slippage = 10x nominal)
+DELIST_SLIP_MULT = 5.0
+DELIST_REASON = "delisting"
 
 
 # lab --universe: core = the 12 core symbols, extended = core + the 8 cross-coin research symbols (ROADMAP section 1),
@@ -225,9 +233,22 @@ def _run_symbol(job: dict) -> dict:
     warm = job.get("warmup_ms", WARMUP_MS)
     label = job.get("label", "")
     first_chunk, final = job.get("first", True), job.get("final", True)
-    sim_start = start - (0 if first_chunk else job.get("burn_in_ms", 0))
-    # the run-off past an interior chunk's end never reads a sealed period
-    sim_end = end if final else seal.readable_until(end, end + job.get("runoff_ms", 0), unseal)
+    # lead_ms (member spans): the first chunk of a span also simulates the bar closing just before it, so a decision
+    # at that close fills at the span's first minute, as in a continuous run
+    sim_start = start - (job.get("lead_ms", 0) if first_chunk else job.get("burn_in_ms", 0))
+    # the run-off past an interior chunk's end never reads a sealed period; a member span's run-off stops at the
+    # window end or the symbol's next span (runoff_end)
+    if final:
+        sim_end = end
+    else:
+        want = end + job.get("runoff_ms", 0)
+        if job.get("runoff_end") is not None:
+            want = min(want, int(job["runoff_end"]))
+        sim_end = seal.readable_until(end, want, unseal)
+    delist = job.get("delist_close")
+    delisted = delist is not None and int(delist) < sim_end
+    if delisted:
+        sim_end = int(delist)  # nothing trades after the last traded hour: the end flatten is the delisting close
     base = {"symbol": sym, "chunk": label, "start": start, "end": end, "trades": [], "stats": summarize([])}
     if not os.path.isfile(job["db_path"]):
         return {**base, "error": f"no candle database {job['db_path']}"}
@@ -257,6 +278,8 @@ def _run_symbol(job: dict) -> dict:
         market = ContextTable.load(ctx_store, [sym], sim_start - MS_H, sim_end, source=job["db_path"])
         ctx_store.close()
     settings = Settings(_env_file=None, **{**RESEARCH_SETTINGS, **job.get("settings", {})})
+    for spec in job.get("extra_alphas") or ():
+        register_alpha(spec)
     bt = Backtester(settings, {sym: info}, {sym: ca}, funding, metrics, market)
     params = StrategyParams.from_dict(job["params"])
     res = bt.run(params, sim_start, sim_end, only_alpha=job.get("only_alpha"), initial_balance=job.get("balance", 10_000.0))
@@ -269,13 +292,103 @@ def _run_symbol(job: dict) -> dict:
         if (not first_chunk and et < start) or (not final and et > end):
             continue  # burn-in replica (owned by the previous chunk) or a run-off entry (owned by the next one)
         d = {k: t.get(k) for k in keep}
-        d["boundary"] = bool(not final and t.get("exit_reason") == BOUNDARY_REASON)
+        flattened = t.get("exit_reason") == BOUNDARY_REASON
+        if delisted and flattened:
+            delisting_close(d, settings.backtest_slippage_bps, settings.taker_fee, int(delist))
+        else:
+            d["boundary"] = bool(not final and flattened and not job.get("flatten_is_end"))
         if label:
             d["chunk"] = label
         trades.append(d)
     return {**base, "eff_start": eff_start, "sim": [sim_start, sim_end], "stats": summarize(trades), "trades": trades,
             "skipped": res.skipped, "seconds": time.time() - t0, "bars": int(ca.n), "info": asdict(info),
             "context_hours": len(market) if market is not None else 0}
+
+
+def delisting_close(d: dict, slippage_bps: float, taker_fee: float, close_ms: int,
+                    mult: float = DELIST_SLIP_MULT) -> dict:
+    """Re-price a trade that the end flatten closed at its symbol's last traded hour as a delisting close: the exit
+    fill (already at that close's synthetic quote with the run's slippage) gets (mult - 1) x slippage more, so the
+    total is mult x the run's slippage (5x nominal, 10x nominal under stress). Fees follow the new exit price; R uses
+    the trade's own risk amount. The whole filled quantity is charged (an upper bound when a partial target filled
+    earlier). Mutates and returns `d` (exit_reason "delisting", boundary False, the R before kept for the report)."""
+    side = 1.0 if str(d.get("side")).upper() in ("LONG", "BUY") else -1.0
+    entry, old = float(d.get("entry_price") or 0.0), float(d.get("exit_price") or 0.0)
+    qty = float(d.get("notional") or 0.0) / entry if entry else 0.0
+    new = old * (1.0 - side * (mult - 1.0) * slippage_bps / 1e4)
+    d_gross = (new - old) * qty * side
+    d_fee = (new - old) * qty * taker_fee
+    r_before = d.get("r_multiple")
+    d["exit_price"] = new
+    d["gross"] = float(d.get("gross") or 0.0) + d_gross
+    d["fees"] = float(d.get("fees") or 0.0) + d_fee
+    d["pnl"] = float(d.get("pnl") or 0.0) + d_gross - d_fee
+    risk = float(d.get("risk_amount") or 0.0)
+    d["r_multiple"] = d["pnl"] / risk if risk else 0.0
+    d["exit_reason"] = DELIST_REASON
+    d["boundary"] = False
+    d["delisting"] = {"close": int(close_ms), "r_before": r_before, "slippage_bps": round(mult * slippage_bps, 4)}
+    return d
+
+
+def register_alpha(spec) -> str:
+    """Make an Alpha that lives outside heartless/strategy/alphas usable by this process's engines ("module:Class" or
+    an instance): appended to the registry and given its parameter specs, so StrategyParams, the ensemble and
+    `only_alpha` see it. For research ports (the hourly evaluator's reference alpha, a class candidate before it is
+    committed as an alpha module); the shipped registry, schema fingerprints and evidence are untouched. Idempotent;
+    returns the alpha's name."""
+    import importlib
+
+    from heartless.strategy import alphas as A
+    from heartless.strategy import params as P
+
+    if isinstance(spec, str):
+        mod, _, cls = spec.partition(":")
+        inst = getattr(importlib.import_module(mod), cls)()
+    else:
+        inst = spec
+    if inst.name not in A.ALPHA_BY_NAME:
+        A.ALL_ALPHAS.append(inst)
+        A.ALPHA_BY_NAME[inst.name] = inst
+    if inst.name not in P.ALPHA_SPECS:
+        P.ALPHA_SPECS[inst.name] = list(P.COMMON) + list(getattr(inst, "param_specs", []))
+    return inst.name
+
+
+def _alpha_attr(spec: str, attr: str) -> float:
+    """lookback_days / max_hold_days of an extra alpha ("module:Class") read from its class, without registering it in
+    the calling process."""
+    import importlib
+
+    mod, _, cls = spec.partition(":")
+    return float(getattr(getattr(importlib.import_module(mod), cls), attr, None) or 0.0)
+
+
+def member_jobs(symbols: list[str], member_windows: dict, start: int, end: int, chunk_days: int | None,
+                burn_in_ms: int, runoff_ms: int) -> list[dict]:
+    """(symbol, member span x chunk) job windows of a topN run: each membership span clipped to [start, end] and cut
+    like a whole window (calendar years or chunk_days). A span starts flat one bar early (lead_ms: the decision at the
+    close before the span fills inside it); later chunks of the span re-create held positions through a burn-in that
+    never reaches before the span; the last chunk of a span that ends before the window runs on (run-off) to the
+    window end or the symbol's next span at most, so a position open when membership ends follows its exit rules."""
+    out = []
+    for sym in symbols:
+        spans = sorted((max(int(a), int(start)), min(int(b), int(end))) for a, b in member_windows.get(sym, ())
+                       if int(b) >= start and int(a) <= end)
+        for j, (sa, sb) in enumerate(spans):
+            nxt = spans[j + 1][0] if j + 1 < len(spans) else None
+            parts = chunk_windows(sa, sb, chunk_days)
+            for k, (a, b) in enumerate(parts):
+                last = k == len(parts) - 1
+                job = {"symbol": sym, "start": a, "end": b, "first": k == 0, "final": last and sb >= end,
+                       "lead_ms": MS_MINUTE, "burn_in_ms": min(int(burn_in_ms), a - (sa - MS_MINUTE)),
+                       "runoff_ms": int(runoff_ms), "label": _iso(a)[:10], "span": [sa, sb]}
+                if last and sb < end:
+                    cap = int(end) if nxt is None else min(int(end), nxt - MS_MINUTE)
+                    job["runoff_end"] = cap
+                    job["flatten_is_end"] = min(b + int(runoff_ms), cap) >= end
+                out.append(job)
+    return out
 
 
 # --- aggregation -------------------------------------------------------------------------------------
@@ -321,6 +434,8 @@ class LabResult:
     errors: dict = field(default_factory=dict)
     chunks: list = field(default_factory=list)  # [(start, end)] evaluation windows
     jobs: list = field(default_factory=list)  # per (symbol, chunk): timing, bars, trades, effective start
+    # topN runs: member-months per symbol, job count, and the trades force-closed at a delisting
+    membership: dict | None = None
 
     def consistency(self) -> dict:
         months = [m for m in self.by_month.values() if m["n"] >= 3]
@@ -357,13 +472,24 @@ class LabResult:
     def summary_excl_boundary(self) -> dict:
         return group_stats([t for t in self.trades if not t.get("boundary")])
 
+    @property
+    def delisting_closes(self) -> list[dict]:
+        return [{"symbol": t.get("symbol"), "side": t.get("side"), "entry": _iso(int(t.get("entry_time") or 0)),
+                 "exit": _iso(int(t.get("exit_time") or 0)), "r": round(float(t.get("r_multiple") or 0.0), 4),
+                 "r_before": (t["delisting"].get("r_before") if isinstance(t.get("delisting"), dict) else None),
+                 "slippage_bps": (t["delisting"].get("slippage_bps") if isinstance(t.get("delisting"), dict) else None)}
+                for t in self.trades if t.get("delisting")]
+
     def to_json(self) -> dict:
         """Everything a result file needs (the CLI adds run metadata: overrides, commit, seal status, argv)."""
-        return {"window": {"start": _iso(self.start), "end": _iso(self.end), "start_ms": self.start, "end_ms": self.end},
-                "summary": self.summary(), "summary_excl_boundary": self.summary_excl_boundary(),
-                "by_year": self.by_year(), "by_alpha": self.by_alpha, "by_symbol": self.by_symbol,
-                "by_month": self.by_month, "by_side": self.by_side(), "by_year_side": self.by_year_side(),
-                "chunks": [[_iso(a), _iso(b)] for a, b in self.chunks], "jobs": self.jobs, "errors": self.errors}
+        doc = {"window": {"start": _iso(self.start), "end": _iso(self.end), "start_ms": self.start, "end_ms": self.end},
+               "summary": self.summary(), "summary_excl_boundary": self.summary_excl_boundary(),
+               "by_year": self.by_year(), "by_alpha": self.by_alpha, "by_symbol": self.by_symbol,
+               "by_month": self.by_month, "by_side": self.by_side(), "by_year_side": self.by_year_side(),
+               "chunks": [[_iso(a), _iso(b)] for a, b in self.chunks], "jobs": self.jobs, "errors": self.errors}
+        if self.membership is not None:
+            doc["membership"] = {**self.membership, "delisting_closes": self.delisting_closes}
+        return doc
 
     def report(self, by_side: bool = False) -> str:
         s = self.summary()
@@ -377,6 +503,11 @@ class LabResult:
             lines.append(f"  chunks {len(self.chunks)} x {len(self.by_symbol) or '-'} symbols, boundary trades "
                          f"{s['boundary']}; excl. boundary n={x['n']} avgR={x['avg_r']:+.4f} PF={x['profit_factor']:.2f} "
                          f"t_day={x['t_day']:+.2f}")
+        if self.membership is not None:
+            dl = self.delisting_closes
+            lines.append(f"  members: {len(self.membership['member_months'])} symbols, "
+                         f"{self.membership['member_months_total']} member-months, {self.membership['jobs']} jobs; "
+                         f"delisting closes {len(dl)}" + (f" ({', '.join(sorted({d['symbol'] for d in dl}))})" if dl else ""))
 
         def line(tag: str, key: str, st: dict) -> str:
             return (f"  {tag:5s} {key:12s} n={st['n']:5d} avgR={st['avg_r']:+.4f} PF={st['profit_factor']:5.2f} "
@@ -430,7 +561,8 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
              workers: int | None = None, settings: dict | None = None, infos: dict | None = None,
              pool: ProcessPoolExecutor | None = None, chunk_days: int | None = None, unseal=(),
              warmup_ms: int = WARMUP_MS, burn_in_ms: int = BURN_IN_MS, runoff_ms: int = RUNOFF_MS,
-             context: dict | None = None) -> LabResult:
+             context: dict | None = None, member_windows: dict | None = None, delisted: dict | None = None,
+             extra_alphas: list[str] | None = None) -> LabResult:
     """Backtest `params` on every symbol over [start, end] in parallel and aggregate the results.
 
     The window is cut into chunks (calendar years by default, `chunk_days` blocks, or none for 0); each
@@ -439,15 +571,28 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
     Every job's warm-up is at least the longest lookback_days of the evaluated alphas plus a margin (warmup_for), and
     the burn-in / run-off at least their longest max_hold_days plus a day (handoff_for).
 
-    `context` = {"db": market_context store path, "universe": [...], "build": bool} attaches the market context:
-    the rows of the window are built first when missing (and `build`), then every worker reads its symbol's rows.
-    None runs without it (ctx.market stays empty)."""
+    `context` = {"db": market_context store path, "universe": [...], "build": bool, "top_n": int} attaches the market
+    context: the rows of the window are built first when missing (and `build`), then every worker reads its symbol's
+    rows. None runs without it (ctx.market stays empty).
+
+    `member_windows` = {symbol: [(first ms, last ms), ...]} (universe.membership_windows of a topN resolution) runs
+    each symbol only inside its spans (member_jobs): entries exist only while it is a member. `delisted` = {symbol:
+    last traded hour close ms} (universe.delisting_closes) ends that symbol's simulation there and re-prices the
+    position the end flatten closes as a delisting close (delisting_close). `extra_alphas` = ["module:Class", ...]
+    registers alphas from outside the shipped registry in every worker (register_alpha)."""
     seal.check_window(int(start), int(end), unseal)
     unseal = seal.opened(int(start), int(end), unseal)  # an unseal the window does not need opens nothing
     t0 = time.time()
     pdict = params.to_dict() if hasattr(params, "to_dict") else dict(params)
     warmup_ms = warmup_for(pdict, only_alpha, warmup_ms)
     burn_in_ms, runoff_ms = handoff_for(pdict, only_alpha, burn_in_ms, runoff_ms)
+    for spec in extra_alphas or ():  # declared look-back / hold of an unregistered research alpha
+        lb, hold = _alpha_attr(spec, "lookback_days"), _alpha_attr(spec, "max_hold_days")
+        if lb > 0:
+            warmup_ms = max(warmup_ms, int(math.ceil(lb * MS_DAY)) + LOOKBACK_MARGIN_MS)
+        if hold > 0:
+            span = int(math.ceil(hold * MS_DAY)) + MS_DAY
+            burn_in_ms, runoff_ms = max(burn_in_ms, span), max(runoff_ms, span)
     windows = chunk_windows(int(start), int(end), chunk_days)
     multi = len(windows) > 1
 
@@ -457,11 +602,23 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
         return str(datetime.fromtimestamp(a / 1000, tz=timezone.utc).year) if chunk_days is None else _iso(a)[:10]
 
     ctx_db = prepare_context(str(db_path), context, int(start), int(end)) if context else None
-    jobs = [{"db_path": str(db_path), "symbol": s, "start": a, "end": b, "params": pdict, "only_alpha": only_alpha,
-             "settings": settings or {}, "info": (infos or {}).get(s), "label": label(a), "first": k == 0,
-             "final": k == len(windows) - 1, "unseal": sorted(unseal or ()), "warmup_ms": warmup_ms,
-             "burn_in_ms": burn_in_ms, "runoff_ms": runoff_ms, "context_db": ctx_db}
-            for s in symbols for k, (a, b) in enumerate(windows)]
+    common = {"db_path": str(db_path), "params": pdict, "only_alpha": only_alpha, "settings": settings or {},
+              "unseal": sorted(unseal or ()), "warmup_ms": warmup_ms, "context_db": ctx_db}
+    if member_windows is None:
+        jobs = [{**common, "symbol": s, "start": a, "end": b, "info": (infos or {}).get(s), "label": label(a),
+                 "first": k == 0, "final": k == len(windows) - 1, "burn_in_ms": burn_in_ms, "runoff_ms": runoff_ms}
+                for s in symbols for k, (a, b) in enumerate(windows)]
+    else:
+        jobs = [{**common, **j, "info": (infos or {}).get(j["symbol"])}
+                for j in member_jobs(symbols, member_windows, int(start), int(end), chunk_days, burn_in_ms, runoff_ms)]
+        multi = len(jobs) > len(symbols)
+    if delisted:  # a chunk that starts after its symbol stopped trading has nothing to simulate
+        jobs = [j for j in jobs if j["symbol"] not in delisted or j["start"] <= int(delisted[j["symbol"]])]
+    for j in jobs:
+        if extra_alphas:
+            j["extra_alphas"] = list(extra_alphas)
+        if delisted and j["symbol"] in delisted:
+            j["delist_close"] = int(delisted[j["symbol"]])
     own = pool is None
     if own:
         n = workers or max(1, min(len(jobs), (os.cpu_count() or 2)))
@@ -492,10 +649,21 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
                  "bars": r.get("bars", 0), "seconds": round(r.get("seconds", 0.0), 1), "error": r.get("error"),
                  "context_hours": r.get("context_hours", 0)}
                 for r in results]
+    membership = None
+    if member_windows is not None:
+        from heartless.data.universe import member_months
+
+        months = member_months({s: member_windows.get(s, []) for s in symbols})
+        membership = {"rule": "entries only while the symbol is a member (docs/ROADMAP.md 7.4); open positions keep "
+                              "their exit rules after membership ends; delisting close at the last traded hour, "
+                              f"{DELIST_SLIP_MULT:g}x the run's slippage",
+                      "member_months": months, "member_months_total": sum(months.values()), "jobs": len(jobs),
+                      "delisted": {s: _iso(v) for s, v in sorted((delisted or {}).items()) if s in symbols}}
     return LabResult(params_version=pdict.get("version", "?"), alpha=only_alpha, start=int(start), end=int(end),
                      overall=summarize(trades), by_alpha=_group(trades, lambda t: t.get("alpha") or "?"),
                      by_symbol=_group(trades, lambda t: t.get("symbol") or "?"), by_month=_group(trades, _month),
-                     trades=trades, seconds=time.time() - t0, errors=errors, chunks=windows, jobs=job_info)
+                     trades=trades, seconds=time.time() - t0, errors=errors, chunks=windows, jobs=job_info,
+                     membership=membership)
 
 
 def apply_overrides(params, overrides: list[str], notes: list | None = None):
@@ -644,15 +812,23 @@ def main_cli(settings, args) -> None:
         extra_settings["META_LABEL"] = True
     chunk_days = getattr(args, "chunk_days", None)
     commit, dirty = seal.git_commit(), git_dirty()  # the code state the run starts from (it may change while it runs)
+    # top_n: the cross-section mode of the context store (CONTEXT_TOP_N); a store built in top-N mode is refused when
+    # asked for in the fixed mode, and the research store is built with top_n = 40 (docs/ROADMAP.md 7.11)
     context = {"db": str(settings.context_db_path), "universe": settings.context_universe_list,
-               "build": bool(settings.context_auto_build),
+               "build": bool(settings.context_auto_build), "top_n": int(getattr(settings, "context_top_n", 0) or 0),
                "progress": lambda m: print(m, file=sys.stderr, flush=True)}
     from heartless.data.context import ContextMismatch
 
+    # --universe topN (cli._top_universe): only the membership spans are evaluated, delisted members are closed at
+    # their last traded hour
+    resolution = getattr(args, "universe_resolution", None)
+    member = {}
+    if resolution is not None:
+        member = {"member_windows": resolution["windows"], "delisted": resolution.get("delisted") or {}}
     try:
         res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers,
                        settings=extra_settings, chunk_days=chunk_days, unseal=[p for p in unseal if p in touched],
-                       context=context)
+                       context=context, **member)
     except ContextMismatch as e:  # a context store of another source / universe: refused before any job ran
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
@@ -660,14 +836,15 @@ def main_cli(settings, args) -> None:
 
     trial = None
     if tag:
-        cfg = trials.lab_config(params.to_dict(), args.alpha, symbols, meta=bool(getattr(args, "meta", False)))
+        cfg = trials.lab_config(params.to_dict(), args.alpha, symbols, meta=bool(getattr(args, "meta", False)),
+                                universe=universe)
         s = res.summary()
         trial = trials.record("lab", tag, cfg, (start, end), n=s["n"], avg_r=s["avg_r"], t_day=s["t_day"],
                               extra={"stress": bool(getattr(args, "stress", False)), "dirty": dirty, "argv": argv})
         n_fam = trials.family_tests(tag)
         print(f"trial ledger: {tag} config {trial['config_hash']} recorded; family N={n_fam}, TRAIN bar t_day >= "
               f"{trials.threshold(n_fam):.2f}", file=sys.stderr)
-    elif trials.period_of(start, end) == "TRAIN":
+    elif trials.period_of(start, end) == "TRAIN" or trials.wave_f_period(start, end).startswith("TRAIN"):
         print("note: not recorded in the P2 trial ledger (no --tag FAMILY)", file=sys.stderr)
     if args.json:
         print(json.dumps(_clean({"summary": res.summary(), "summary_excl_boundary": res.summary_excl_boundary(),
@@ -681,6 +858,7 @@ def main_cli(settings, args) -> None:
             json.dump(res.trades, f, default=str)
     if getattr(args, "out", None):
         doc = {**res.to_json(), "params_version": params.version, "alpha": args.alpha, "symbols": symbols,
+               "wave_f_period": trials.wave_f_period(start, end),
                "universe": universe, "trial": trial,
                "overrides": list(args.set or []), "override_adjustments": notes, "settings_overrides": extra_settings,
                "chunk_days": chunk_days, "workers": args.workers, "git_commit": commit,

@@ -33,6 +33,8 @@ def add_replay_parser(sub) -> argparse.ArgumentParser:
     rp.add_argument("--messages-out", default=None, help="every captured Telegram message as JSONL")
     rp.add_argument("--trades-out", default=None, help="every stored trade as JSON")
     rp.add_argument("--log-level", default="WARNING")
+    rp.add_argument("--profile", action="store_true",
+                    help="profile the event-loop thread and list the hottest functions in the report (slower)")
     return rp
 
 
@@ -72,7 +74,8 @@ def main_cli(settings, args) -> None:
                        seed_metrics=args.seed_metrics, settings=overrides, params=params, commands=commands,
                        memory_limit_mb=args.memory_limit_mb, memory_slope_mb_per_day=args.memory_slope_mb_day,
                        tracemalloc=args.tracemalloc, final_flatten=not args.no_flatten, out_json=args.out,
-                       messages_out=args.messages_out, trades_out=args.trades_out, log_level=args.log_level)
+                       messages_out=args.messages_out, trades_out=args.trades_out, log_level=args.log_level,
+                       profile=bool(getattr(args, "profile", False)))
     summary = run_replay(cfg)
     print(summary["report"], flush=True)
     if args.out:

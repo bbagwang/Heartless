@@ -13,6 +13,10 @@ What a snapshot is
 * A symbol enters the hour's cross-section when it has a 1m bar inside that hour (others are excluded); a feature
   whose history is too short is NaN and that symbol is left out of the feature's ranks. Ranks and z-scores need at
   least MIN_XS symbols. Ranks are mid-ranks scaled to [0, 1] (0 = lowest); z-scores use the population sd.
+* F0 (CONTEXT_TOP_N): with top_n > 0 only the top_n of those symbols with the largest trailing 24h quote volume at
+  that hour (24 h of history needed; ties by symbol name) enter the cross-section, so it follows liquidity instead of
+  a fixed list. BTC's market-wide features are computed whether or not BTC is a member. top_n = 0 (the default) is the
+  fixed-list mode, bit for bit as before.
 
 Why the definitions look the way they do
 * Every value depends only on a bounded trailing window (at most GRID_HOURS hourly rows, closes and funding rates
@@ -201,10 +205,42 @@ def _share(v: np.ndarray, flag: np.ndarray) -> np.ndarray:
     return out
 
 
-def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1) -> tuple[np.ndarray, np.ndarray]:
+def _vol24(grid: dict[str, np.ndarray], idx: np.ndarray, ok: np.ndarray) -> np.ndarray:
+    """Trailing 24h quote volume at the rows idx (oldest hour first), NaN where `ok` (24 h of history) is False."""
+    vol = np.zeros((len(idx), grid["close"].shape[1]))
+    for k in range(23, -1, -1):  # oldest hour first
+        vol = vol + _lag(grid["qvol"], idx, k)
+    return np.where(ok, vol, np.nan)
+
+
+def _top_mask(vol: np.ndarray, top_n: int) -> np.ndarray:
+    """Per row, the top_n symbols by `vol` (finite values only; equal volumes go to the lower column, i.e. the name)."""
+    # A stable sort of -vol per row puts equal volumes in column order, so a symbol's position is the number of larger
+    # volumes plus the equal ones in lower columns: O(S log S) per row instead of S x S comparison matrices (a year of
+    # 120 symbols took 300 MB and 4 s that way, quadratic in the universe this mode exists to widen).
+    v = np.where(np.isfinite(vol), vol, -np.inf)
+    order = np.argsort(-v, axis=1, kind="stable")
+    pos = np.empty_like(order)
+    np.put_along_axis(pos, order, np.broadcast_to(np.arange(v.shape[1]), v.shape), axis=1)
+    return np.isfinite(vol) & (pos < int(top_n))
+
+
+def members(grid: dict[str, np.ndarray], idx, top_n: int = 0) -> np.ndarray:
+    """[len(idx), symbols] bool: the hour's cross-section (present; with top_n > 0 only the top_n by 24h volume)."""
+    idx = np.asarray(idx, dtype=np.int64)
+    pres = grid["present"][idx].astype(bool)
+    if not top_n or top_n <= 0:
+        return pres
+    with np.errstate(all="ignore"):
+        ok = pres & np.isfinite(_lag(grid["close"], idx, 23))
+        return pres & _top_mask(_vol24(grid, idx, ok), top_n)
+
+
+def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1, top_n: int = 0) -> tuple[np.ndarray, np.ndarray]:
     """Snapshot features at the grid rows `idx` (hour indices into the grid, each needs up to GRID_HOURS - 1 rows of
     history before it). grid: GRID_FIELDS -> [rows, symbols] arrays on a contiguous hour axis. Returns
-    (symbol features [len(idx), symbols, len(SYMBOL_FEATURES)], market features [len(idx), len(MARKET_FEATURES)])."""
+    (symbol features [len(idx), symbols, len(SYMBOL_FEATURES)], market features [len(idx), len(MARKET_FEATURES)]).
+    top_n > 0 restricts the cross-section to `members()` (the symbol features of the others are NaN)."""
     idx = np.asarray(idx, dtype=np.int64)
     close = grid["close"]
     k_n, s_n = len(idx), close.shape[1]
@@ -228,10 +264,7 @@ def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1) -> tuple[np.nda
             ok = has_history(w)
             f[f"dist_hi_{w}h"] = _ratio(c0, hi, ok)
             f[f"dist_lo_{w}h"] = _ratio(c0, lo, ok)
-        vol = np.zeros((k_n, s_n))
-        for k in range(23, -1, -1):  # oldest hour first
-            vol = vol + _lag(grid["qvol"], idx, k)
-        vol = np.where(has_history(24), vol, np.nan)
+        vol = _vol24(grid, idx, has_history(24))
         emas = {}
         for span, win in EMA_WINDOWS:
             acc = np.zeros((k_n, s_n))
@@ -244,6 +277,13 @@ def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1) -> tuple[np.nda
             ok = has_history(win) & np.isfinite(e)
             emas[span] = np.where(ok, e, np.nan)
             f[f"above_ema{span}"] = np.where(ok, (c0 > e).astype(float), np.nan)
+        btc_ret = {k: f[f"ret_{k}h"] for k in BTC_RET_HOURS}  # the market reference, member or not
+        xs = pres
+        if top_n and top_n > 0:  # F0: the hour's liquidity top_n only (the fixed-list path never takes this branch)
+            xs = pres & _top_mask(vol, top_n)
+            for name in list(f):
+                f[name] = np.where(xs, f[name], np.nan)
+            vol = np.where(xs, vol, np.nan)
         for k in RET_HOURS:
             r = f[f"ret_{k}h"]
             v = np.isfinite(r)
@@ -256,19 +296,19 @@ def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1) -> tuple[np.nda
         share[ok] = (vol / np.where(total > 0, total, 1.0)[:, None])[ok]
         f["vol_share_24h"] = share
         f["vol_share_rank"] = _rank(share, np.isfinite(share))
-        fund = np.where(pres, grid["funding"][idx], np.nan)
+        fund = np.where(xs, grid["funding"][idx], np.nan)
         fv = np.isfinite(fund)
         f["funding"] = fund
         f["funding_rank"] = _rank(fund, fv)
         f["funding_z"] = _z(fund, fv)
-        oi = np.where(pres, grid["oi_chg"][idx], np.nan)
+        oi = np.where(xs, grid["oi_chg"][idx], np.nan)
         f["oi_chg_24h"] = oi
         f["oi_chg_rank"] = _rank(oi, np.isfinite(oi))
 
         # market-wide
         if 0 <= btc_col < s_n:
             for k in BTC_RET_HOURS:
-                m[f"btc_ret_{k}h"] = f[f"ret_{k}h"][:, btc_col]
+                m[f"btc_ret_{k}h"] = btc_ret[k][:, btc_col]
             c, e50, e200 = c0[:, btc_col], emas[50][:, btc_col], emas[200][:, btc_col]
             up = (c > e50) & (e50 > e200)
             dn = (c < e50) & (e50 < e200)
@@ -286,13 +326,13 @@ def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1) -> tuple[np.nda
         m["disp_24h"] = np.where(n24 >= MIN_XS, sd24, np.nan)
         m["funding_median"] = _median(fund, fv)
         now, prev = grid["oiv_now"][idx], grid["oiv_prev"][idx]
-        okv = pres & np.isfinite(now) & np.isfinite(prev) & (prev > 0)
+        okv = xs & np.isfinite(now) & np.isfinite(prev) & (prev > 0)
         num, den = _seq_sum(now, okv), _seq_sum(prev, okv)
         agg = np.full(k_n, np.nan)
         ok = (okv.sum(axis=1) >= MIN_XS) & (den > 0)
         agg[ok] = num[ok] / den[ok] - 1.0
         m["oi_chg_24h_agg"] = agg
-        m["n"] = pres.sum(axis=1).astype(float)
+        m["n"] = xs.sum(axis=1).astype(float)
     sym = np.stack([f[name] for name in SYMBOL_FEATURES], axis=2) if s_n else np.zeros((k_n, 0, len(SYMBOL_FEATURES)))
     mkt = np.stack([m[name] for name in MARKET_FEATURES], axis=1)
     return sym, mkt
@@ -496,9 +536,16 @@ class ContextTable:
 
 
 # --- metadata / coverage ---------------------------------------------------------------------------------------------
-def meta_for(universe, source: dict | None = None) -> dict:
-    return {"version": VERSION, "universe": sorted(universe), "symbol_features": list(SYMBOL_FEATURES),
+def meta_for(universe, source: dict | None = None, top_n: int = 0) -> dict:
+    meta = {"version": VERSION, "universe": sorted(universe), "symbol_features": list(SYMBOL_FEATURES),
             "market_features": list(MARKET_FEATURES), "source": source, "built": []}
+    if top_n and top_n > 0:  # recorded only in the liquidity mode, so fixed-list stores keep their metadata
+        meta["top_n"] = int(top_n)
+    return meta
+
+
+def _top_of(meta) -> int:
+    return int((meta or {}).get("top_n") or 0) if isinstance(meta, dict) else 0
 
 
 def _real(path) -> str:
@@ -613,14 +660,14 @@ def _refuse(dst, why: str) -> ContextMismatch:
                            f"this source / universe, or rebuild this one with `heartless context build --rebuild`.")
 
 
-def _check_or_reset(dst, meta, source: dict, universe: list[str], rebuild: bool) -> tuple[dict, str]:
+def _check_or_reset(dst, meta, source: dict, universe: list[str], rebuild: bool, top_n: int = 0) -> tuple[dict, str]:
     """Under the build lock: the metadata the build continues from (reset to empty when rebuilding, new, or of an
     older definition), or ContextMismatch for another source / universe / replaced history. Returns (meta, note)."""
     note = ""
     if rebuild or not isinstance(meta, dict):
         if dst.has_market_context():
             dst.delete_market_context()
-        meta = meta_for(universe, source)
+        meta = meta_for(universe, source, top_n)
         note = "rebuilding from scratch" if rebuild else ""
     else:
         status, stable, why = source_status(meta, source)
@@ -630,11 +677,14 @@ def _check_or_reset(dst, meta, source: dict, universe: list[str], rebuild: bool)
         if meta.get("universe") != universe:
             raise _refuse(dst, f"it was built for the universe {','.join(meta.get('universe') or [])}, this run asks "
                                f"for {','.join(universe)}")
+        if _top_of(meta) != int(top_n or 0):
+            raise _refuse(dst, f"it was built with the cross-section top_n={_top_of(meta)}, this run asks for "
+                               f"top_n={int(top_n or 0)}")
         if not meta_ok(meta):  # the definitions changed in code: the stored rows are of no use to anyone
             if dst.has_market_context():
                 dst.delete_market_context()
             note = f"definition changed ({meta.get('version')} -> {VERSION}): rebuilding"
-            meta = meta_for(universe, source)
+            meta = meta_for(universe, source, top_n)
         elif status == "mismatch":
             raise _refuse(dst, why)
         elif status == "extended":
@@ -722,7 +772,7 @@ def data_span(src, symbols: list[str]) -> tuple[int, int] | None:
     return min(firsts), hour_close(hour_of(max(lasts) + MS_MIN - 1))
 
 
-def compute_unit(src, universe, a: int, b: int) -> list[Snapshot]:
+def compute_unit(src, universe, a: int, b: int, top_n: int = 0) -> list[Snapshot]:
     """Snapshots for every hour close in [a, b] computed from the source store (one calendar-year unit)."""
     syms = sorted(universe)
     h_a, h_b = hour_of(a + MS_H - 1), hour_of(b)
@@ -741,17 +791,18 @@ def compute_unit(src, universe, a: int, b: int) -> list[Snapshot]:
         for k in GRID_FIELDS:
             grid[k][:, j] = cols[k]
     idx = np.arange(h_a - g0, h_b - g0 + 1)
-    sym, mkt = compute(grid, idx, syms.index(BTC) if BTC in syms else -1)
+    sym, mkt = compute(grid, idx, syms.index(BTC) if BTC in syms else -1, top_n)
     out = []
     pres = grid["present"][idx]
+    xs = members(grid, idx, top_n)
     for r in range(len(idx)):
         if pres[r].any():
-            out.append(Snapshot(hour_close(g0 + int(idx[r])), tuple(syms), pres[r].copy(), sym[r], mkt[r]))
+            out.append(Snapshot(hour_close(g0 + int(idx[r])), tuple(syms), xs[r].copy(), sym[r], mkt[r]))
     return out
 
 
 def build(src, dst, start: int | None = None, end: int | None = None, universe=None, rebuild: bool = False,
-          progress=None) -> dict:
+          progress=None, top_n: int = 0) -> dict:
     """Compute and store the market context for the hour closes in [start, end] (default: all stored history),
     calendar year by calendar year, into `dst`, a store of its own (CONTEXT_DB; never the candle database `src`).
 
@@ -774,7 +825,8 @@ def build(src, dst, start: int | None = None, end: int | None = None, universe=N
     b = min(int(end), last) if end is not None else last
     stats = {"units": [], "rows": 0, "hours": 0, "seconds": 0.0, "universe": universe, "stored_symbols": syms}
     with build_lock(getattr(dst, "path", None), progress=progress):
-        meta, note = _check_or_reset(dst, dst.get("context.meta"), source_info(src, universe), universe, rebuild)
+        meta, note = _check_or_reset(dst, dst.get("context.meta"), source_info(src, universe), universe, rebuild,
+                                     top_n)
         if note and progress:
             progress(f"context: {note}")
         if b < a:
@@ -784,7 +836,7 @@ def build(src, dst, start: int | None = None, end: int | None = None, universe=N
                 stats["units"].append({"start": _iso(ua), "end": _iso(ub), "skipped": True})
                 continue
             u0 = time.time()
-            snaps = compute_unit(src, universe, ua, ub)
+            snaps = compute_unit(src, universe, ua, ub, top_n)
             rows = [r for sn in snaps for r in sn.rows()]
             if rows:
                 dst.save_market_context(rows)
@@ -803,7 +855,7 @@ def build(src, dst, start: int | None = None, end: int | None = None, universe=N
     return stats
 
 
-def usable(src, dst, universe) -> tuple[bool, str, int | None, str]:
+def usable(src, dst, universe, top_n: int = 0) -> tuple[bool, str, int | None, str]:
     """Whether the stored context in `dst` may serve runs over `src` for `universe`, without building:
     (ok, status, stable_until, why) with status "same" / "extended" / "mismatch" / "none" (nothing built)."""
     meta = dst.get("context.meta")
@@ -813,12 +865,14 @@ def usable(src, dst, universe) -> tuple[bool, str, int | None, str]:
     if meta.get("universe") != sorted(universe):
         return False, "mismatch", None, (f"built for the universe {','.join(meta.get('universe') or [])}, not "
                                          f"{','.join(sorted(universe))}")
+    if _top_of(meta) != int(top_n or 0):
+        return False, "mismatch", None, f"built with the cross-section top_n={_top_of(meta)}, not {int(top_n or 0)}"
     if not meta_ok(meta):
         return False, "mismatch", None, f"definition {meta.get('version')} is outdated (current {VERSION})"
     return status != "mismatch", status, stable, why
 
 
-def ensure(src, dst, start: int, end: int, universe, auto_build: bool = True, progress=None) -> bool:
+def ensure(src, dst, start: int, end: int, universe, auto_build: bool = True, progress=None, top_n: int = 0) -> bool:
     """Make sure the rows of [start, end] exist, building the missing years when `auto_build` (ContextMismatch when
     `dst` belongs to another source or universe). True when a usable table is there for the window afterwards (an
     hour that is still missing reads as an empty ctx.market). Without `auto_build` a store that does not match reads
@@ -829,7 +883,7 @@ def ensure(src, dst, start: int, end: int, universe, auto_build: bool = True, pr
     if span is None:
         return False
     a, b = max(int(start), span[0]), min(int(end), span[1])
-    ok, status, stable, why = usable(src, dst, universe)
+    ok, status, stable, why = usable(src, dst, universe, top_n)
     meta = dst.get("context.meta")
     if ok and status == "same" and (b < a or covered(meta, a, b)):
         return True  # the common case: no lock, no write
@@ -837,14 +891,15 @@ def ensure(src, dst, start: int, end: int, universe, auto_build: bool = True, pr
         if not ok and status != "none" and progress:
             progress(f"context store {getattr(dst, 'path', dst)} not used: {why}")
         return ok and (status == "same" or (stable is not None and b <= stable))
-    build(src, dst, a, b, universe, progress=progress)
+    build(src, dst, a, b, universe, progress=progress, top_n=top_n)
     return True
 
 
 def prepare(db_path: str, cfg: dict, start: int, end: int) -> str | None:
     """For research runs (lab, discovery): build the missing years of [start, end] when cfg["build"] (default True)
     and return the path of the store holding the rows, or None when no usable table exists. cfg: {"db": context store
-    path (default <candle db directory>/context.db), "universe": [...], "build": bool, "progress": callable}. Raises
+    path (default <candle db directory>/context.db), "universe": [...], "build": bool, "progress": callable,
+    "top_n": the cross-section mode (0 = fixed list)}. Raises
     ContextMismatch for a store of another source / universe and for the candle database itself. The caller caps
     `end` at a sealed period."""
     from heartless.core.store import Store
@@ -858,7 +913,7 @@ def prepare(db_path: str, cfg: dict, start: int, end: int) -> str | None:
     dst = Store(ctx_path)
     try:
         ok = ensure(src, dst, int(start), int(end), cfg.get("universe") or DEFAULT_UNIVERSE,
-                    auto_build=cfg.get("build", True), progress=cfg.get("progress"))
+                    auto_build=cfg.get("build", True), progress=cfg.get("progress"), top_n=int(cfg.get("top_n") or 0))
     finally:
         dst.close()
         src.close()
@@ -882,8 +937,9 @@ class MarketContextTracker:
     * At start-up, `warm(store, now)` feeds WARMUP_HOURS of stored history so the first snapshot is already exact.
     """
 
-    def __init__(self, universe=None, btc: str = BTC, keep: int = 4):
+    def __init__(self, universe=None, btc: str = BTC, keep: int = 4, top_n: int = 0):
         self.symbols = tuple(sorted(set(universe or DEFAULT_UNIVERSE)))
+        self.top_n = int(top_n or 0)  # F0: the cross-section mode (0 = every symbol with data that hour)
         self._col = {s: j for j, s in enumerate(self.symbols)}
         self._btc_col = self._col.get(btc, -1)
         self._pending: list[dict[int, list]] = [{} for _ in self.symbols]  # hour -> [high, low, close, {minute: qv}]
@@ -1012,9 +1068,11 @@ class MarketContextTracker:
         grid = {k: np.array(v) for k, v in self._rows.items()}
         if not len(grid["close"]):
             return None
-        sym, mkt = compute(grid, np.array([len(grid["close"]) - 1]), self._btc_col)
+        last = np.array([len(grid["close"]) - 1])
+        sym, mkt = compute(grid, last, self._btc_col, self.top_n)
         pres = grid["present"][-1].astype(bool)
-        snap = Snapshot(hour_close(h), self.symbols, pres, sym[0], mkt[0]) if pres.any() else None
+        xs = members(grid, last, self.top_n)[0]
+        snap = Snapshot(hour_close(h), self.symbols, xs, sym[0], mkt[0]) if pres.any() else None
         if snap is not None:
             self._snaps[h] = snap
             for old in sorted(self._snaps)[:-self._keep]:

@@ -141,10 +141,16 @@ class FrameCursor:
 
 
 class MarketView:
-    """Multi-timeframe feature view for one symbol with a movable causal cursor."""
+    """Multi-timeframe feature view for one symbol with a movable causal cursor.
 
-    def __init__(self, symbol: str):
+    `incremental=True` (the live bot, INCREMENTAL_FEATURES): rebuild(live=True) builds data/incremental.LiveFrames and
+    advance() then appends each new 1m bar (and each resampled bar it closes) instead of recomputing the frames; the
+    backtester and the lab keep the batch path (incremental=False, rebuild(live=False))."""
+
+    def __init__(self, symbol: str, incremental: bool = False):
         self.symbol = symbol
+        self.incremental = incremental
+        self.live = None  # data.incremental.LiveFrames while incremental updates run
         self.frames: dict[str, FeatureFrame] = {}
         self.cursors: dict[str, FrameCursor] = {}
         self.cursor_time: int = 0
@@ -157,6 +163,13 @@ class MarketView:
 
     def rebuild(self, base_1m: CandleArrays, live: bool = True) -> None:
         self.base = base_1m
+        if live and self.incremental:
+            from heartless.data.incremental import LiveFrames
+
+            self.live = LiveFrames(self.symbol)
+            self._install(self.live.build(base_1m))
+            return
+        self.live = None
         for tf in TIMEFRAMES:
             if tf == "1m":
                 bars = base_1m.tail(LIVE_WINDOW[tf]) if live else base_1m
@@ -170,6 +183,48 @@ class MarketView:
             self.frames.pop(tf, None)
             self._long_frame(tf)
 
+    # --- F7: incremental live frames ---------------------------------------------------------------------------------
+    def _install(self, frames: dict) -> None:
+        for tf in TIMEFRAMES:
+            self.frames[tf] = frames[tf]
+        for tf in LONG_TIMEFRAMES:  # like _long_frame: no 4h / 1d frame while the base is empty
+            if self.base is not None and self.base.n:
+                self.frames[tf] = frames[tf]
+            else:
+                self.frames.pop(tf, None)
+        self._long_due.clear()
+        self._long_cur.clear()
+
+    def advance_cheap(self, base_1m: CandleArrays) -> bool:
+        """True when advance(base_1m) only appends bars (tens of microseconds each, fine on the event loop)."""
+        return self.live is not None and self.live.cheap(base_1m)
+
+    def advance(self, base_1m: CandleArrays) -> bool:
+        """Bring the live frames up to base_1m (the bars appended since the last call). Incremental views append; a view
+        without LiveFrames (incremental=False, or one whose periodic check failed) rebuilds every base timeframe in
+        batch. Returns True when the update was incremental."""
+        lf = self.live
+        if lf is None:
+            self._batch_base_frames(base_1m)
+            return False
+        done = lf.advance(base_1m)
+        self.base = base_1m
+        if lf.failed:  # the check against the batch failed: batch rebuilds from now on (logged by LiveFrames)
+            self.incremental, self.live = False, None
+            self._batch_base_frames(base_1m)
+            self._long_due.clear()  # the 4h / 1d frames are rebuilt by _long_frame at their next use
+            self._long_cur.clear()
+            return False
+        self._install(lf.frames)
+        return done
+
+    def _batch_base_frames(self, base_1m: CandleArrays) -> None:
+        """Every base timeframe recomputed from the 1m tail, as app._rebuild_view does (the non-incremental path)."""
+        for tf in TIMEFRAMES:
+            bars = base_1m.tail(LIVE_WINDOW[tf]) if tf == "1m" else resample_tail(base_1m, tf, LIVE_WINDOW[tf])
+            self.frames[tf] = FeatureFrame(tf, bars)
+        self.base = base_1m
+
     def _long_frame(self, tf: str) -> FeatureFrame | None:
         """The 4h / 1d frame over the whole base, rebuilt once the base holds a bar at or past its next close.
 
@@ -177,6 +232,8 @@ class MarketView:
         a minute and the frame is rebuilt once per period (bars that close later are never visible early: the cursor
         only reaches bars closed at or before cursor_time)."""
         fr = self.frames.get(tf)
+        if self.live is not None:  # kept current by advance()
+            return fr
         base = self.base
         if base is None or base.n == 0:
             return fr

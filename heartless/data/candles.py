@@ -16,6 +16,11 @@ class CandleArrays:
         self.tf = tf
         self.tf_ms = TF_MS[tf]
         self.n = 0
+        # F7: changes other than appending a newer bar, so an incremental reader (data/incremental.py) knows when the
+        # bars it already consumed may differ: `edits` counts inserts before the last bar and replacements that change
+        # a stored bar, `trims` counts trim_before calls that removed bars
+        self.edits = 0
+        self.trims = 0
         self._cap = max(capacity, 16)
         self.open_time = np.zeros(self._cap, dtype=np.int64)
         self.close_time = np.zeros(self._cap, dtype=np.int64)
@@ -45,15 +50,16 @@ class CandleArrays:
         if self.n > 0:
             last = self.open_time[self.n - 1]
             if c.open_time == last:  # replace (e.g. revised closed bar)
-                self._set(self.n - 1, c)
+                self._replace(self.n - 1, c)
                 return False
             if c.open_time < last:
                 # out-of-order (backfill into history) -> insert sorted
                 idx = int(np.searchsorted(self.open_time[: self.n], c.open_time))
                 if idx < self.n and self.open_time[idx] == c.open_time:
-                    self._set(idx, c)
+                    self._replace(idx, c)
                     return False
                 self._insert(idx, c)
+                self.edits += 1
                 return True
         if self.n >= self._cap:
             self._grow()
@@ -69,6 +75,16 @@ class CandleArrays:
             arr[idx + 1: self.n + 1] = arr[idx: self.n]
         self.n += 1
         self._set(idx, c)
+
+    def _replace(self, i: int, c: Candle) -> None:
+        """Overwrite stored bar i; a repeated identical bar (a duplicate stream message) is not an edit."""
+        same = (int(self.close_time[i]) == c.close_time and self.open[i] == c.open and self.high[i] == c.high
+                and self.low[i] == c.low and self.close[i] == c.close and self.volume[i] == c.volume
+                and self.quote_volume[i] == c.quote_volume and self.trades[i] == c.trades
+                and self.taker_buy[i] == c.taker_buy_volume)
+        self._set(i, c)
+        if not same:
+            self.edits += 1
 
     def _set(self, i: int, c: Candle) -> None:
         self.open_time[i] = c.open_time
@@ -126,6 +142,7 @@ class CandleArrays:
             arr = getattr(self, name)
             arr[: self.n - idx] = arr[idx: self.n]
         self.n -= idx
+        self.trims += 1
 
 
 def resample(base: CandleArrays, tf: str, only_complete: bool = True) -> CandleArrays:

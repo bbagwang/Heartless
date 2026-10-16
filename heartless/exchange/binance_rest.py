@@ -18,8 +18,20 @@ from urllib.parse import urlencode
 import httpx
 
 from heartless.core.models import Candle
+from heartless.util import perf
+from heartless.util.timeutil import now_ms
 
 log = logging.getLogger(__name__)
+
+# F7: connection reuse. httpx pools connections, but closed idle ones after 5 s by default, so an order sent after a
+# quiet minute paid a new TCP + TLS handshake (one or two extra round trips). Idle connections now live KEEPALIVE_S and
+# the live bot touches the pool every WARM_INTERVAL_S (keep_warm), so the order path finds a warm connection.
+KEEPALIVE_S = 55.0
+WARM_INTERVAL_S = 25.0
+POOL_LIMITS = httpx.Limits(max_connections=64, max_keepalive_connections=32, keepalive_expiry=KEEPALIVE_S)
+# startup reads fetched concurrently (prefetch) are handed to the first identical request within this many seconds
+PREFETCH_TTL_S = 10.0
+_MISS = object()
 
 PROD_REST = "https://fapi.binance.com"
 TEST_REST = "https://testnet.binancefuture.com"
@@ -45,16 +57,23 @@ class BinanceRest:
         self.base = TEST_REST if testnet else PROD_REST
         self.ws_base = TEST_WS if testnet else PROD_WS
         self.recv_window = recv_window
-        self._client = httpx.AsyncClient(base_url=self.base, timeout=timeout,
+        self._client = httpx.AsyncClient(base_url=self.base, timeout=timeout, limits=POOL_LIMITS,
                                          headers={"X-MBX-APIKEY": api_key} if api_key else {})
         self.time_offset = 0
         self.used_weight = 0
         self._weight_reset_at = 0.0
         self._lock = asyncio.Lock()
         self._last_sync = 0.0
+        self.time_rtt_ms = float("nan")  # round trip of the last server-time request
+        self._prefetched: dict[tuple, tuple[float, Any]] = {}  # F7: key -> (expiry monotonic s, answer)
+        self._cred_gen = 0  # F7: bumped by set_credentials; a prefetch sent under older keys is not kept
 
     def set_credentials(self, api_key: str, api_secret: str, testnet: bool | None = None) -> None:
-        """Swap the API key pair at runtime (owner entered new keys)."""
+        """Swap the API key pair at runtime (owner entered new keys). F7: prefetched answers are dropped (they are
+        keyed by request, not by account: a signed answer read with the old keys must never reach the new account's
+        LiveAccount.start or reconcile), and a prefetch still in flight is not kept when it lands."""
+        self._prefetched.clear()
+        self._cred_gen += 1
         self.api_key = api_key
         self.api_secret = api_secret.encode() if api_secret else b""
         if api_key:
@@ -88,8 +107,56 @@ class BinanceRest:
             await asyncio.sleep(wait)
             self.used_weight = 0
 
+    @staticmethod
+    def _prefetch_key(method: str, path: str, params: dict[str, Any] | None, signed: bool) -> tuple:
+        return (method.upper(), path, tuple(sorted((k, str(v)) for k, v in (params or {}).items() if v is not None)),
+                bool(signed))
+
+    async def prefetch(self, calls: list[tuple[str, str, dict[str, Any] | None, bool]],
+                       ttl: float = PREFETCH_TTL_S) -> dict[str, float]:
+        """F7: send these GET requests concurrently now; the first identical request() within `ttl` seconds gets the
+        answer instead of a new round trip (each answer is used once). The startup checks use it so the sequential code
+        that follows (universe selection, LiveAccount.start, the engine's reconcile) reads what was fetched in one
+        parallel burst. A failed call is not kept: its consumer sends it again and sees the error itself. Returns the
+        milliseconds each call took (path -> ms; a failure is reported as negative). Subclasses that answer locally
+        (the replay) gain nothing and are left alone."""
+        if type(self).request is not BinanceRest.request:
+            return {}
+
+        gen = self._cred_gen
+
+        async def one(method: str, path: str, params: dict[str, Any] | None, signed: bool) -> tuple[str, float]:
+            t0 = time.perf_counter()
+            try:
+                data = await self._send(method, path, params, signed)
+            except Exception as e:  # noqa: BLE001
+                log.debug("prefetch %s %s failed: %s", method, path, e)
+                return path, -(time.perf_counter() - t0) * 1e3
+            if self._cred_gen != gen:  # the keys (or the endpoint) changed while it was in flight
+                return path, -(time.perf_counter() - t0) * 1e3
+            self._prefetched[self._prefetch_key(method, path, params, signed)] = (time.monotonic() + ttl, data)
+            return path, (time.perf_counter() - t0) * 1e3
+
+        res = await asyncio.gather(*(one(*c) for c in calls))
+        return dict(res)
+
+    def _take_prefetched(self, method: str, path: str, params: dict[str, Any] | None, signed: bool) -> Any:
+        now = time.monotonic()
+        for k in [k for k, (exp, _) in self._prefetched.items() if exp < now]:
+            del self._prefetched[k]
+        hit = self._prefetched.pop(self._prefetch_key(method, path, params, signed), None)
+        return _MISS if hit is None else hit[1]
+
     async def request(self, method: str, path: str, params: dict[str, Any] | None = None, signed: bool = False,
                       retries: int = 3) -> Any:
+        if self._prefetched:
+            hit = self._take_prefetched(method, path, params, signed)
+            if hit is not _MISS:
+                return hit
+        return await self._send(method, path, params, signed, retries)
+
+    async def _send(self, method: str, path: str, params: dict[str, Any] | None = None, signed: bool = False,
+                    retries: int = 3) -> Any:
         params = dict(params or {})
         attempt = 0
         while True:
@@ -135,10 +202,26 @@ class BinanceRest:
             return data
 
     async def sync_time(self) -> None:
+        t0 = time.perf_counter()
         data = await self.request("GET", "/fapi/v1/time")
         self.time_offset = int(data["serverTime"]) - int(time.time() * 1000)
         self._last_sync = time.time()
-        log.debug("time offset %dms", self.time_offset)
+        self.time_rtt_ms = (time.perf_counter() - t0) * 1e3
+        # F7: clock drift monitor (local - server; now_ms() is the replay's virtual clock when one runs)
+        perf.DRIFT.observe(now_ms() - int(data["serverTime"]), "rest", self.time_rtt_ms)
+        log.debug("time offset %dms (round trip %.0f ms)", self.time_offset, self.time_rtt_ms)
+
+    async def keep_warm(self, interval_s: float = WARM_INTERVAL_S) -> None:
+        """F7, live: a light request every `interval_s` (the server time, weight 1) keeps a pooled connection open for
+        the order path and refreshes the clock offset and the drift monitor. Runs until cancelled."""
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await self.sync_time()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.debug("keep-warm time request failed: %s", e)
 
     # --- market data ---------------------------------------------------------------------------
     async def exchange_info(self) -> dict:

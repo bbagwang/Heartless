@@ -42,7 +42,10 @@ class Settings(BaseSettings):
     history_days: int = Field(default=21, alias="HISTORY_DAYS")
     # bulk history from the public data.binance.vision archive (no API weight); REST only fills the recent tail
     archive_backfill: bool = Field(default=True, alias="ARCHIVE_BACKFILL")
-    always_include: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT", alias="ALWAYS_INCLUDE")
+    # Data subscription, not a trading guarantee (F0, docs/UNIVERSE.md): symbols whose market data the bot always
+    # subscribes, BTC as the regime / market-context reference every alpha reads. They trade only when they pass the
+    # same eligibility rules as every other symbol (heartless/data/universe.py); was BTCUSDT,ETHUSDT,SOLUSDT.
+    always_include: str = Field(default="BTCUSDT", alias="ALWAYS_INCLUDE")
 
     # --- risk (defaults are deliberately conservative; the optimizer never touches these) -----
     risk_per_trade_pct: float = Field(default=0.5, alias="RISK_PER_TRADE_PCT")  # % of equity lost at stop
@@ -159,6 +162,33 @@ class Settings(BaseSettings):
             self.data_retention_days = need
         return self
 
+    # --- F7: speed and optimization (docs/PERFORMANCE.md) ----------------------------------------------------------
+    # Live feature frames are appended bar by bar (heartless/data/incremental.py) instead of recomputed every minute:
+    # each frame equals, bit for bit, the batch computation over the bars since its anchor, and is re-anchored (checked
+    # against the batch, then rebuilt from the 1m tail) every few hours. Off: the per-bar batch rebuild as before.
+    incremental_features: bool = Field(default=True, alias="INCREMENTAL_FEATURES")
+    # Local order book per traded symbol from the depth streams (heartless/exchange/orderbook.py), read by alphas as
+    # ctx.book (spread, imbalance, depth within ORDERBOOK_DEPTH_BPS, staleness). Off until an F-wave alpha uses it;
+    # a replay then serves the conservative 1m-bar proxy instead. "partial": depth20 snapshots (no REST); "diff":
+    # diff-depth kept in sequence on REST snapshots. Speed: 100, 250 or 500 ms.
+    orderbook_stream: bool = Field(default=False, alias="ORDERBOOK_STREAM")
+    orderbook_mode: Literal["partial", "diff"] = Field(default="partial", alias="ORDERBOOK_MODE")
+    orderbook_speed_ms: int = Field(default=100, alias="ORDERBOOK_SPEED_MS")
+    orderbook_depth_bps: float = Field(default=10.0, alias="ORDERBOOK_DEPTH_BPS")
+    # |local clock - exchange clock| (REST time syncs, stream event times) above this is logged as a warning
+    clock_drift_warn_ms: float = Field(default=1000.0, alias="CLOCK_DRIFT_WARN_MS")
+
+    # --- F0: coin-agnostic universes (docs/UNIVERSE.md, heartless/data/universe.py) -------------------------------
+    # live eligibility besides UNIVERSE_MIN_QUOTE_VOLUME: listing age, tick size against the price, quoted spread
+    universe_min_age_days: int = Field(default=30, alias="UNIVERSE_MIN_AGE_DAYS")
+    universe_max_tick_bps: float = Field(default=10.0, alias="UNIVERSE_MAX_TICK_BPS")
+    universe_max_spread_bps: float = Field(default=5.0, alias="UNIVERSE_MAX_SPREAD_BPS")
+    # SQLite file of the exchange-wide symbol inventory and the 1h futures / spot datasets (empty: <data_dir>/universe.db)
+    universe_db: str = Field(default="", alias="UNIVERSE_DB")
+    # market-context cross-section: 0 = every CONTEXT_UNIVERSE symbol with data that hour (the fixed list, default);
+    # N > 0 = only the N of them with the largest trailing 24h quote volume at that hour
+    context_top_n: int = Field(default=0, alias="CONTEXT_TOP_N")
+
     @field_validator("telegram_owner_id", mode="before")
     @classmethod
     def _blank_owner_id_is_none(cls, v):
@@ -191,6 +221,11 @@ class Settings(BaseSettings):
     @property
     def context_db_path(self) -> Path:
         return Path(self.context_db) if self.context_db else self.data_dir / "context.db"
+
+    # F0: the universe database is research data of its own (inventory, 1h blocks), never the candle database
+    @property
+    def universe_db_path(self) -> Path:
+        return Path(self.universe_db) if self.universe_db else self.data_dir / "universe.db"
 
 
 # E2: days of stored history beyond the research window and its warm-up (the research window ends at the newest stored
