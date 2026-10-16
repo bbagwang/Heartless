@@ -228,8 +228,7 @@ def test_schedule_from_a_candle_database_and_without_universe(tmp_path):
     a = SH.build_schedule(T0 + 32 * D, end, candle_db=tmp_path / "c.db")
     b = SH.build_schedule(T0 + 32 * D, end, btc_1m=(ct, c))
     assert a.meta["missing"] == ["S3"] and a.meta["hourly_source"] == "1m" and a.s0 == b.s0
-    # no candle earlier than S0_READ_MS before the window start is read: two days of bars hold no 720-hour history, so
-    # S1 / S2 cannot judge
+    # no candle before the window start is read: two days of bars hold no 720-hour history, so S1 / S2 cannot judge
     assert a.hourly["S1"] == [] and b.hourly["S1"]
     a2 = SH.build_schedule(T0 + D, end, candle_db=tmp_path / "c.db")
     assert {r: [h for h in v if h > T0 + 32 * D - SH.HALT_MS] for r, v in a2.hourly.items()} == b.hourly
@@ -243,7 +242,8 @@ def test_schedule_from_a_candle_database_and_without_universe(tmp_path):
 def test_a_window_starting_inside_a_halt_is_halted(tmp_path):
     """A firing just before a window halts the window's first decisions as it does online and in any longer window:
     the schedule keeps the S1-S3 firings up to 2 h and the S0 firings up to 15 minutes before `start` (they are history
-    only: counts() reports the window itself)."""
+    only: counts() reports the window itself). S0 needs BTC bars before `start`: given as arrays, or a schedule read
+    from a candle database (which reads none before its start) built from S0_LEAD_MS earlier, as heartless hourly does."""
     ct, c = _btc_minutes()
     udb, _ = _universe(tmp_path, ct, c)
     end = int(ct[-1])
@@ -258,7 +258,7 @@ def test_a_window_starting_inside_a_halt_is_halted(tmp_path):
     det = SH.ShockDetector()
     det.prime(udb, until=f + H, since=f + H - SH.WARMUP_MS)
     assert det.entry_halt(f + H) == full.entry_halt(f + H) == SH.build_schedule(f + H, end, universe_db=udb).entry_halt(f + H)
-    # S0 read from a candle database: the 15 minutes after a firing that precedes the window
+    # S0: the 15 minutes after a firing that precedes the window
     db = Store(tmp_path / "c.db")
     db.save_candles("BTCUSDT", [Candle(int(t) - 59_999, float(p), float(p), float(p), float(p), 1.0, float(p), 1, 0.5,
                                        int(t)) for t, p in zip(ct, c)])
@@ -267,9 +267,13 @@ def test_a_window_starting_inside_a_halt_is_halted(tmp_path):
     m = s0.s0[0]
     last = s0.s0[-1]  # the drop fires on consecutive minutes
     for t0 in (m + MIN, last + MIN, last + 14 * MIN, last + 15 * MIN):
-        late = SH.build_schedule(t0, end, candle_db=tmp_path / "c.db")
-        assert late.entry_halt(t0) == s0.entry_halt(t0) == ("shock S0" if t0 < last + 15 * MIN else ""), t0
-        assert late.counts()["S0"] == sum(1 for x in s0.s0 if x >= t0)
+        want = "shock S0" if t0 < last + 15 * MIN else ""
+        arrays = SH.build_schedule(t0, end, btc_1m=(ct, c))  # bars before the window given
+        lead = SH.build_schedule(t0 - SH.S0_LEAD_MS, end, candle_db=tmp_path / "c.db")
+        assert arrays.entry_halt(t0) == lead.entry_halt(t0) == s0.entry_halt(t0) == want, t0
+        assert arrays.counts()["S0"] == sum(1 for x in s0.s0 if x >= t0)
+    # a schedule read from a candle database reads none of its bars before `start`: S0 judges from its 6th bar
+    assert m not in SH.build_schedule(m - 2 * MIN, end, candle_db=tmp_path / "c.db").s0
 
 
 def test_schedule_file_and_process_cache(tmp_path):

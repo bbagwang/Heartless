@@ -69,6 +69,30 @@ def test_hourly_cli_applies_the_layer(tmp_path, capsys):
     assert trials.family_tests("fpreb_test") == n_lines
 
 
+def test_the_hourly_cli_schedule_reaches_back_for_s0(tmp_path, monkeypatch):
+    """`heartless hourly` builds its schedule from S0_LEAD_MS before the window (a schedule reads no BTC 1m bar before
+    its own start), so an S0 firing in the 15 minutes before `start` halts the first decisions; it counts the window."""
+    db = make_db(tmp_path / "u.db", {"AUSDT": {"start": T0, "c": np.round(100 + np.sin(np.arange(240) / 3), 4)}})
+    asked = []
+    real = SH.schedule_for
+
+    def spy(settings, start, end, *a, **k):
+        asked.append((start, end))
+        return real(settings, start, end, *a, **k)
+
+    monkeypatch.setattr(SH, "schedule_for", spy)
+    args = SimpleNamespace(period=None, start="2024-01-02", end="2024-01-09", universe=None, symbols="AUSDT",
+                           equivalence=False, alpha="heartless.learning.hourly:ReferenceAlpha", set=["hold_h=6"],
+                           stress=False, tag=None, trades_out=None, out=str(tmp_path / "r.json"), workers=1,
+                           argv=["heartless", "hourly"])
+    SH._CACHE.clear()
+    Hr.main_cli(Settings(_env_file=None, HEARTLESS_DATA_DIR=str(tmp_path), UNIVERSE_DB=db), args)
+    start, end = Hr.resolve_window(args)
+    assert asked == [(start - SH.S0_LEAD_MS, end)]
+    doc = json.loads((tmp_path / "r.json").read_text())
+    assert doc["shock"]["firings"] == SH.ShockEvents().counts(start, end)  # nothing fired; the window is counted
+
+
 def test_an_exempt_alpha_may_record_without_the_layer(tmp_path, capsys):
     """A shock_exempt alpha takes no entry filter either way, so its trial does not depend on SHOCK_LAYER."""
     db = make_db(tmp_path / "u.db", {"AUSDT": {"start": T0, "c": np.round(100 + np.sin(np.arange(240) / 3), 4)}})

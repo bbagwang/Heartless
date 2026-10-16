@@ -954,7 +954,9 @@ def main_cli(settings, args) -> None:
             if getattr(settings, "shock_layer", False):
                 from heartless.strategy import shock as SH
 
-                sched = SH.schedule_for(settings, start, end)
+                # from S0_LEAD_MS before the window: an S0 firing in the 15 minutes before `start` halts its first
+                # decisions (a schedule reads no BTC 1m bar before its own start)
+                sched = SH.schedule_for(settings, start - SH.S0_LEAD_MS, end)
                 shock_filter = SH.EntryFilter.for_alpha(alpha, sched)
                 shock_doc = {"exempt": shock_filter is None, "firings": sched.counts(start, end),
                              "missing": sched.meta.get("missing", [])}
