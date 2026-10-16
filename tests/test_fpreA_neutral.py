@@ -289,6 +289,49 @@ def test_an_entry_on_an_instruments_last_bar_is_taken_and_closed_when_the_next_b
     assert _run(Scripted(enter=_close(9), leave=_close(12)), ctx_(8, True)).positions == []
 
 
+class Holder(N.NeutralStrategy):
+    """Wants a carry position on each of `symbols` at every close (a carry signal that stays on into a delisting)."""
+    name = "holder_carry"
+    family = "carry_neutral"
+    markets = ("perp", "spot")
+    defaults = {"notional": 1000.0, "symbols": ("AUSDT",)}
+
+    def candidates(self, ctx, T, book):
+        q = self.params["notional"]
+        return [N.Candidate(s, 1.0, [N.LegSpec(s, "spot", 1, q), N.LegSpec(s, "perp", -1, q)])
+                for s in self.params["symbols"]]
+
+
+def test_a_position_settled_at_the_last_bar_is_not_reopened_at_that_close():
+    """Regression (adversarial review 2026-10-16): once entries were allowed on an instrument's last bar, a position
+    held into that bar was settled by the close step (delisting with 5x slippage, or data_end) and then reopened at the
+    very close it was forced out at, because the settlement had freed its key: another round trip of fees, a second
+    delisting close an hour later and an hour with the other leg unhedged. Without that settlement (which applies the
+    convention that the last bar ends the trading) the key would still be held, so that close takes no entry on a
+    settled instrument. A strategy that held nothing there still enters at the last bar (previous test)."""
+    for delisted, reason in ((True, "delisting"), (False, "data_end")):
+        ctx = _ctx(20)
+        ctx.last_bar[("AUSDT", "perp")] = 8
+        ctx.delisted[("AUSDT", "perp")] = delisted
+        r = _run(Holder(), ctx)
+        assert [(p["key"], p["opened"], p["closed"], p["reason"]) for p in r.positions] == [
+            ("AUSDT", N._iso(_close(0)), N._iso(_close(8)), reason)], reason
+    # only the settled instrument is refused at that close: another symbol's position is held to the window end
+    n = 20
+    c = np.full(n, 100.0)
+    series = {}
+    for s in ("AUSDT", "BUSDT"):
+        series[(s, "perp")] = {"close": c.copy(), "funding": np.full(n, np.nan)}
+        series[(s, "spot")] = {"close": c.copy()}
+    ctx = N.synthetic_context(T0, series)
+    ctx.last_bar[("AUSDT", "perp")] = 8
+    ctx.delisted[("AUSDT", "perp")] = True
+    r = _run(Holder(symbols=("AUSDT", "BUSDT")), ctx)
+    assert sorted((p["key"], p["opened"], p["closed"], p["reason"]) for p in r.positions) == [
+        ("AUSDT", N._iso(_close(0)), N._iso(_close(8)), "delisting"),
+        ("BUSDT", N._iso(_close(0)), N._iso(ctx.end + 1), "end")]
+
+
 def test_a_leg_whose_data_ends_early_closes_the_position_there():
     """Review fix: the spot series stops after bar 39 without a delisting (a market built to an earlier end, or a
     delisting inside the inventory's 3-day slack) while the perp trades on and rises 20%. The position used to stay

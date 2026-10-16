@@ -27,7 +27,10 @@ Account (one pool of cash C, spot and futures wallets together; transfers are fr
   are positions with a leg whose stored data stops earlier without a delisting ("data_end", nominal costs). Entries
   are never refused because a bar is an instrument's last one (that is only known when the next bar does not come):
   a position entered at that close is closed at the next hour close, its leg on the stopped instrument at the last
-  close (with 5x the slippage for a delisting), the other legs at that next close.
+  close (with 5x the slippage for a delisting), the other legs at that next close. An instrument on which the close
+  step has just settled a position takes no entry at that same close: that settlement is the end of its trading, and
+  without it the key and the slot would still be held (the strategy that kept wanting the position re-entered at the
+  close it was forced out at and paid the delisting close twice).
 * entries only in the months the symbols are members of the topN research universe (or the given symbols); open
   positions keep their exit rules after membership ends. Decisions see only bars that closed by the decision.
 
@@ -637,6 +640,9 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
         #    held on, its leg would keep a frozen price while the other leg moves, an unhedged PnL that never existed.
         #    A position entered at that last close (entries never know a bar is the last one) closes at the next hour
         #    close, when the missing bar shows the instrument has stopped: that leg at its last close (closes_at)
+        #    The instruments settled here take no entry at this close (step 4): the settlement ends their trading, and
+        #    a position held into it would otherwise reopen at the close it was forced out at
+        settled: set[tuple[str, str]] = set()
         for pos in list(book.open.values()):
             ends = [(l.symbol, l.market) for l in pos.legs if l.alive and data_ended(l.symbol, l.market, T)]
             dl = {k: costs.delist_mult for k in ends if ctx.delisted.get(k)}
@@ -646,6 +652,7 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
                 finish(pos, T, "end")
             elif ends:
                 finish(pos, T, "data_end")
+            settled.update(ends)  # a position with a stopped leg is closed by one of the three branches above
         # 4) the strategy at the close: exits (decision times), rebalances (every close), entries (decision times)
         decide = T < last_T and strategy.is_decision(ctx, T)
         if decide:
@@ -672,7 +679,10 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
                     if any(ctx.idx(s.symbol, s.market, T) is None for s in c.legs):
                         continue  # no bar at T: the instrument does not trade (yet, or any more)
                     # not refused at an instrument's last bar: that it is the last one is only known an hour later
-                    # (step 3 then closes the position as a delisting / data_end)
+                    # (step 3 then closes the position as a delisting / data_end) - unless step 3 has just settled a
+                    # position on it at this close (its trading ended there)
+                    if settled and any((s.symbol, s.market) in settled for s in c.legs):
+                        continue
                     if entry_filter is not None and not all(entry_filter(s, T) for s in syms):
                         continue
                     cands.append(c)
