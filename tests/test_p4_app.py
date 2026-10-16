@@ -19,7 +19,7 @@ from heartless.notify import formatter as F
 from heartless.notify.telegram import TelegramBot
 from heartless.replay.invariants import _RE_DAILY_TODAY, _RE_DAILY_WEEK
 from heartless.strategy.params import StrategyParams
-from heartless.util.timeutil import MS_DAY, MS_HOUR, now_ms
+from heartless.util.timeutil import MS_DAY, MS_HOUR, now_ms, utc_day_start
 
 SYMS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 N_HIST = 1500
@@ -151,8 +151,10 @@ async def test_a_challenger_clearing_the_absolute_bar_is_promoted_and_trades():
     params.enabled["trend_pullback"] = True  # failed out of sample (P1): the failed-alpha schedule (30/60/90 days)
     slot = await app.install_challenger(params, source="trend_pullback")
     assert slot is not None and app.research.trial_days(slot) == 90
-    slot.started = now_ms() - 64 * MS_DAY  # judged at its 60-day checkpoint
-    pattern = ([1.0, -0.4] * 3 + [-1.0, 0.5]) * 15  # 120 trades on 60 days, mean +0.16R, t_day ~5.2
+    # judged at its 60-day checkpoint. Anchored at 12:00 UTC: from a wall-clock start the +1h / +2h exits of a pair fall
+    # on two UTC days whenever the test runs between 22:00 and 23:00 UTC, which regroups the exit days (HAC t 10.7 vs 5.4)
+    slot.started = utc_day_start(now_ms()) - 64 * MS_DAY + 12 * MS_HOUR
+    pattern = ([1.0, -0.4] * 3 + [-1.0, 0.5]) * 15  # 120 trades on 60 days, mean +0.16R, HAC t_day 10.7
     for i, r in enumerate(pattern):
         app.store.save_trade(_rec(slot.name, i, "trend_pullback", r, slot.started + (i // 2) * MS_DAY + (1 + i % 2) * MS_HOUR,
                                   params.version))

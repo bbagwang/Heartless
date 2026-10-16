@@ -89,6 +89,10 @@ def live_context_path(settings: Settings) -> Path:
 
 # truthful status line while the champion has no alpha switched on (startup message, /status, daily report)
 NO_ALPHA_TEXT = "⚠️ 활성 알파 없음(0개): 거래하지 않고 연구·발굴·챌린저 검증만 진행"
+# ROADMAP P2 (final exam rule): the sealed-2025 joint portfolio lost (-0.77%, docs/SEALED_2025.md), so the startup
+# message keeps "live trading not recommended" while no alpha has passed a pre-registered out-of-sample test
+LIVE_NOT_RECOMMENDED_TEXT = ("⚠️ 실거래 비권장: 사전 등록 표본 외 시험(P1·P2·2025 확인 시험)을 통과한 알파가 없고, "
+                             "2025 정보용 공동 포트폴리오도 손실(-0.77%)이었습니다 (docs/SEALED_2025.md)")
 
 
 class Heartless:
@@ -368,6 +372,8 @@ class Heartless:
         else:
             lines += [NO_ALPHA_TEXT, "거래 시작 조건: " + ls["criteria"]]
         lines += [ls["evidence"], ls["kill_switch"]]
+        if not ls["evidence_counts"].get("passed"):
+            lines.append(LIVE_NOT_RECOMMENDED_TEXT)
         pf = self.portfolio_status()
         lines.append(f"포트폴리오 할당기 켜짐: 위험 예산 총 {pf['max_total_risk_pct']:g}%·같은 방향 "
                      f"{pf['max_same_direction_risk_pct']:g}%(BTC 베타 가중) (docs/PORTFOLIO.md)"

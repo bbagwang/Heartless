@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "heartless"
 version = "1.0.0"
-description = "Heartless - emotionless, self-improving Binance USDⓈ-M futures scalping bot with Telegram and web control"
+description = "Heartless - emotionless, fully automatic, self-improving Binance USDⓈ-M futures trading bot (paper mode by default) with Telegram and web control"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

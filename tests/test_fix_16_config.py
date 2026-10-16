@@ -59,6 +59,7 @@ def test_load_settings_from_repo_style_cwd(tmp_path, monkeypatch):
     # `heartless run` / `doctor` / `params` all start with load_settings() from the working directory
     (tmp_path / ".env").write_text(ENV_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(Settings.model_config, "env_file", ".env")  # tests/conftest.py turns the cwd .env off
     s = load_settings(HEARTLESS_DATA_DIR=str(tmp_path / "data"))
     assert s.telegram_owner_id is None
     assert (tmp_path / "data").is_dir()
