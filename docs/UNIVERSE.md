@@ -103,6 +103,12 @@ heartless discover --universe top40 --train 2022-01-13:2023-01-01 --valid 2023-0
   - **discover는 `--train` 기간으로만 풉니다 (리뷰 수정).** 이전에는 `--train`과 `--valid`의 합으로 풀어서, VALID 기간의 유동성(흔히 VALID에서 급등한 종목)이 TRAIN에서 발굴하고 VALID에서 검증할 종목을 골랐습니다. TRAIN 끝에서 얼린 유니버스는 VALID에 대해 시점이 맞습니다(VALID 안의 상장폐지는 포함, VALID에 새로 상장한 종목은 빠짐).
   - 1분봉 캔들 DB에 **그 기간 안의** 데이터가 있는 종목만 평가하고, **없는 종목은 건너뛰었다고 표시합니다.** 기간 밖에만 1분봉이 있는 종목도 건너뜀으로 셉니다(이전에는 평가 목록에 들어가 lab 오류로만 나타남). 조용히 유니버스를 줄이지 않습니다. 표준 오류에 목록을 출력하고, `--out` JSON에 `universe_resolution`(규칙, 전체 구성원, 평가한 종목, 건너뛴 종목, 구성원 달, 구성원 구간, 구성원 시간 비율)을 남깁니다.
   - 순위를 낼 수 없는 달(직전 달 1시간봉이 없음)이 기간에 있으면 거부합니다.
+  - **부분 구성원 집합은 거부합니다 (`blocked_data`, 2026-10-16 레드팀 F-H1, ROADMAP 6절).** "기간 안에 1분봉이 하나라도 있으면 평가"만으로는 구성원 일부만 돌고도 `top40`이라는 이름으로 원장에 남았습니다.
+    - 구성원 달마다 1분봉 수를 셉니다(`universe.member_coverage`, 구성원 달당 색인 COUNT 한 번, 장기 DB에서 약 2ms). 구성원 달은 기간과 마지막 거래 시간으로 자른 달이고, 저장된 분이 기대 분의 90% 이상이면 채워진 것으로 봅니다. 상장폐지 뒤의 달은 거래할 것이 없으므로 세지 않습니다.
+    - 구성원 구간마다 시작 전 12일(`lab.WARMUP_MS`, 재상장 뒤라면 새 상장부터)의 워밍업 1분봉도 같은 기준으로 셉니다.
+    - 빠진 구성원 달 또는 빠진 워밍업이 **2%를 넘으면** lab·discover가 실행 전에 거부합니다(종료 코드 2, 빠진 심볼·월 목록). 기준은 `universe.MAX_MISSING_SHARE`, `MIN_MONTH_COVERAGE`입니다.
+    - `--allow-partial`을 주면 돌지만, 큰 경고를 내고 `--out` JSON의 `universe_resolution`에 `coverage`, `partial`, `allow_partial`을 남깁니다. `--tag`와 함께 쓰면 거부합니다(부분 실행은 시도가 아님). FORWARD 등록 명령에도 쓸 수 없습니다(`forward.normalize_command`).
+    - 2026-10-16 실측(개수만): TRAIN-F는 구성원 달 1,920개 중 141개(7.3%), 워밍업 412개 중 44개(10.7%)가 비어 거부됩니다. VALID-F는 360개 중 223개(61.9%), 117개 중 97개(82.9%)입니다. F-data-1m을 마칠 때까지 topN lab·discover는 `blocked_data`이고, 대체 유니버스는 쓰지 않습니다(7.12절).
 - 실측 (top40, 2026-10-15 빌드, 해석 0.4초):
 
 | 기간 | 구성원 | 기간 안 상장폐지 | 장기 DB에 1분봉 있음 |
@@ -193,7 +199,7 @@ heartless discover --universe top40 --train 2022-01-13:2023-01-01 --valid 2023-0
 - **새 달 추가:** `heartless universe build --end <오늘>`을 다시 돌리면 새로 나온 월 파일만 받습니다. 새 상장 심볼을 잡으려면 먼저 `heartless universe inventory`로 목록을 새로 읽습니다.
 - **다른 견적 자산:** `build_futures(..., quotes=("USDT", "USDC"))`. 연구 유니버스 규칙은 USDT만 순위에 넣습니다. 같은 코인의 USDC 계약을 넣으면 한 시장을 두 번 세기 때문입니다.
 - **다른 순위 규칙:** 블록 요약 열(`med_dqv`, `days_traded`, `first_trade`, `last_trade`)이나 `load_hourly`로 계산합니다. 규칙을 바꾸면 연구 결과의 구성원이 바뀌므로, 사전 등록 문서에 먼저 적습니다.
-- **1분봉이 필요한 구성원:** `heartless universe resolve --top N --out res.json`으로 구성원과 구성원 달을 얻고, `heartless fetch --start ... --symbols ...`로 받습니다. 받은 뒤 같은 lab 명령은 건너뛴 종목 없이 돕니다.
+- **1분봉이 필요한 구성원:** `heartless universe resolve --top N --out res.json`으로 구성원과 구성원 달을 얻고, `heartless fetch --start ... --symbols ...`로 받습니다. 받은 뒤 같은 lab 명령은 건너뛴 종목 없이 돕니다. 빠진 구성원 달이 2%를 넘는 동안은 거부되고(3절), 원장 없이 살펴보려면 `heartless lab --universe top40 --allow-partial ...`을 씁니다.
 
 ## 9. 다음 단계에 넘기는 인터페이스 (F1/F2 연구)
 

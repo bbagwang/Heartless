@@ -189,7 +189,8 @@ def test_lab_universe_topn_runs_the_stored_members_and_records_the_skipped(udb, 
     args = SimpleNamespace(symbols=None, universe="top2", years=None, start="2023-12-29", end="2024-01-03",
                            split="train", unseal=[], params=str(pfile), set=[], stress=False, meta=False,
                            chunk_days=None, alpha=None, workers=1, json=False, trades_out=None, out=str(out),
-                           by_side=False, argv=["heartless", "lab", "--universe", "top2"])
+                           by_side=False, allow_partial=True, argv=["heartless", "lab", "--universe", "top2"])
+    # GONE and MID have no 1m candles: a partial member set, refused without --allow-partial (tests/test_rt_partial_members)
     top = cli._top_universe(settings, args, "lab")
     lab.main_cli(settings, args)
     cli._note_top_universe(args, top)
@@ -329,7 +330,7 @@ def test_discover_resolves_the_universe_over_train_only(udb, tmp_path, monkeypat
     monkeypatch.setattr(settings.__class__, "db_path", property(lambda self: db))
     monkeypatch.setattr(lab, "UNIVERSES", dict(lab.UNIVERSES))
     res = cli._top_universe(settings, SimpleNamespace(universe="top2", train="2023-12-01:2024-01-01",
-                                                      valid="2024-03-01:2024-04-01"), "discover")
+                                                      valid="2024-03-01:2024-04-01", allow_partial=True), "discover")
     assert set(res["research"]) == {"BIGUSDT", "GONEUSDT"} and lab.UNIVERSES["top2"] == ["BIGUSDT", "GONEUSDT"]
     err = capsys.readouterr().err
     assert "TRAIN window" in err and "look-ahead" in err

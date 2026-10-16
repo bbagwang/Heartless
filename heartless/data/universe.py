@@ -169,6 +169,12 @@ RESEARCH_MIN_AGE_DAYS = MIN_AGE_DAYS  # the live listing-age rule, applied at th
 # new contracts after their old ones settled; CVCUSDT returned in 2025-05 after 2.5 years). The exchange gives a
 # relisted contract a new onboardDate, so the listing-age rule counts from the new first trade, as live does.
 RELIST_GAP_DAYS = 7
+# 1m coverage of a topN run (ROADMAP section 6, 2026-10-16; red-team F-H1). A member-month (or a membership span's
+# warm-up) counts as covered when the candle database holds at least MIN_MONTH_COVERAGE of its expected minutes; a lab
+# or discover run is refused (blocked_data) when more than MAX_MISSING_SHARE of its member-months or of its warm-ups
+# are not covered, unless --allow-partial, which is never recorded in the trial ledger nor allowed in a FORWARD command.
+MIN_MONTH_COVERAGE = 0.9
+MAX_MISSING_SHARE = 0.02
 
 
 def _month_ms(month: str) -> int:
@@ -348,6 +354,90 @@ def stored_candle_symbols(candle_db, symbols: list[str], start: int | None = Non
         con.close()
 
 
+def _count_candles(con, symbol: str, a: int, b: int) -> int:
+    try:
+        return int(con.execute("SELECT COUNT(*) FROM candles WHERE symbol=? AND open_time BETWEEN ? AND ?",
+                               (symbol, int(a), int(b))).fetchone()[0])
+    except Exception:  # noqa: BLE001 - no candles table: nothing is covered
+        return 0
+
+
+def member_coverage(candle_db, members: dict[str, list[str]], start: int, end: int,
+                    last_trade: dict[str, int | None] | None = None, listed: dict[str, list[int]] | None = None,
+                    warmup_ms: int = 12 * MS_DAY, min_coverage: float = MIN_MONTH_COVERAGE) -> dict:
+    """1m coverage of a topN run's member-months and of each membership span's warm-up, from the candle database
+    (read-only, one indexed COUNT per member-month, about 2 ms each on the long-history database).
+
+    A member-month is the month clipped to [start, end] and to the end of the symbol's last traded hour (a month after
+    the delisting has nothing to trade and is not counted); it is covered when the stored 1m bars reach `min_coverage`
+    of its minutes. A span's warm-up is the `warmup_ms` before the span start, from the latest listing at or before
+    it on (`listed`: per symbol its listing and relisting times, ascending): the indicators of the span's first
+    decisions need it. Why: "any candle in the window" let a run evaluate a fraction of
+    its member set (TRAIN-F 1,779 of 1,920 member-months, VALID-F 137 of 360 on 2026-10-16) under the topN name."""
+    import sqlite3
+    from pathlib import Path
+
+    from heartless.core.store import readonly_uri
+    from heartless.data.symbols_inventory import _next_month_ms
+
+    MS_MIN = 60_000
+    con = sqlite3.connect(readonly_uri(candle_db), uri=True) if Path(candle_db).exists() else None
+    months_total = 0
+    missing: list[dict] = []
+    spans_total = 0
+    warm_missing: list[dict] = []
+    try:
+        for sym in sorted(members):
+            stop = last_trade.get(sym) if last_trade else None
+            cap = int(stop) + 3_600_000 - 1 if stop is not None else int(end)
+            for mo in sorted(set(members[sym])):
+                a, b = max(_month_ms(mo), int(start)), min(_next_month_ms(mo) - 1, int(end), cap)
+                if b < a:
+                    continue
+                need = (b - a) // MS_MIN + 1
+                have = _count_candles(con, sym, a, b) if con is not None else 0
+                months_total += 1
+                if have < min_coverage * need:
+                    missing.append({"symbol": sym, "month": mo, "minutes": have, "expected": need})
+            for a, b in membership_windows({sym: members[sym]}, start, min(int(end), cap)).get(sym, []):
+                lo = a - int(warmup_ms)
+                back = [int(t) for t in (listed or {}).get(sym) or () if t is not None and t <= a]
+                if back:
+                    lo = max(lo, back[-1])
+                if lo >= a or warmup_ms <= 0:
+                    continue
+                need = (a - lo) // MS_MIN
+                have = _count_candles(con, sym, lo, a - 1) if con is not None else 0
+                spans_total += 1
+                if have < min_coverage * need:
+                    warm_missing.append({"symbol": sym, "span_start": a, "minutes": have, "expected": need})
+    finally:
+        if con is not None:
+            con.close()
+    share = len(missing) / months_total if months_total else 0.0
+    wshare = len(warm_missing) / spans_total if spans_total else 0.0
+    return {"rule": f"a member-month (or a span's {warmup_ms / MS_DAY:g}-day warm-up) is covered with >= "
+                    f"{min_coverage:.0%} of its minutes stored; refused above {MAX_MISSING_SHARE:.0%} missing "
+                    f"(ROADMAP section 6, 2026-10-16)",
+            "member_months": months_total, "missing_member_months": missing, "missing_share": round(share, 5),
+            "warmups": spans_total, "missing_warmups": warm_missing, "missing_warmup_share": round(wshare, 5),
+            "max_missing_share": MAX_MISSING_SHARE}
+
+
+def coverage_problem(coverage: dict | None, max_share: float = MAX_MISSING_SHARE) -> str | None:
+    """Why a topN run's member set is too incomplete to stand for the rule (blocked_data), or None."""
+    if not coverage:
+        return None
+    out = []
+    if coverage["missing_share"] > max_share:
+        out.append(f"{len(coverage['missing_member_months'])} of {coverage['member_months']} member-months "
+                   f"({coverage['missing_share']:.1%}) lack 1m candles")
+    if coverage["missing_warmup_share"] > max_share:
+        out.append(f"{len(coverage['missing_warmups'])} of {coverage['warmups']} membership spans "
+                   f"({coverage['missing_warmup_share']:.1%}) lack their 1m warm-up")
+    return "; ".join(out) + f" (at most {max_share:.0%} may be missing)" if out else None
+
+
 def membership_windows(members: dict[str, list[str]], start: int | None = None,
                        end: int | None = None) -> dict[str, list[tuple[int, int]]]:
     """Each member's months as contiguous [first ms, last ms] spans, clipped to [start, end]: the hours in which the
@@ -457,12 +547,15 @@ def member_windows_for(universe_db, symbols: list[str], start: int, end: int, to
     return {"windows": windows, "delisted": {s: v for s, v in delisted.items() if v >= start or windows.get(s)}}
 
 
-def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> dict:
+def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int, coverage: bool = False,
+                    warmup_ms: int = 12 * MS_DAY) -> dict:
     """The topN research universe of [start, end] for a lab / discovery run over `candle_db`: "research" = every
     member (research_universe), "symbols" = those with stored 1m candles inside the window (what the run evaluates),
     "skipped" = the other members, to be reported (fetch them with `heartless fetch --start ... --symbols ...`),
     "windows" = each evaluated member's membership spans (membership_windows; member_trades filters a run's trades by
-    them). ValueError when the universe database is missing or a month of the window cannot be ranked yet."""
+    them). `coverage`: also "coverage" = member_coverage over every member (the lab / discover refusal reads it via
+    coverage_problem). ValueError when the universe database is missing or a month of the window cannot be ranked
+    yet."""
     from pathlib import Path
 
     from heartless.core.store import Store
@@ -486,8 +579,17 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> d
         # every member's delisting up to the window end, also one before the window start (a member month can follow
         # the last traded hour: month m ranks on m-1's volume): the lab runs no job after it (lab.evaluate)
         delisted = delisting_closes(store, res["symbols"], None, end)
+        listed: dict[str, list[int]] = {}
+        if coverage:
+            inv = {r["symbol"]: r for r in store.load_symbol_inventory()}
+            relisted = relistings(store, inv)
+            for s in res["symbols"]:
+                first = listed_at(inv[s]) if s in inv else None
+                listed[s] = sorted(([first] if first is not None else []) + list(relisted.get(s, ())))
     finally:
         store.close()
+    cov = (member_coverage(candle_db, {s: res["members"][s] for s in res["symbols"]}, start, end, res["last_trade"],
+                           listed, warmup_ms) if coverage else None)
     months = member_months(windows)
     skipped_months = member_months(membership_windows({s: res["members"][s] for s in skipped}, start, end))
     return {"rule": f"top{top} by median daily quote volume of the previous month, listed >= {RESEARCH_MIN_AGE_DAYS}d "
@@ -498,5 +600,6 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> d
             # members whose trading ended by the window end (delisting close, docs/ROADMAP.md 7.4)
             "member_months": months, "member_months_total": sum(months.values()),
             "skipped_member_months": sum(skipped_months.values()), "delisted": delisted,
+            **({"coverage": cov} if cov is not None else {}),
             "member_share": round(sum(b - a + 1 for w in windows.values() for a, b in w)
                                   / max(1, len(symbols) * (int(end) - int(start) + 1)), 4)}

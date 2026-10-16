@@ -270,7 +270,8 @@ Wave F 계열 연구자가 모두 쓰는 기반입니다(`docs/ROADMAP.md` 7.3·
   - 창 시작 전에 거래가 끝난 구성원도 셉니다. 달 m의 순위는 m−1의 거래대금으로 매기므로 m−1 말에 상장폐지된 종목도 m의 구성원이 될 수 있고, 창이 달 중간에 시작할 수도 있습니다. 그런 구간은 돌리지 않습니다(마지막 거래 뒤의 평평한 파일로 거래하지 않게). 표준 오류에 "delisted before the window"로 따로 표시합니다(검토 수정).
 - **`--out` 보고.**
   - `membership`: 규칙, 종목별 구성원 달 수, 합계, 작업 수, 창 안 상장폐지, `delisting_closes`(종목, 진입·청산, 바뀐 R과 이전 R, 적용한 슬리피지)
-  - `universe_resolution`: 기존 항목(규칙, 전체 구성원, 평가한 종목, 1분봉이 없어 건너뛴 종목, 구간) + `member_months`, `member_months_total`, `skipped_member_months`(건너뛴 종목의 구성원 달), `delisted`
+  - `universe_resolution`: 기존 항목(규칙, 전체 구성원, 평가한 종목, 1분봉이 없어 건너뛴 종목, 구간) + `member_months`, `member_months_total`, `skipped_member_months`(건너뛴 종목의 구성원 달), `delisted`, `coverage`(구성원 달·워밍업별 1분봉 충족, 2026-10-16), `partial`, `allow_partial`
+- **부분 구성원 집합 거부 (`blocked_data`, ROADMAP 6절 2026-10-16).** 구성원 달이나 구성원 구간 워밍업(12일)의 2%를 넘게 1분봉이 비면 lab·discover가 실행 전에 거부합니다. `heartless lab --universe top40 --allow-partial ...`은 돌지만 경고하고 기록하며, `--tag`와 함께 쓸 수 없고 FORWARD 등록 명령에도 쓸 수 없습니다. 기준과 실측은 [`UNIVERSE.md`](UNIVERSE.md) 3절에 있습니다.
   - 표준 오류에도 구성원 달 수와 상장폐지 목록을 출력합니다. 이전의 "합집합의 미래 정보가 섞여 있다"는 경고는 없어졌습니다(거르기가 들어갔으므로).
 - **고정 목록(`core`, `extended`, `--symbols`)은 그대로입니다.** 거래 목록이 바이트 단위로 이전과 같습니다(기존 lab 테스트 전부 통과). 고정 목록은 평가기 동등성 확인에만 씁니다(7.4절).
 

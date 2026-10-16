@@ -61,7 +61,9 @@ _FORBIDDEN = ("--years", "--split", "--unseal", "--days", "--train", "--valid", 
 # flags a registered command spells in full: argparse takes any unique prefix (allow_abbrev), so `--sta X` after
 # `--start {start}` would move the window, `--stres` would stress the nominal leg and `--sym` would hide the members
 # from the completeness check
-_FULL_ONLY = (*_FORBIDDEN, *_WINDOW_FLAGS, "--stress", "--symbols", "--universe", "--tag")
+_FULL_ONLY = (*_FORBIDDEN, *_WINDOW_FLAGS, "--stress", "--symbols", "--universe", "--tag", "--allow-partial")
+# a confirmation never runs on a partial topN member set (ROADMAP section 6, 2026-10-16: blocked_data, F-H1)
+_PARTIAL_FLAG = "--allow-partial"
 _REFUSED_EVALUATORS = ("forward",)  # a confirmation run never registers, opens or reruns
 WITNESS_SYMBOLS = ("BTCUSDT", "ETHUSDT")  # always looked up for register's data witness (latest_bar_ms)
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,79}$")
@@ -243,6 +245,9 @@ def normalize_command(command, stress: bool = False) -> list[str]:
                                f"expand it after the window checks)")
         if flag in _FORBIDDEN:
             raise ForwardError(f"{flag} is not allowed in a registered command: the registration fixes the window")
+        if flag == _PARTIAL_FLAG:
+            raise ForwardError(f"{flag} is not allowed in a registered command: a confirmation runs on the whole "
+                               f"member set or is blocked_data")
         if flag == "--stress" and not stress:
             raise ForwardError("--stress belongs to the stress command (added automatically), not the nominal one")
         if flag in _WINDOW_FLAGS:

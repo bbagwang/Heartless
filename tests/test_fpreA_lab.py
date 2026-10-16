@@ -128,7 +128,8 @@ def test_lab_cli_top_universe_reports_membership_and_passes_context_top_n(timer_
     args = SimpleNamespace(symbols=None, universe="top2", years=None, start="2023-12-01", end="2024-01-03",
                            split="train", unseal=[], params=str(pfile), set=[], stress=False, meta=False,
                            chunk_days=None, alpha=None, workers=1, json=False, trades_out=None, out=str(out),
-                           by_side=False, tag=None, argv=["heartless", "lab", "--universe", "top2"])
+                           by_side=False, tag=None, allow_partial=True,  # MID has no 1m candles (partial)
+                           argv=["heartless", "lab", "--universe", "top2"])
     top = cli._top_universe(settings, args, "lab")
     lab.main_cli(settings, args)
     cli._note_top_universe(args, top)

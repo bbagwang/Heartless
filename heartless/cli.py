@@ -82,6 +82,9 @@ def main(argv: list[str] | None = None) -> None:
                          "or topN (F0: every symbol top-N by liquidity in a month of the window; docs/UNIVERSE.md)")
     lb.add_argument("--tag", default=None, metavar="FAMILY",
                     help="append this run to the P2 trial ledger docs/results/p2_trials.jsonl under FAMILY")
+    lb.add_argument("--allow-partial", action="store_true",
+                    help="topN: run although more than 2%% of the member-months (or warm-ups) lack 1m candles; "
+                         "recorded in --out, refused with --tag and in FORWARD commands")
     dc = sub.add_parser("discover", help="mine rule-based alphas on stored history (TRAIN) and validate them (VALID)")
     dc.add_argument("--tf", default="15m", help="decision grid(s), comma separated: 15m, 1h, 1d (00:00 UTC daily)")
     dc.add_argument("--grid", default=None, help="same as --tf (e.g. 1h,1d); the t bar counts every grid's rules")
@@ -96,6 +99,9 @@ def main(argv: list[str] | None = None) -> None:
     dc.add_argument("--universe", default=None, type=_universe_name,
                     help="symbol set instead of --symbols (core, extended, all, or topN resolved over --train only: "
                          "the VALID period never chooses the symbols)")
+    dc.add_argument("--allow-partial", action="store_true",
+                    help="topN: run although more than 2%% of the TRAIN member-months (or warm-ups) lack 1m candles; "
+                         "recorded in --out, refused with --tag")
     dc.add_argument("--symbols", default=None)
     dc.add_argument("--beam", type=int, default=30)
     dc.add_argument("--depth", type=int, default=3)
@@ -240,7 +246,12 @@ def _top_universe(settings, args, cmd: str) -> dict | None:
 
     discover resolves over --train only: the run mines TRAIN and validates on VALID with one symbol list, and members
     picked by their VALID-period liquidity would let the VALID period choose the symbols (often the ones that surged
-    there). A universe frozen at the end of TRAIN is point-in-time for VALID (its later delistings included)."""
+    there). A universe frozen at the end of TRAIN is point-in-time for VALID (its later delistings included).
+
+    blocked_data (ROADMAP section 6, 2026-10-16): a run whose member-months or membership warm-ups lack 1m candles for
+    more than universe.MAX_MISSING_SHARE of them is refused, because it would evaluate another universe under the topN name;
+    --allow-partial runs it anyway, says so loudly, records it in the --out JSON, and is refused together with --tag
+    (a partial run is never a trial)."""
     from heartless.data import universe as U
     from heartless.learning import lab
 
@@ -259,10 +270,34 @@ def _top_universe(settings, args, cmd: str) -> dict | None:
             if not args.train:
                 raise ValueError(f"--universe {args.universe} needs --train (the universe is resolved over it)")
             start, end = _window_arg(args.train)
-        res = U.resolve_for_run(settings.universe_db_path, settings.db_path, start, end, n)
+        allow = bool(getattr(args, "allow_partial", False))
+        if allow and (getattr(args, "tag", None) or "").strip():
+            raise ValueError("--allow-partial runs are never recorded in the trial ledger: drop --tag (a partial "
+                             "member set is not the registered universe)")
+        res = U.resolve_for_run(settings.universe_db_path, settings.db_path, start, end, n, coverage=True,
+                                warmup_ms=lab.WARMUP_MS)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
+    cov = res.get("coverage") or {}
+    problem = U.coverage_problem(cov)
+    gaps = [f"{m['symbol']} {m['month']}" for m in cov.get("missing_member_months", [])]
+    if problem and not allow:
+        print(f"error: blocked_data: universe {args.universe} over this window: {problem}. A run on the rest would "
+              f"evaluate another universe under the {args.universe} name (ROADMAP section 6, 2026-10-16). Fetch the "
+              f"missing 1m candles (`heartless universe resolve --top {n}` lists the member-months), or pass "
+              f"--allow-partial for an untagged look. Missing: {', '.join(gaps[:30])}"
+              + (f" ... (+{len(gaps) - 30})" if len(gaps) > 30 else ""), file=sys.stderr, flush=True)
+        sys.exit(2)
+    res["allow_partial"] = allow
+    res["partial"] = bool(problem)
+    if problem:
+        print(f"\n{'!' * 78}\n!!! PARTIAL MEMBER SET (--allow-partial): {problem}.\n!!! This run does not stand for "
+              f"{args.universe}; it is not recorded in the trial ledger.\n{'!' * 78}\n", file=sys.stderr, flush=True)
+    elif cov.get("missing_member_months") or cov.get("missing_warmups"):
+        print(f"note: {len(cov['missing_member_months'])} of {cov['member_months']} member-months and "
+              f"{len(cov['missing_warmups'])} of {cov['warmups']} warm-ups lack 1m candles (within the "
+              f"{U.MAX_MISSING_SHARE:.0%} allowance): {', '.join(gaps[:10])}", file=sys.stderr, flush=True)
     lab.UNIVERSES[args.universe] = res["symbols"]
     print(f"universe {args.universe}: {len(res['research'])} symbols were top {n} in a month of the "
           f"{'window' if cmd == 'lab' else 'TRAIN window'}; {len(res['symbols'])} have stored 1m candles in it; "
@@ -295,7 +330,8 @@ def _note_top_universe(args, res: dict | None) -> None:
     doc["universe_resolution"] = {k: res[k] for k in ("rule", "research", "symbols", "skipped", "unranked", "members",
                                                       "member_share")}
     doc["universe_resolution"].update({k: res[k] for k in ("member_months", "member_months_total",
-                                                          "skipped_member_months", "delisted") if k in res})
+                                                          "skipped_member_months", "delisted", "coverage",
+                                                          "allow_partial", "partial") if k in res})
     # membership spans as [first ms, last ms] per evaluated symbol: the trades entered inside them are the ones free of
     # the union's look-ahead (heartless.data.universe.member_trades)
     doc["universe_resolution"]["windows"] = {s: [list(w) for w in ws] for s, ws in res["windows"].items()}
