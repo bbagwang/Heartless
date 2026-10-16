@@ -752,7 +752,7 @@ def engine_settings(settings) -> dict:
     """The F-pre-B settings of a lab run handed to every job (a job builds its Settings with _env_file=None, so what the
     CLI read from .env would not reach it): the shock layer, the book guard and the execution modes the run is hashed
     and recorded with, UNIVERSE_DB (S1-S3), and SHOCK_CANDLE_DB / SHOCK_SCHEDULE when set (without SHOCK_CANDLE_DB a
-    job reads S0 from the run's own candle database, _run_job)."""
+    job reads S0 from the run's own candle database, _run_symbol)."""
     out = {"SHOCK_LAYER": bool(settings.shock_layer), "BOOK_GUARD": bool(settings.book_guard),
            "EXEC_MODE": str(settings.exec_mode), "UNIVERSE_DB": str(settings.universe_db_path)}
     if settings.shock_candle_db:

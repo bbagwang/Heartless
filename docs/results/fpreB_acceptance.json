@@ -627,7 +627,7 @@
    "window": "2026-09-01..2026-09-03",
    "symbols": "12 core pinned",
    "source": "data/longhist/heartless.db read-only",
-   "settings": "shipped defaults (the app does not attach a ShockDetector until F6: the book guard runs on the 1m-bar proxy, the shock layer does not)",
+   "settings": "shipped defaults (the app attaches no ShockDetector until F6, so the shock layer does not run; the book guard is on with the 1m-bar proxy but the champion has no enabled alpha, so there is no entry to hold)",
    "passed": true,
    "invariant_violations": 0,
    "checks": [

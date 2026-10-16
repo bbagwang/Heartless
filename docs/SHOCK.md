@@ -23,7 +23,7 @@ ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코�
   - BTC 도 다른 종목처럼 구성원이 됩니다(자기 상관 1). 상장 경과일 조건은 컨텍스트 정의에 없으므로 두지 않습니다.
   - 각 구성원의 수익률은 최대 24시간 이월한 종가로 계산합니다(`context._carried` 와 같은 규칙). 24개 수익률이 다 정의되지 않은 구성원은 평균에서 빠지고, 다음 순위로 채우지 않습니다.
   - 분산이 0인 종목은 상관에서 빠집니다. 상관이 20개 미만이면 그 시간 값은 없음(NaN)입니다.
-  - 오프라인 일정(`cross_section_series`)은 각 정시의 구성원을 `context.pit_members` 에서 직접 받습니다(744시간씩, `pit_members_by_hour`; F-pre-B 통합). 규칙의 구현은 그 하나입니다. 온라인 감지기(`_CrossSection.members`)는 한 시간씩 들어오는 봉으로 같은 규칙을 점진적으로 계산하고, `tests/test_fpreB_shock.py` 가 매 정시 `context.pit_members` 와 같은 집합인지, 오프라인 통계와 비트 단위로 같은지 확인합니다. 장기 `universe.db` 에서 통합 전 코드와 S3 통계가 바이트 단위로 같습니다(2026-04 ~ 06, TRAIN-F 전체; 6절).
+  - 오프라인 일정(`cross_section_series`)은 각 정시의 구성원을 `context.pit_members` 에서 직접 받습니다(744시간씩, `pit_members_by_hour`; F-pre-B 통합). 규칙의 구현은 그 하나입니다. 온라인 감지기(`_CrossSection.members`)는 한 시간씩 들어오는 봉으로 같은 규칙을 점진적으로 계산하고, `tests/test_fpreB_shock.py` 가 매 정시 `context.pit_members` 와 같은 집합인지, 오프라인 통계와 비트 단위로 같은지 확인합니다. 장기 `universe.db` 에서 통합 전 코드와 S3 통계가 바이트 단위로 같습니다(2026-04 ~ 06, TRAIN-F 전체; `docs/results/fpreB_acceptance.json` 의 `integration.s3_equivalence`).
 - **수치 재현성**: 합은 모두 `math.fsum`(정확 반올림), 로그·제곱근은 스칼라 `math` 함수, 중앙값은 정렬입니다. 그래서 오프라인 계산과 온라인 계산이 비트 단위로 같습니다.
 
 ## 2. 시각 규약
