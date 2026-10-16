@@ -177,7 +177,9 @@ def run_research_cycle(db_path: str, settings_dict: dict, params_dict: dict, sym
 
     The lookback window never touches a sealed period (heartless.learning.seal): an automated loop cannot ask for
     an unseal, so the window is clipped to its unsealed recent side (noted in `window.sealed_clipped`); the warm-up
-    before it stops at a sealed period as well."""
+    before it stops at a sealed period as well. The live bot's cycle passes seal.live_loop("research_cycle") as
+    `unseal`: exempt from the FORWARD blocks only (ROADMAP 7.9), so it keeps tuning on the market it trades; a manual
+    call without it is clipped before FWD-01 like any sealed period."""
     import logging as _logging
 
     from heartless.core.models import SymbolInfo

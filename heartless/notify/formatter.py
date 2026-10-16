@@ -196,6 +196,9 @@ def fmt_daily(today: dict, week: dict, st: dict, tz: str, insight: dict | None =
         lines.append(xq)
     elif insight is not None:
         lines.append("체결 품질: 체결 기록 없음 (체결이 생기면 슬리피지·수수료를 모델값과 비교)")
+    lat = (st.get("health") or {}).get("latency")
+    if lat and lat != "-":  # F7 latency budget (bar close -> received -> features -> decision -> sent -> ack)
+        lines.append(f"지연 예산: {esc(lat)}")
     if st.get("graduation") and st["graduation"].get("ok"):
         lines.append("🎓 페이퍼 성과가 졸업 기준을 충족했습니다. /golive 로 실거래 전환 가능")
     return "\n".join(lines)

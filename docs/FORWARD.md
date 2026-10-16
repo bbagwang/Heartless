@@ -64,4 +64,4 @@ heartless forward rerun FR-0003 --reason "evaluator killed (out of memory)"
 
 - FWD-01은 진행 중(봉인)이며 등록할 수 없습니다. 끝나면(2026-11-06) 빈 개봉으로 소진합니다.
 - 첫 등록 가능 블록은 FWD-02이고, 등록 마감은 2026-11-05 00:00 UTC입니다.
-- 남은 일: `lab`, `discover`가 자기 구성 해시를 `seal.check_window(..., config_hash=...)`에 넘기게 하는 연결, 시험 원장 줄의 FORWARD 표시(`forward.period_label`)는 그 파일을 맡은 작업에서 합니다.
+- 연결됨(Wave F 병합): `lab`, `discover`는 시도 원장에 적는 것과 같은 구성 해시를 `seal.check_window(..., config_hash=...)`에 넘깁니다. 시도 원장 줄의 FORWARD 표시(`wave_f`)는 `forward.period_label`이 냅니다. 시간 단위·중립 평가기(`heartless hourly`, `heartless neutral`)는 아직 구성 해시를 넘기지 않습니다.

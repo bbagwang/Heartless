@@ -49,8 +49,9 @@ WAVE_F = {
     "TRAIN-F": (1_642_032_000_000, 1_767_225_600_000),  # 2022-01-13 .. 2025-12-31
     "VALID-F": (1_768_262_400_000, 1_790_812_800_000),  # 2026-01-13 .. 2026-09-30
 }
-FWD_ORIGIN = 1_791_331_200_000  # 2026-10-07 00:00 UTC: FWD-k = [origin + 30 (k - 1) days, + 30 days)
-FWD_BLOCK_MS = 30 * 86_400_000
+# FORWARD blocks: FWD-k = [origin + 30 (k - 1) days, + 30 days) from 2026-10-07 00:00 UTC, as the seal defines them (F4)
+FWD_ORIGIN = seal.FORWARD_ORIGIN_MS
+FWD_BLOCK_MS = seal.FORWARD_BLOCK_MS
 # execution modes of a configuration (ROADMAP 7.7.2); taker is the default and is not hashed
 EXEC_MODES = ("taker", "maker", "maker_m1", "maker_m2")
 DEFAULT_EXEC = "taker"
@@ -127,13 +128,13 @@ def period_of(start_ms: int, end_ms: int) -> str:
 
 def fwd_block(ms: int) -> int:
     """k of the FORWARD block FWD-k holding `ms` (0 before the origin)."""
-    return 0 if ms < FWD_ORIGIN else (int(ms) - FWD_ORIGIN) // FWD_BLOCK_MS + 1
+    return seal.block_at(ms) or 0
 
 
 def fwd_span(k: int) -> tuple[int, int]:
     """[start, end] (inclusive ms) of FWD-k."""
-    a = FWD_ORIGIN + (int(k) - 1) * FWD_BLOCK_MS
-    return a, a + FWD_BLOCK_MS - 1
+    a, b = seal.block_span(k)
+    return a, b - 1
 
 
 def wave_f_periods(start_ms: int, end_ms: int) -> list[str]:
@@ -150,10 +151,12 @@ def wave_f_period(start_ms: int, end_ms: int) -> str:
     """The Wave F label of a window (ROADMAP 7.3): TRAIN-A / TRAIN-B when it lies in one half of TRAIN-F, TRAIN-F,
     VALID-F, FWD-k for one FORWARD block, FWD-j..FWD-k for consecutive blocks, else "other" (a window that crosses a
     partition boundary or starts in a warm-up gap such as 2022-01-01 .. 01-12 or 2026-01-01 .. 01-12)."""
-    names = wave_f_periods(start_ms, end_ms)
-    fwd = [n for n in names if n.startswith("FWD-")]
-    if fwd:
-        return fwd[0] if len(fwd) == 1 else f"{fwd[0]}..{fwd[-1]}"
+    a, b = int(start_ms), int(end_ms)
+    if a >= FWD_ORIGIN and b >= a:  # inside the FORWARD area: the block label of the FORWARD tools (F4)
+        from heartless.learning import forward
+
+        return forward.period_label(a, b)
+    names = wave_f_periods(a, b)
     return names[0] if names else "other"
 
 

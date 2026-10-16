@@ -329,9 +329,11 @@ def stored_candle_symbols(candle_db, symbols: list[str], start: int | None = Non
     import sqlite3
     from pathlib import Path
 
+    from heartless.core.store import readonly_uri
+
     if not Path(candle_db).exists():
         return set()
-    con = sqlite3.connect(f"file:{Path(candle_db).resolve()}?mode=ro", uri=True)
+    con = sqlite3.connect(readonly_uri(candle_db), uri=True)  # E2: no -wal / -shm left beside a quiet database
     lo, hi = -(2**62) if start is None else int(start), 2**62 if end is None else int(end)
     try:
         have = set()
@@ -433,9 +435,13 @@ def member_windows_for(universe_db, symbols: list[str], start: int, end: int, to
     closes in it}. discover uses it for VALID: the symbol list is frozen at the end of TRAIN (no VALID-period
     liquidity chooses symbols), and each frozen symbol counts only in the VALID months it is a member (each month
     ranked on the month before it, so this is point-in-time)."""
+    from pathlib import Path
+
     from heartless.core.store import Store
 
-    store = Store(universe_db)
+    if not Path(universe_db).exists():
+        raise ValueError(f"no universe database at {universe_db}: run `heartless universe build` first")
+    store = Store(universe_db, readonly=True)  # a shared research dataset: only read (E2)
     try:
         res = research_universe(store, start, end, top)
         delisted = delisting_closes(store, list(symbols), start, end)
@@ -460,7 +466,7 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> d
 
     if not Path(universe_db).exists():
         raise ValueError(f"no universe database at {universe_db}: run `heartless universe build` first")
-    store = Store(universe_db)
+    store = Store(universe_db, readonly=True)  # a shared research dataset: only read (E2)
     try:
         res = research_universe(store, start, end, top)
     finally:
@@ -472,7 +478,7 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> d
     symbols = sorted(s for s in res["symbols"] if s in have)
     windows = membership_windows({s: res["members"][s] for s in symbols}, start, end)
     skipped = sorted(s for s in res["symbols"] if s not in have)
-    store = Store(universe_db)
+    store = Store(universe_db, readonly=True)
     try:
         delisted = delisting_closes(store, res["symbols"], start, end)
     finally:

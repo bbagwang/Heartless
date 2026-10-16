@@ -474,5 +474,5 @@ print(res.report())   # 3일, 비용 41bp x 0.075 C, 펀딩 7회 수취
 
 - **F-pre-B**: 충격 층은 `hourly.evaluate`·`neutral.evaluate`의 `entry_filter`로 연결합니다(`shock_exempt`는 연결하는 쪽에서 처리). lab의 `exec`는 `params["exec"][알파]`로 두면 원장 해시에 자동으로 들어갑니다. 백테스터가 상장폐지 강제 청산을 직접 하게 되면, lab의 `delisting_close` 재가격은 그 결과와 겹치지 않게 정리합니다(지금은 lab이 종료 청산을 다시 매김).
 - **F-data-h**: OI·프리미엄 1h를 h1 블록(값은 close 열)으로 `oi_1h`·`premium_1h` 표에 넣고 `Store._F0_TABLES`에 추가하면, `HourlyBars.oi`·`premium`에 시가 시각으로 맞춰 들어옵니다. 다른 형식이면 `hourly.OPTIONAL_SERIES`의 적재 함수를 바꿉니다.
-- **F4**: 평가기들은 `seal.check_window`로 창을 검사합니다. FWD 블록이 `seal.SEALED`에 들어가면 그대로 거부합니다.
-- **`docs/UNIVERSE.md`**: 3절 6과 10절의 "lab·discover가 아직 거르지 않음"은 이 패키지로 해소되었습니다(그 문서는 이 패키지 소유가 아님).
+- **F4**: 평가기들은 `seal.check_window`로 창을 검사하고, F4의 봉인이 개봉 전 FWD 블록과 겹치는 창을 거부합니다(`docs/FORWARD.md`). lab·discover는 자기 구성 해시도 넘겨(`check_window(..., config_hash=...)`), FORWARD 등록이 열린 구성은 그 묶음과 겹치는 창에서 거부됩니다. 원장 줄의 FWD 표시는 `forward.period_label`이 냅니다(Wave F 병합).
+- **`docs/UNIVERSE.md`**: 3절 6과 10절의 "lab·discover가 아직 거르지 않음"은 이 패키지로 해소되었고, 그 문서에 반영했습니다(Wave F 병합).

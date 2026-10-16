@@ -160,7 +160,7 @@ python -m heartless.util.perf bench --db data/research/heartless.db --symbols BT
 
 - 책이 없으면 `EMPTY_BOOK`(값은 NaN, source `"none"`)입니다.
 - 꺼져 있을 때도 운영 앱은 `ctx.book = EMPTY_BOOK`을 넣습니다.
-- `book_of(ctx)`는 `ctx.book`이 없는 컨텍스트(아래 백테스터)에서도 `EMPTY_BOOK`을 돌려줍니다.
+- `Context.book`은 필드입니다(기본 `EMPTY_BOOK`). `book_of(ctx)`는 `book`이 없는 컨텍스트(테스트의 대역 등)에서도 `EMPTY_BOOK`을 돌려줍니다.
 
 ### 2.3 과거 데이터의 보수적 대용치
 
@@ -174,7 +174,7 @@ python -m heartless.util.perf bench --db data/research/heartless.db --symbols BT
 유동성 있는 USD-M 무기한의 실제 호가는 이것보다 좁고 두껍습니다. 예를 들어 BTC 1분 고저폭은 수 bps라 대용 스프레드가 약 1 bp인데, 실제 스프레드는 0.02 bp 안팎입니다. 따라서 "좁고 두꺼운 호가"를 요구하는 규칙은 과거 데이터에서 운영보다 엄격하게만 작동합니다.
 
 - **리플레이:** `ORDERBOOK_STREAM=true`이면 깊이 스트림 대신 `heartless/replay/book.py`의 `ProxyBooks`가 같은 필드 이름으로 대용치를 줍니다. 그 종목의 운영 1분봉 프레임에서 지금 이전에 마감된 봉만 씁니다.
-- **백테스터:** 이번 패키지는 learning 패키지를 건드리지 않았습니다. 연결 방법은 9절에 있습니다.
+- **백테스터:** `ORDERBOOK_STREAM=true`이면 `Backtester`가 매 봉 `ctx.book = proxy_from_frame(1m 프레임, 봉 마감, ORDERBOOK_DEPTH_BPS, 틱)`을 넣습니다(리플레이와 같은 대용치). 꺼져 있으면(기본) 아무것도 계산하지 않고 `EMPTY_BOOK`입니다. 대용치는 원시 열(고가·저가·종가·거래대금)만 읽으므로 E1의 지연 계산 1분 프레임에서 지표를 다시 계산하지 않습니다. `book`을 읽는 출하 알파는 없어서 lab 결과는 어느 쪽이든 같습니다.
 
 ## 3. 런타임
 
@@ -287,6 +287,8 @@ python -m heartless.util.perf bench --db data/research/heartless.db --symbols BT
   이 리플레이는 창이 짧아(240봉) 배치 비용이 운영보다 작습니다. 운영 창(1,500봉)에서는 0절의 차이가 납니다.
 
 ## 9. 다른 패키지에 필요한 연결 (이번 패키지 범위 밖)
+
+1~4는 Wave F 병합에서 연결했습니다(uvloop는 설치되어 있을 때만 쓰고, 일일 보고의 지연 줄은 `/health`에 지연 표본이 있을 때만 나옵니다). 5~7은 남은 일입니다.
 
 1. **uvloop 진입점**(`heartless/cli.py` `_run`)
    - 바꿀 줄: `asyncio.run(runner())` → `asyncio.run(runner(), loop_factory=perf.loop_factory())`

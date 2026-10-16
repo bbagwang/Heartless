@@ -89,7 +89,8 @@ heartless universe status
 4. 달 m에 쓰는 데이터는 m 이전 것뿐입니다. m 안의 데이터를 바꿔도 m의 순위는 바뀌지 않습니다(테스트로 확인).
 5. 어떤 기간의 연구 유니버스 = 그 기간의 달 가운데 **한 달이라도 상위 N에 든 모든 종목**입니다. 나중에 상장폐지된 종목도 포함되므로, 백테스트가 상장폐지를 만나고 랩이 그 효과를 보고할 수 있습니다.
 6. **주의: 합집합에는 미래 정보가 남습니다 (리뷰 발견).** lab과 discover는 구성원마다 기간 전체를 평가합니다. m-1의 거래대금 급증으로 m에 상위 N에 든 종목은 m-1과 그 이전에도 평가되므로, 평가하는 결과(급등·급락)로 종목을 고른 셈이 됩니다. 실측: TRAIN top40 구성원 181개 × 기간에서 구성원이었던 시간은 22%입니다(나머지에는 상장 전·상장폐지 뒤도 섞여 있음). 1분봉이 있는 20종목은 81%, VALID 2026 18종목은 84%입니다.
-   - 시점이 맞는 평가는 구성원이었던 시간에 진입한 거래만 세는 것입니다. `resolve_for_run`이 구성원마다 그 구간(`windows`)을 내고, `--out`의 `universe_resolution.windows`에 기록하며, `universe.member_trades(trades, windows)`가 그 거래만 남깁니다. lab·discover가 이 거르기를 스스로 하기 전까지(소유 파일 밖, 10절) topN 결과에는 이 편향이 섞여 있고, 실행할 때 표준 오류에 그 사실과 구성원 시간 비율을 출력합니다.
+   - 시점이 맞는 평가는 구성원이었던 시간에 진입한 거래만 세는 것입니다. `resolve_for_run`이 구성원마다 그 구간(`windows`)을 내고, `--out`의 `universe_resolution.windows`에 기록하며, `universe.member_trades(trades, windows)`가 그 거래만 남깁니다.
+   - **lab·discover는 이제 이 거르기를 스스로 합니다(F-pre-A, `docs/RESEARCH_TOOLS.md` 5.2).** lab은 종목마다 구성원 구간만 돌리고(구간이 끝나도 열린 포지션은 자기 청산 규칙대로, 상장폐지 종목은 마지막 거래 시각에 청산), discover는 TRAIN 구성원 구간의 결정 행만 만들고 VALID는 TRAIN 끝에서 얼린 목록을 VALID 구성원 달에서만 셉니다. 그래서 topN 결과에는 위 합집합의 미래 정보가 없습니다. 실행할 때 표준 오류에 구성원 달·시간 비율을 출력합니다.
 
 ```bash
 heartless universe show --month 2024-03 --top 40          # 그 달의 순위표(직전 달 중앙값, 상장일, 마지막 거래, 현물)
@@ -215,9 +216,10 @@ heartless discover --universe top40 --train 2022-01-13:2023-01-01 --valid 2023-0
   - `select_universe` 대신 `live_selection`을 쓰고, `rest.book_ticker()`(전 종목)로 스프레드 규칙을 켭니다.
   - `reference` 종목을 컨텍스트 전용 스트림으로 구독하고, BTC 레짐을 그 스트림에서 계산합니다(지금은 BTC가 거래 유니버스에 있어야 레짐이 계산됨).
   - `CONTEXT_TOP_N`을 `MarketContextTracker`와 운영 저장소 메타(`meta_for(..., top_n)`)에 넘깁니다.
-- `learning/lab.py`, `learning/discovery.py`: topN 유니버스에서 구성원 구간 밖의 거래(또는 표본)를 빼야 합니다(3절 6). lab은 `evaluate`의 거래 목록에 `universe.member_trades`를 적용하고 그 결과로 요약을 내면 됩니다. discover는 데이터셋 행을 구성원 구간으로 거릅니다. 그 전의 topN 결과는 구성원이 아니었던 달을 포함합니다.
+- ~~`learning/lab.py`, `learning/discovery.py`: topN 유니버스에서 구성원 구간 밖의 거래(또는 표본)를 빼기(3절 6)~~ — F-pre-A에서 했습니다(lab은 구성원 구간만 실행, discover는 구성원 결정 행만; `docs/RESEARCH_TOOLS.md` 5.2). F-pre-A 이전의 topN 결과는 구성원이 아니었던 달을 포함합니다.
 - `tests/test_fix_7_universe.py`와 `select_universe`: 앱 재배선 때 `ALWAYS_INCLUDE`의 나이·거래대금 면제를 없앱니다(6절).
-- `learning/lab.py`: 컨텍스트 설정 사전에 `"top_n": settings.context_top_n`을 넣습니다. 지금 lab은 항상 고정 모드로 컨텍스트를 요청하므로, `CONTEXT_TOP_N`으로 만든 저장소를 쓰려 하면 이유를 밝히고 거부합니다.
+- ~~`learning/lab.py`: 컨텍스트 설정 사전에 `"top_n": settings.context_top_n` 넣기~~ — F-pre-A에서 했습니다(lab·discover 모두 `CONTEXT_TOP_N`의 모드로 컨텍스트를 요청; `docs/RESEARCH_TOOLS.md` 5.3).
+- (완료, Wave F 병합) 연구 경로의 유니버스 DB 읽기(`resolve_for_run`, `member_windows_for`)와 1분봉 확인(`stored_candle_symbols`)은 E2의 읽기 전용 열기(`Store(..., readonly=True)`, `readonly_uri`)를 씁니다. 공유 `universe.db`에 스키마·-wal·-shm을 만들지 않습니다.
 - `replay/runner.py`: 리플레이의 `ALWAYS_INCLUDE`를 `BTCUSDT,ETHUSDT,SOLUSDT`로 고정해 거래 종목을 핀으로 박습니다. 리플레이 재현성 때문이며 동작은 그대로입니다.
 - `README.md`, `.env.example`: 새 설정(`UNIVERSE_MIN_AGE_DAYS`, `UNIVERSE_MAX_TICK_BPS`, `UNIVERSE_MAX_SPREAD_BPS`, `UNIVERSE_DB`, `CONTEXT_TOP_N`)과 `ALWAYS_INCLUDE` 기본값 변경을 반영합니다.
 - top40 구성원의 1분봉(약 5 GB)을 받는 일. 디스크 여유가 생긴 뒤 합니다.

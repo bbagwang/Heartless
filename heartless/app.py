@@ -1433,12 +1433,11 @@ class Heartless:
                     oi_change = oi[-1][1] / old - 1
         iv = self._funding_interval_ms(sym)
         nft = t.next_funding_time or self.funding_next.get(sym) or ((now // iv) + 1) * iv
-        ctx = Context(symbol=sym, info=self.symbols[sym], ticker=t, regime=reg, regime_info=info, btc_regime=btc,
-                      oi_change=oi_change, now=now, funding_rate=t.funding_rate,
-                      minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), funding_interval_min=iv / MS_MINUTE,
-                      book_imbalance=imb, extras=extras, market=self._market_context(sym, now))
-        ctx.book = self._f7_book(sym, now)  # F7: order-book features (EMPTY_BOOK unless ORDERBOOK_STREAM)
-        return ctx
+        return Context(symbol=sym, info=self.symbols[sym], ticker=t, regime=reg, regime_info=info, btc_regime=btc,
+                       oi_change=oi_change, now=now, funding_rate=t.funding_rate,
+                       minutes_to_funding=max((nft - now) / MS_MINUTE, 0.0), funding_interval_min=iv / MS_MINUTE,
+                       book_imbalance=imb, extras=extras, market=self._market_context(sym, now),
+                       book=self._f7_book(sym, now))  # F7: order-book features (EMPTY_BOOK unless ORDERBOOK_STREAM)
 
     # --- P3 signal batching (PORTFOLIO_ALLOCATOR, heartless/execution/allocator.py) ----------------------------------
     # Each engine queues the entry decisions of a bar close (TradingEngine.on_bar) and admits them together in

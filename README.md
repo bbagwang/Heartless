@@ -144,6 +144,11 @@ heartless lab --alpha x --universe extended --tag xs_rank      # 20종목 평가
 heartless context build                                        # 시장 컨텍스트(시간 단위 단면 피처) 오프라인 빌드
 heartless trials                                               # P2 시도 원장: 계열별 시도 수 N과 t_day 기준
 heartless replay --start 2026-06-01 --end 2026-06-08 --out runs/r.json   # 전체 시스템 리플레이(가상 시계, 불변식 검사)
+heartless universe build --spot                                # 거래소 전체 인벤토리·1시간봉·현물 데이터셋(docs/UNIVERSE.md)
+heartless lab --alpha x --start 2022-01-13 --end 2026-01-01 --universe top40   # 달마다 유동성 상위 40종목, 구성원 구간만 평가
+heartless hourly --alpha mod:Class --period TRAIN-F --universe top40   # Wave F 시간 단위 방향 평가기(docs/RESEARCH_TOOLS.md 5절)
+heartless neutral --strategy mod:Class --period TRAIN-F --universe top40   # Wave F 두 다리 중립 평가기
+heartless forward status                                       # FORWARD 봉인 블록·등록 상태(docs/FORWARD.md)
 
 # 개발용 (저장소 루트에서)
 python tools/calibrate_promotion.py --out docs/results/e2_promotion_calibration.json    # 승격 판정점 기준 몬테카를로 보정(HAC t)
@@ -155,7 +160,7 @@ python tools/calibrate_promotion.py --out docs/results/e2_promotion_calibration.
 
 `backtest --start/--end` 는 lab 과 달리 모든 종목을 **계정 하나**(1만 USDT)에서 운영 리스크 설정(출하 기본값: 최대 5포지션·같은 방향 3개, 일/주 손실 정지, 고점 대비 낙폭 정지, 거래당 0.5%)으로 함께 돌립니다. 로컬 `.env` 는 적용하지 않고, 종목 필터는 lab 처럼 데이터에서 추정하며(오프라인), 시작 전 12일 워밍업을 읽고 끝 시각 이후는 아무것도 읽지 않습니다. 수익률, 최대낙폭, PF, 평균R, 알파별 거래, 한도로 거부된 신호 수를 출력하고 `--out` 으로 JSON 을 남깁니다.
 
-**봉인 구간**: 지금 봉인된 구간은 없습니다. 2025-01-01 ~ 2025-12-31 은 최종 시험용으로 봉인되어 있다가, 2026-10-11 사전 등록 확인 시험에 한 번 쓰고 해제했습니다([docs/SEALED_2025.md](docs/SEALED_2025.md)). 이제 2025년은 일반 이력입니다. 봉인 장치(`heartless/learning/seal.py`)는 남아 있습니다. 봉인 구간이 있으면 lab, discover, backtest, 리서치·발굴 사이클이 그 구간과 겹치는 평가를 거부하거나 잘라냅니다. 개봉은 lab/discover 와 `backtest --start/--end` 의 `--unseal <구간>` 으로만 가능하며 `docs/results/seal_ledger.jsonl` 에 시각·명령·커밋이 기록됩니다. 다음 봉인 구간(예: FORWARD 페이퍼 데이터의 일부)은 평가하기 전에 `SEALED`에 넣어야 합니다.
+**봉인 구간**: 이름 있는 봉인 구간은 지금 없습니다. 2025-01-01 ~ 2025-12-31 은 최종 시험용으로 봉인되어 있다가, 2026-10-11 사전 등록 확인 시험에 한 번 쓰고 해제했습니다([docs/SEALED_2025.md](docs/SEALED_2025.md)). 이제 2025년은 일반 이력입니다. 대신 2026-10-07부터의 전진 데이터는 30일 단위 **FORWARD 블록**(FWD-01, FWD-02, …)으로 봉인됩니다(ROADMAP 7.9, [docs/FORWARD.md](docs/FORWARD.md)). 개봉 전 블록과 겹치는 창은 lab, discover, backtest(`--days` 포함), replay, Wave F 평가기가 모두 거부하고, `--unseal`로는 열 수 없으며, 블록이 끝난 뒤 `heartless forward confirm FWD-k`가 한 번만 엽니다. 운영 봇의 리서치·발굴 사이클만 FORWARD 블록에서 예외입니다(사전 등록 판정에 쓰이지 않음). 개봉과 FORWARD 개봉은 `docs/results/seal_ledger.jsonl` 에 시각·명령·커밋이 기록됩니다.
 
 연구용 데이터는 별도 폴더에 두는 것을 권합니다: `HEARTLESS_DATA_DIR=data/research heartless fetch ...` (봇 DB 는 `DATA_RETENTION_DAYS` 이후 오래된 캔들을 정리합니다). 장기 연구 DB 는 `HEARTLESS_DATA_DIR=data/longhist`(2022-01 ~ 2026-10-08, 핵심 12종목 + 비교용 8종목)입니다.
 
@@ -226,7 +231,10 @@ docs/SEALED_2025.md   2025 봉인 구간 확인 시험(vol_breakout_dbox 한 번
 docs/SELF_IMPROVEMENT.md 자기 개선 루프: 챌린저 판정점·HAC 보정 기준, 변경분 승격, 킬 스위치, 리서치 사이클 선택, 컨텍스트 저장소, 보존 기간
 docs/PORTFOLIO.md     포트폴리오 할당기(P3, 기본 꺼짐)와 채택 측정, 엔진 정합성 수정(진입 크기, 펀딩 정산 시각, 옵트인)
 docs/OPERATIONS.md    소유자 운영 가이드: 일일 리포트 읽는 법, 텔레그램 명령(/why, /alphas), 연구·학습 페이지, 비상 조치
-docs/RESEARCH_TOOLS.md 시장 컨텍스트, 다년 lab/발굴, 시도 원장
+docs/RESEARCH_TOOLS.md 시장 컨텍스트, 다년 lab/발굴, 시도 원장, Wave F 연구 도구(구성원 구간, 시간 단위·중립 평가기)
+docs/UNIVERSE.md      거래소 전체 인벤토리, 생존 편향 없는 연구 유니버스(topN), 1시간봉·현물 데이터셋, 운영 선택 규칙
+docs/PERFORMANCE.md   증분 피처 프레임, 로컬 오더북·대용치, 시작 점검, 지연 예산
+docs/FORWARD.md       FORWARD 봉인 블록, 사전 등록·한 번만 하는 확인 실행
 docs/REPLAY.md        전체 시스템 리플레이(가상 시계, 불변식, 요약 필드)
 tools/                승격 기준 몬테카를로 보정 스크립트
 docs/results/         lab·공동 포트폴리오 결과 JSON, 데이터 커버리지, 봉인 원장

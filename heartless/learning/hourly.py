@@ -38,8 +38,6 @@ import hashlib
 import inspect
 import json
 import math
-import sqlite3
-import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -69,17 +67,12 @@ REASONS = {1: "stop", 2: "target", 3: "stop", 4: "target", 5: "time", 6: "delist
 
 # --- data ------------------------------------------------------------------------------------------------------------
 class ReadOnlyStore(Store):
-    """Store's readers over a read-only SQLite connection. Store() runs its schema script on open; the research
-    databases (universe.db, the long-history candles) are shared and an evaluator must never write to them."""
+    """Store's readers over a read-only SQLite connection (E2's Store(path, readonly=True): no schema script, no -wal
+    / -shm left behind, a running writer's WAL still read). The research databases (universe.db, the long-history
+    candles) are shared and an evaluator must never write to them. FileNotFoundError when the file does not exist."""
 
-    def __init__(self, path: str | Path):  # noqa: D107 - no schema script, no pragmas
-        p = Path(path)
-        if not p.exists():
-            raise FileNotFoundError(f"no database at {p}")
-        self.path = str(p)
-        self._lock = threading.RLock()
-        self._conn = sqlite3.connect(f"file:{p.resolve()}?mode=ro", uri=True, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+    def __init__(self, path: str | Path):  # noqa: D107
+        super().__init__(path, readonly=True)
 
 
 def _optional_table(table: str) -> Callable:

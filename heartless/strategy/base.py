@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from heartless.core.models import Regime, Signal, SymbolInfo, Ticker
 from heartless.data.context import EMPTY
 from heartless.data.features import MarketView
+from heartless.exchange.orderbook import EMPTY_BOOK, BookFeatures
 
 
 @dataclass
@@ -34,6 +35,10 @@ class Context:
     # breadth, dispersion, median funding, aggregate OI) and "ts". Read-only and identical in live trading and backtests;
     # empty when no context is available, so alphas must treat a missing key (or NaN) as "unknown".
     market: Mapping = field(default_factory=lambda: EMPTY)
+    # F7 order-book features (exchange/orderbook.BookFeatures: spread, imbalance, depth within ORDERBOOK_DEPTH_BPS,
+    # staleness): the local book in live trading with ORDERBOOK_STREAM, the conservative 1m-bar proxy in replays and
+    # backtests with it on, EMPTY_BOOK (NaN, source "none") otherwise. docs/PERFORMANCE.md section 2.
+    book: BookFeatures = EMPTY_BOOK
 
 
 def _longest(attr: str, params_list, only_alpha: str | None) -> float:

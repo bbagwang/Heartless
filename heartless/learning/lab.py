@@ -785,14 +785,6 @@ def main_cli(settings, args) -> None:
         sys.exit(2)
     argv = list(getattr(args, "argv", None) or sys.argv)
     touched = seal.overlapping(start, end)
-    for period in unseal:
-        if period in touched:
-            print(f"\n{'!' * 78}\n!!! UNSEALING {period}: this run evaluates the sealed period {period}. It is the "
-                  f"one-time final exam\n!!! (docs/ROADMAP.md section 1); re-tuning after seeing it is forbidden. "
-                  f"Recorded in\n!!! {seal.LEDGER}\n{'!' * 78}\n", file=sys.stderr, flush=True)
-            seal.record_unseal(period, argv)
-        else:
-            print(f"note: --unseal {period} has no effect: the window does not overlap it (not recorded)", file=sys.stderr)
     if args.params:
         with open(args.params) as f:
             params = StrategyParams.from_dict(json.load(f))
@@ -807,6 +799,25 @@ def main_cli(settings, args) -> None:
     store.close()
     notes: list[dict] = []
     params = apply_overrides(params, args.set, notes)
+    from heartless.learning import trials
+
+    # the configuration's identity, as the trial ledger records it: F4 (ROADMAP 7.9) refuses a configuration with an
+    # open FORWARD registration on a window overlapping its span (only its confirmation run passes)
+    cfg = trials.lab_config(params.to_dict(), args.alpha, symbols, meta=bool(getattr(args, "meta", False)),
+                            universe=universe)
+    try:
+        seal.check_window(start, end, unseal, config_hash=trials.config_hash(cfg))
+    except (ValueError, seal.SealedError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    for period in unseal:
+        if period in touched:
+            print(f"\n{'!' * 78}\n!!! UNSEALING {period}: this run evaluates the sealed period {period}. It is the "
+                  f"one-time final exam\n!!! (docs/ROADMAP.md section 1); re-tuning after seeing it is forbidden. "
+                  f"Recorded in\n!!! {seal.LEDGER}\n{'!' * 78}\n", file=sys.stderr, flush=True)
+            seal.record_unseal(period, argv)
+        else:
+            print(f"note: --unseal {period} has no effect: the window does not overlap it (not recorded)", file=sys.stderr)
     extra_settings = dict(STRESS_SETTINGS) if getattr(args, "stress", False) else {}
     if getattr(args, "meta", False):
         extra_settings["META_LABEL"] = True
@@ -832,12 +843,8 @@ def main_cli(settings, args) -> None:
     except ContextMismatch as e:  # a context store of another source / universe: refused before any job ran
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
-    from heartless.learning import trials
-
     trial = None
     if tag:
-        cfg = trials.lab_config(params.to_dict(), args.alpha, symbols, meta=bool(getattr(args, "meta", False)),
-                                universe=universe)
         s = res.summary()
         trial = trials.record("lab", tag, cfg, (start, end), n=s["n"], avg_r=s["avg_r"], t_day=s["t_day"],
                               extra={"stress": bool(getattr(args, "stress", False)), "dirty": dirty, "argv": argv})

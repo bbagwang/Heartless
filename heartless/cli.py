@@ -327,7 +327,10 @@ def _run(settings) -> None:
             pass
         return err
 
-    if asyncio.run(runner()) is not None:
+    from heartless.util import perf
+
+    # F7: uvloop's event loop when it is installed (optional, never required), asyncio's default loop otherwise
+    if asyncio.run(runner(), loop_factory=perf.loop_factory()) is not None:
         sys.exit(1)
 
 
@@ -717,13 +720,6 @@ def _discover(settings, args) -> None:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
     touched = set(seal.overlapping(*train)) | set(seal.overlapping(*valid))
-    for period in unseal:
-        if period in touched:
-            print(f"\n{'!' * 78}\n!!! UNSEALING {period} for discovery: the sealed final-exam period is being mined "
-                  f"or validated on.\n!!! Recorded in {seal.LEDGER}\n{'!' * 78}\n", file=sys.stderr, flush=True)
-            seal.record_unseal(period, args.argv)
-        else:
-            print(f"note: --unseal {period} has no effect: neither window overlaps it (not recorded)", file=sys.stderr)
     cfg = D.SearchConfig(min_trades=args.min_trades, beam=args.beam, depth=args.depth)
     templates = getattr(args, "templates", "classic") or "classic"
     context = None
@@ -731,18 +727,33 @@ def _discover(settings, args) -> None:
         context = {"db": str(settings.context_db_path), "universe": settings.context_universe_list,
                    "build": bool(settings.context_auto_build), "top_n": settings.context_top_n,
                    "progress": lambda m: print(m, file=sys.stderr, flush=True)}
-    n_prior, conf = 0, None
-    if tag:
-        from heartless.learning import trials
+    from heartless.learning import trials
 
-        conf = {"tool": "discover", "grids": grids, "templates": templates, "context": bool(context),
-                "features": len(D.FEATURES_X if context else D.FEATURES), "symbols": sorted(symbols),
-                "search": {"min_trades": cfg.min_trades, "beam": cfg.beam, "depth": cfg.depth},
-                "train": [int(train[0]), int(train[1])]}
-        if getattr(args, "universe_resolution", None) is not None:
-            # a topN search is identified by its rule (member rows only), not by the symbols that had 1m candles
-            conf["symbols"] = args.universe
-            conf["membership"] = "member_months"
+    # the search's identity, as the trial ledger records it
+    conf = {"tool": "discover", "grids": grids, "templates": templates, "context": bool(context),
+            "features": len(D.FEATURES_X if context else D.FEATURES), "symbols": sorted(symbols),
+            "search": {"min_trades": cfg.min_trades, "beam": cfg.beam, "depth": cfg.depth},
+            "train": [int(train[0]), int(train[1])]}
+    if getattr(args, "universe_resolution", None) is not None:
+        # a topN search is identified by its rule (member rows only), not by the symbols that had 1m candles
+        conf["symbols"] = args.universe
+        conf["membership"] = "member_months"
+    try:  # F4 (ROADMAP 7.9): a configuration with an open FORWARD registration is refused on windows in its span
+        for w in (train, valid):
+            seal.check_window(w[0], w[1], unseal, config_hash=trials.config_hash(conf))
+    except (ValueError, seal.SealedError) as e:
+        store.close()
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    for period in unseal:
+        if period in touched:
+            print(f"\n{'!' * 78}\n!!! UNSEALING {period} for discovery: the sealed final-exam period is being mined "
+                  f"or validated on.\n!!! Recorded in {seal.LEDGER}\n{'!' * 78}\n", file=sys.stderr, flush=True)
+            seal.record_unseal(period, args.argv)
+        else:
+            print(f"note: --unseal {period} has no effect: neither window overlaps it (not recorded)", file=sys.stderr)
+    n_prior = 0
+    if tag:
         # the family's other configurations: an identical rerun replaces its own earlier count (the ledger keeps the
         # largest count per configuration), so its bar must not add that count on top of this run's
         n_prior = trials.family_tests(tag, exclude=trials.config_hash(conf))
@@ -785,9 +796,7 @@ def _discover(settings, args) -> None:
         print(f"trial ledger: {tag} search {trial['config_hash']} with {res['tested']} rules recorded; family N={n_fam}, "
               f"TRAIN bar t >= {trials.threshold(n_fam):.2f}", file=sys.stderr)
     else:
-        from heartless.learning.trials import period_of
-
-        if period_of(*train) == "TRAIN":
+        if trials.period_of(*train) == "TRAIN":
             print("note: not recorded in the P2 trial ledger (no --tag FAMILY)", file=sys.stderr)
     rows = res.get("rows", {})
     print(f"tested {res['tested']} rules on {rows.get('train', 0)} TRAIN rows ({res.get('tf', ','.join(grids))}); "

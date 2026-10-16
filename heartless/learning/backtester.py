@@ -14,6 +14,7 @@ from heartless.data.context import EMPTY, ContextTable
 from heartless.data.extras import AVAILABLE_AFTER_MS, MetricsSeries
 from heartless.data.features import LONG_TIMEFRAMES, TIMEFRAMES, FeatureFrame, MarketView
 from heartless.exchange.base import OrderResult
+from heartless.exchange.orderbook import proxy_from_frame
 from heartless.exchange.paper import PaperAccount, PaperOrder
 from heartless.execution.engine import TradingEngine
 from heartless.execution.stats import summarize
@@ -408,6 +409,9 @@ class Backtester:
                         default=2**62)
         if engine.allocator is not None:
             self._prime_beta(engine.allocator.beta, int(tl[lo]))
+        # F7: with ORDERBOOK_STREAM on, ctx.book is the conservative 1m-bar proxy the replay serves (ProxyBooks); off
+        # (the default, as in live trading without the stream) it stays EMPTY_BOOK and nothing is computed
+        book_on = bool(getattr(self.s, "orderbook_stream", False))
         for i in range(lo, hi):
             t = int(tl[i])
             self.now = t
@@ -452,6 +456,9 @@ class Backtester:
                               funding_rate=fr, minutes_to_funding=(nft - t) / MS_MINUTE,
                               funding_interval_min=f_iv / MS_MINUTE,
                               extras=extras, market=self.market.view(sym, t) if self.market is not None else EMPTY)
+                if book_on:
+                    ctx.book = proxy_from_frame(view.frames["1m"], t, self.s.orderbook_depth_bps,
+                                                self.symbols[sym].tick_size)
                 pos = engine.positions.get(sym)
                 if pos is not None:
                     pos.extra["last_mark"] = c.close
