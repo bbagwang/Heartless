@@ -200,6 +200,13 @@ python tools/calibrate_promotion.py --out docs/results/e2_promotion_calibration.
 | **자기 개선·운영 (C2-B)** | | |
 | `DISCOVERY_GRIDS` | 15m,1h | 알파 발굴 결정 격자(한 번의 탐색으로 N 합산) |
 | `CHALLENGER_RETRY_DAYS` | 90 | 판정을 받고 종료된 변경분을 다시 시험하지 않는 기간 |
+| **유니버스·속도 (F0, F7)** | | |
+| `UNIVERSE_MIN_QUOTE_VOLUME` | 80,000,000 | 거래 후보의 24시간 거래대금 하한(USDT). 기존 종목은 하한의 80% 아래로 떨어질 때까지 유지 |
+| `UNIVERSE_MIN_AGE_DAYS` / `UNIVERSE_MAX_TICK_BPS` / `UNIVERSE_MAX_SPREAD_BPS` | 30 / 10 / 5 | 상장 기간(일) / 가격 대비 틱(bp) / 호가 스프레드(bp, bookTicker를 받을 때만) ([`docs/UNIVERSE.md`](docs/UNIVERSE.md) 6절) |
+| `ALWAYS_INCLUDE` | BTCUSDT | 항상 구독하는 기준 종목(레짐·시장 컨텍스트). 거래 보장이 아님 |
+| `CONTEXT_TOP_N` | 0 | 0 = `CONTEXT_UNIVERSE` 전부, N = 그 시각 24시간 거래대금 상위 N종목으로 단면(lab·discover·`heartless context`) |
+| `INCREMENTAL_FEATURES` | true | 운영 피처를 봉마다 이어 계산(일괄 계산과 비트 단위 동일, [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)) |
+| `ORDERBOOK_STREAM` | false | 로컬 호가창(`ctx.book`). 쓰는 알파가 생길 때까지 꺼짐 |
 | **포트폴리오·진입 크기 (P3, E1)** | | |
 | `PORTFOLIO_ALLOCATOR` | false | 봉 마감 일괄 결정 + 위험 예산. 꺼짐 = 봉 처리 순서(FIFO) |
 | `MAX_TOTAL_RISK_PCT` / `MAX_SAME_DIRECTION_RISK_PCT` | 2.5 / 1.5 | 총 개방 위험 / BTC 베타 가중 같은 방향 위험 한도(자산 %, 할당기 켰을 때) |

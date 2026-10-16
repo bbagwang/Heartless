@@ -114,3 +114,30 @@ def test_example_contains_no_real_secrets():
         assert _active_values().get(key, "") in ("", None), f"{key} must ship blank in .env.example"
     # Telegram bot tokens look like `<digits>:<35 chars>`; none may appear anywhere in the file, even in comments.
     assert not re.search(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b", _example_text())
+
+
+def _documented() -> dict[str, str]:
+    """KEY -> value of every assignment in .env.example, active or commented out (`# KEY=value` documents a default)."""
+    return dict(re.findall(r"^#?\s*([A-Z][A-Z0-9_]*)=(.*)$", _example_text(), flags=re.MULTILINE))
+
+
+def test_every_setting_is_in_the_example_and_every_example_key_is_a_setting():
+    """Both directions: an operator finds every Settings field in the file they copy (Wave F added 11 that were missing,
+    and 31 older ones had never been listed), and no key there, commented or not, is one the settings would ignore."""
+    aliases, documented = _aliases(), _documented()
+    assert sorted(set(aliases) - set(documented)) == []
+    assert sorted(set(documented) - set(aliases)) == []
+
+
+def test_commented_out_values_are_the_code_defaults(monkeypatch):
+    """A commented `# KEY=value` line documents the default: uncommenting it must not change the configuration (the
+    owner-id line is the one example value)."""
+    names = {field.alias or name: name for name, field in Settings.model_fields.items()}
+    for key in names:  # tests/conftest.py exports ARCHIVE_BACKFILL=false; an operator's shell may export others
+        monkeypatch.delenv(key, raising=False)
+    base = Settings(_env_file=None)
+    active = _active_values()
+    for key, value in _documented().items():
+        if key in active or key == "TELEGRAM_OWNER_ID":
+            continue
+        assert getattr(Settings(_env_file=None, **{key: value}), names[key]) == getattr(base, names[key]), key
