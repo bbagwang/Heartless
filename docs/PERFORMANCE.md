@@ -169,7 +169,7 @@ python -m heartless.util.perf bench --db data/research/heartless.db --symbols BT
 | `imbalance` | (매수 깊이 − 매도 깊이) / 합, −1 ~ 1 |
 | `depth_bid_k`, `depth_ask_k` | 중간가에서 k bps 안의 호가 명목 금액(USDT). k = `ORDERBOOK_DEPTH_BPS` |
 | `staleness_ms` | 책이 마지막으로 갱신된 뒤 지난 시간. 읽는 순간의 로컬 시계 − 갱신이 도착한 로컬 시각입니다(결정하는 봉의 마감 시각과 무관) |
-| `covered_bps` | 책의 호가가 중간가에서 얼마나 멀리까지 닿는지(얇은 쪽 기준, bps). **k보다 작으면 `depth_*`·`imbalance`는 NaN**입니다. 닿지 않는 범위의 깊이는 가진 호가의 합이 아니라 모르는 값입니다 |
+| `covered_bps` | 책의 호가가 중간가에서 얼마나 멀리까지 닿는지(얇은 쪽 기준, bps). **k보다 작으면 `depth_*`·`imbalance`는 NaN**입니다. 닿지 않는 범위의 깊이는 가진 호가의 합이 아니라 모르는 값입니다. diff 모드에서는 스냅숏이 돌려준 범위(가장 낮은 매수·가장 높은 매도 호가, 요청한 수보다 적게 온 쪽은 전체)까지만 호가 하나하나를 알기 때문에, 그 뒤 이벤트가 범위 밖에 더한 먼 호가는 덮은 거리를 늘리지 않습니다(2026-10-16 적대적 리뷰: 양쪽에 먼 주문 하나씩이 0.5bp 스냅숏을 50bp 덮은 것으로 만들었습니다) |
 | `mid`, `k_bps`, `levels`, `source` | 보조 정보. `source`는 `"stream"` / `"proxy"` / `"stale"` / `"none"` |
 
 - 책이 없으면 `EMPTY_BOOK`(값은 NaN, source `"none"`)입니다.

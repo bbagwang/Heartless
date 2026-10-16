@@ -83,6 +83,78 @@ def test_usable_book_rules():
     assert usable_book(ok) and not usable_book(BookFeatures(**{**ok.as_dict(), "staleness_ms": 3_001.0}))
 
 
+def _snap(L, bids, asks):
+    return {"lastUpdateId": L, "E": 0, "T": 0, "bids": [[str(p), str(q)] for p, q in bids],
+            "asks": [[str(p), str(q)] for p, q in asks]}
+
+
+def test_a_diff_book_is_covered_only_as_far_as_its_snapshot_reached():
+    """Adversarial review 2026-10-16: a diff book is known level by level only inside the band its snapshot returned.
+    One later order 50 bp away on each side made a 0.5 bp snapshot read as 50 bp covered, its depth within 10 bp (the
+    0.5 bp held) as measured and the book as usable."""
+    bk = LocalBook(SYM, "diff")
+    bids = [(60_000.0 - 0.1 * i, 5.0) for i in range(30)]  # 30 levels of 0.1: 0.5 bp a side, cut at the limit
+    asks = [(60_000.1 + 0.1 * i, 5.0) for i in range(30)]
+    bk.on_diff(ev(9, 11, 8, b=[(60_000.0, 5.0)]), 1)
+    assert bk.apply_snapshot(_snap(10, bids, asks), 2, limit=30)
+    assert bk.features(3, 10.0).covered_bps < 1.0 and not usable_book(bk.features(3, 10.0))
+    bk.on_diff(ev(12, 12, 11, b=[(59_700.0, 1.0)], a=[(60_300.0, 1.0)]), 4)  # one far order each side
+    f = bk.features(5, 10.0)
+    assert f.covered_bps < 1.0 and math.isnan(f.depth_bid_k) and math.isnan(f.imbalance) and not usable_book(f)
+    assert f.spread_bps > 0  # the touch is still known
+    # a snapshot reaching past k: covered, and a far level beyond the band does not move it
+    wide_b = [(round(100.0 - 0.01 * i, 2), 1.0) for i in range(15)]  # 100.00 .. 99.86: 14.5 bp below the mid
+    wide_a = [(round(100.01 + 0.01 * i, 2), 1.0) for i in range(15)]  # 100.01 .. 100.15
+    bk2 = LocalBook(SYM, "diff")
+    bk2.on_diff(ev(9, 11, 8), 1)
+    assert bk2.apply_snapshot(_snap(10, wide_b, wide_a), 2, limit=15)
+    g = bk2.features(3, 10.0)
+    assert 14.0 < g.covered_bps < 15.0 and usable_book(g)
+    # the price moves up 10 bp (asks taken, bids raised): the ask side now reaches only ~4.5 bp of known book
+    bk2.on_diff(ev(12, 12, 11, b=[(100.10, 1.0)], a=[(round(100.01 + 0.01 * i, 2), 0.0) for i in range(10)]), 4)
+    bk2.on_diff(ev(13, 13, 12, a=[(101.0, 1.0)]), 5)  # a far ask beyond the band
+    h = bk2.features(6, 10.0)
+    assert h.covered_bps < 10.0 and math.isnan(h.depth_ask_k) and not usable_book(h)
+    # a side the snapshot returned whole (fewer levels than asked for) is known all the way
+    bk3 = LocalBook(SYM, "diff")
+    bk3.on_diff(ev(9, 11, 8), 1)
+    assert bk3.apply_snapshot(_snap(10, [(100.0, 1.0), (99.95, 2.0)], [(100.01, 1.0), (100.05, 2.0)]), 2, limit=1000)
+    w = bk3.features(3, 10.0)
+    assert w.covered_bps >= 10.0 and w.depth_bid_k == pytest.approx(100.0 + 99.95 * 2) and usable_book(w)
+    # without the requested limit a side counts as cut at its last level (the previous reading)
+    bk4 = LocalBook(SYM, "diff")
+    bk4.on_diff(ev(9, 11, 8), 1)
+    assert bk4.apply_snapshot(_snap(10, [(100.0, 1.0), (99.95, 2.0)], [(100.01, 1.0), (100.05, 2.0)]), 2)
+    assert bk4.features(3, 10.0).covered_bps < 10.0
+    bk4.reset()
+    assert bk4.known_bid is None and bk4.known_ask is None
+
+
+def test_the_books_pass_the_snapshot_limit(monkeypatch):
+    t = [1_000_000]
+    monkeypatch.setattr(OB, "now_ms", lambda: t[0])
+    asked = []
+
+    async def fetch(sym, limit):
+        asked.append(limit)
+        return _snap(6, [(100.0, 1.0), (99.95, 2.0)], [(100.01, 1.0), (100.05, 2.0)])  # a whole (short) book
+
+    async def main():
+        books = OrderBooks("diff", 10.0, fetch_snapshot=fetch, snapshot_limit=1000)
+        books.set_symbols([SYM])
+        await books.on_message(ev(5, 9, 4))
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if books.books[SYM].synced:
+                break
+        f = books.features(SYM)
+        await books.close()
+        return f
+
+    f = asyncio.run(main())
+    assert asked == [1000] and f.covered_bps >= 10.0 and usable_book(f)
+
+
 def test_the_unsynced_buffer_is_bounded():
     bk = LocalBook(SYM, "diff")
     for i in range(3 * OB.BUFFER_MAX):

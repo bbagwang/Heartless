@@ -20,7 +20,11 @@ What the figures can and cannot say (red-team F-M5 / F-M6, 2026-10-16):
 * `covered_bps` is how far from the mid the book's levels reach on its thinner side. When it is below k the depth and
   imbalance are NaN: a sum over levels that stop short of k is not the depth within k. The partial stream's 20 levels
   span a fraction of a bp on fine-tick symbols (BTC: 20 ticks of 0.1 USD), so partial mode cannot measure +-10 bp depth
-  there; diff mode can once its snapshot (SNAPSHOT_LIMIT levels) reaches k.
+  there; diff mode can once its snapshot (SNAPSHOT_LIMIT levels) reaches k. A diff book is known level by level only
+  inside the band its snapshot returned (every later change there is applied); a level that a later event adds beyond
+  that band says nothing about the prices between the band's edge and it, so a diff book's coverage is the distance to
+  its snapshot's edge (known_bid / known_ask), not to its farthest level (adversarial review 2026-10-16: one far order
+  on each side made a 0.5 bp snapshot read as 50 bp covered and its depth within k as measured).
 * a book whose depth connection dropped is unsynced in both modes (its last figures are no longer the market), and
   one without an update for more than MAX_BOOK_AGE_MS reads NaN with source "stale". `usable_book()` is the check a
   book guard applies: anything but a fresh, synced, fully covered stream book (or the modelled proxy) is no book.
@@ -85,14 +89,20 @@ def book_of(ctx) -> BookFeatures:
 
 
 def features_from_levels(bids: dict[float, float], asks: dict[float, float], k_bps: float, age_ms: float,
-                         source: str = "stream") -> BookFeatures:
+                         source: str = "stream", known_bid: float | None = None,
+                         known_ask: float | None = None) -> BookFeatures:
+    """The book's features. `known_bid` / `known_ask` (diff books): the lowest bid / highest ask price down / up to which
+    the side is known level by level (its snapshot's edge; 0 / inf for a side the snapshot returned whole). They bound
+    covered_bps instead of the farthest level held, which a later event may have added beyond a gap that is unknown."""
     if not bids or not asks:
         return BookFeatures(staleness_ms=age_ms, k_bps=k_bps, source=source)
     bb, ba = max(bids), min(asks)
     if not (bb > 0 and ba > bb):  # crossed or locked: a transient state of an out-of-sync book, not a price
         return BookFeatures(staleness_ms=age_ms, k_bps=k_bps, source=source)
     mid = (bb + ba) / 2
-    covered = min(mid - min(bids), max(asks) - mid) / mid * 1e4
+    reach_bid = min(bids) if known_bid is None else known_bid
+    reach_ask = max(asks) if known_ask is None else known_ask
+    covered = min(mid - reach_bid, reach_ask - mid) / mid * 1e4
     spread = (ba - bb) / mid * 1e4
     if covered < k_bps:  # the levels stop short of k: the band's depth is unknown, not the sum of what is held
         return BookFeatures(spread_bps=spread, staleness_ms=age_ms, mid=mid, k_bps=k_bps,
@@ -142,6 +152,10 @@ class LocalBook:
         self.snapshot_pending = False
         self.recv_ms = 0  # local time the last applied update arrived
         self.event_ms = 0  # exchange event time of the last applied update
+        # diff: the band the book is known in level by level, the snapshot's lowest bid / highest ask (0 / inf for a
+        # side it returned whole, narrowed by pruning); None without a snapshot (partial books: every message is whole)
+        self.known_bid: float | None = None
+        self.known_ask: float | None = None
         self.stats = {"updates": 0, "snapshots": 0, "resyncs": 0, "stale": 0, "dropped": 0}
 
     # --- partial depth ----------------------------------------------------------------------------------------------
@@ -161,6 +175,7 @@ class LocalBook:
         self.bids, self.asks = {}, {}
         self.synced = self.first_after_snapshot = False
         self.last_u = 0
+        self.known_bid = self.known_ask = None
 
     def on_diff(self, ev: dict, recv_ms: int) -> bool:
         """Apply one diff event. Returns True when the book needs a (new) REST snapshot."""
@@ -183,13 +198,19 @@ class LocalBook:
         self._apply(ev, recv_ms)
         return False
 
-    def apply_snapshot(self, snap: dict, recv_ms: int) -> bool:
+    def apply_snapshot(self, snap: dict, recv_ms: int, limit: int | None = None) -> bool:
         """Install a REST snapshot and replay the buffered events. True when the book is in sync; False when the
-        buffer does not connect to the snapshot (fetch another one)."""
+        buffer does not connect to the snapshot (fetch another one). `limit`: the levels per side requested; a side
+        with fewer is the whole side (without it every side counts as cut at its last level)."""
         self.snapshot_pending = False
         L = int(snap["lastUpdateId"])
         self.stats["snapshots"] += 1
-        self.bids, self.asks = _levels(snap.get("bids") or ()), _levels(snap.get("asks") or ())
+        rows_b, rows_a = snap.get("bids") or (), snap.get("asks") or ()
+        self.bids, self.asks = _levels(rows_b), _levels(rows_a)
+        whole_b = limit is not None and len(rows_b) < int(limit)
+        whole_a = limit is not None and len(rows_a) < int(limit)
+        self.known_bid = 0.0 if whole_b else (min(self.bids) if self.bids else None)
+        self.known_ask = float("inf") if whole_a else (max(self.asks) if self.asks else None)
         self.last_u = L
         self.recv_ms = recv_ms
         self.event_ms = int(snap.get("E") or snap.get("T") or 0)
@@ -250,6 +271,10 @@ class LocalBook:
         lo, hi = mid * (1 - PRUNE_FRAC), mid * (1 + PRUNE_FRAC)
         self.bids = {p: q for p, q in self.bids.items() if p >= lo}
         self.asks = {p: q for p, q in self.asks.items() if p <= hi}
+        if self.known_bid is not None:  # what was dropped is no longer known
+            self.known_bid = max(self.known_bid, lo)
+        if self.known_ask is not None:
+            self.known_ask = min(self.known_ask, hi)
 
     def _seen(self, ev: dict, recv_ms: int) -> None:
         self.recv_ms = recv_ms
@@ -259,7 +284,8 @@ class LocalBook:
     def features(self, now: int, k_bps: float) -> BookFeatures:
         if not self.synced:
             return BookFeatures(k_bps=k_bps, source="stream")
-        return features_from_levels(self.bids, self.asks, k_bps, float(now - self.recv_ms))
+        return features_from_levels(self.bids, self.asks, k_bps, float(now - self.recv_ms), known_bid=self.known_bid,
+                                    known_ask=self.known_ask)
 
 
 SnapshotFetch = Callable[[str, int], Awaitable[dict]]
@@ -344,7 +370,7 @@ class OrderBooks:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
                 continue
-            if book.apply_snapshot(snap, now_ms()) or not book.buffer:
+            if book.apply_snapshot(snap, now_ms(), self.snapshot_limit) or not book.buffer:
                 return
             # the buffered stream does not connect to this snapshot yet: try a newer one shortly
             book.snapshot_pending = True
