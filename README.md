@@ -212,7 +212,7 @@ python tools/calibrate_promotion.py --out docs/results/e2_promotion_calibration.
 | `SHOCK_CANDLE_DB` / `SHOCK_SCHEDULE` | (비어 있음) | BTC 를 불러오지 않은 백테스트의 S0 원천 / 미리 만든 충격 일정 파일 |
 | `EXEC_MODE` | taker | 체결 방식 `taker`, `maker_m1`, `maker_m2` 중 하나, 또는 `알파:방식,...`(파라미터 세트의 `exec` 가 우선, [`docs/EXECUTION.md`](docs/EXECUTION.md)) |
 | `MAKER_THROUGH_SPREAD` / `MAKER_MIN_VOLUME_MULT` | 0.5 / 20 | 메이커 체결에 필요한 관통 폭(합성 스프레드 배수, 스트레스 1.0) / 1분봉 거래대금 하한(주문 명목 배수) |
-| `BOOK_GUARD` | true | 호가 이상 시 진입 보류(실시간 호가 또는 1분봉 대용치) |
+| `BOOK_GUARD` | true | 호가 이상 시 진입 보류(실시간 호가 또는 1분봉 대용치. `ORDERBOOK_STREAM` 이 켜져 있는데 쓸 책이 없어도 보류) |
 | `BOOK_GUARD_SPREAD_MULT` / `BOOK_GUARD_MIN_SPREAD_BPS` / `BOOK_GUARD_DEPTH_FRAC` | 3 / 5 / 0.25 | 스프레드 ≥ 직전 24시간 중앙값의 배수이고 bp 이상 / 깊이 < 직전 24시간 중앙값의 비율 |
 | **포트폴리오·진입 크기 (P3, E1)** | | |
 | `PORTFOLIO_ALLOCATOR` | false | 봉 마감 일괄 결정 + 위험 예산. 꺼짐 = 봉 처리 순서(FIFO) |

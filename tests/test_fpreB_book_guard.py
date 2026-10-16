@@ -8,8 +8,9 @@ from heartless.config import Settings
 from heartless.core.models import Candle
 from heartless.data.candles import CandleArrays
 from heartless.data.features import FeatureFrame
-from heartless.exchange.orderbook import BookFeatures, bar_book_proxy
-from heartless.execution.engine import BOOK_MAX_AGE_MS, BookGuard, book_proxy_series, usable_stream_book
+from heartless.exchange import orderbook as OB
+from heartless.exchange.orderbook import BookFeatures, bar_book_proxy, proxy_from_frame
+from heartless.execution.engine import BOOK_MAX_AGE_MS, BookGuard, book_proxy_series, usable_book, usable_stream_book
 from heartless.strategy.base import Context
 from synth import synth_candles
 from tests.test_fpreB_support import Scripted, backtest
@@ -142,3 +143,60 @@ def test_an_unusable_stream_book_falls_back_to_the_proxy():
     assert g.samples == {}
     # a usable stream book is judged on its own samples (none yet: no verdict)
     assert g.check(_V(fr), _ctx(_stream(1.0, 5e5)), now, 0.01) == ""
+
+
+def _unusable_books():
+    return [BookFeatures(),  # no book (EMPTY_BOOK, or the app's fallback when the book raises)
+            BookFeatures(k_bps=10.0, source="stream"),  # unsynced (every figure NaN)
+            _stream(1.0, 5e5, age=BOOK_MAX_AGE_MS + 1),  # stale
+            BookFeatures(spread_bps=1.0, staleness_ms=50.0, source="stream"),  # levels short of +-k (NaN depth)
+            BookFeatures(k_bps=10.0, source="stale"),  # the red-team orderbook's stale marker (wave-f-merge)
+            BookFeatures(k_bps=10.0, source="proxy")]  # a proxy without bars
+
+
+def test_missing_book_clause_with_the_stream_on():
+    """ROADMAP 7.11 missing-book clause (6절 2026-10-16, red-team F-M6): with ORDERBOOK_STREAM on, an entry without a
+    usable book - none, unsynced, stale, NaN figures, levels short of +-k - is held, not judged on the 1m-bar proxy (the
+    stand-in cannot see the live book that is missing); a defined proxy, which the backtester and the replay serve under
+    ORDERBOOK_STREAM, is judged as before. With the stream off nothing changes."""
+    fr = FeatureFrame("1m", _calm_then_wild())
+    calm = int(fr.close_time[1980])
+    g = BookGuard(Settings(_env_file=None, ORDERBOOK_STREAM=True, BOOK_GUARD=True))
+    for b in _unusable_books():
+        assert not usable_book(b)
+        assert g.check(_V(fr), _ctx(b), calm, 0.01) == "book guard: no usable book", b
+    assert g.held == len(_unusable_books())
+    # usable: a fresh synced stream book (judged on its own samples: none yet, no verdict) and a defined proxy
+    assert usable_book(_stream(1.0, 5e5)) and g.check(_V(fr), _ctx(_stream(1.0, 5e5)), calm, 0.01) == ""
+    proxy = proxy_from_frame(fr, calm, 10.0, 0.01)
+    assert usable_book(proxy) and g.check(_V(fr), _ctx(proxy), calm, 0.01) == ""
+    wild = proxy_from_frame(fr, int(fr.close_time[-1]), 10.0, 0.01)
+    assert g.check(_V(fr), _ctx(wild), int(fr.close_time[-1]), 0.01) == "book guard: spread"
+    # the stream off (the default): no book is the normal case, the proxy judges (calm bars: not held)
+    off = BookGuard(Settings(_env_file=None, BOOK_GUARD=True))
+    assert all(off.check(_V(fr), _ctx(b), calm, 0.01) == "" for b in _unusable_books()) and off.held == 0
+
+
+def test_backtest_under_the_stream_judges_the_proxy_book(monkeypatch, tmp_path):
+    """The backtester with ORDERBOOK_STREAM on serves the 1m-bar proxy as ctx.book: the missing-book clause holds
+    nothing there (the proxy is defined once 15 bars exist), the trades equal those with the stream off."""
+    ca = _calm_then_wild()
+    ct = FeatureFrame("1m", ca).close_time
+    times = [int(ct[1900]), int(ct[1995])]
+    runs = {}
+    for on in (False, True):
+        res, _ = backtest(monkeypatch, tmp_path, Scripted(times, hold=2), {"XUSDT": ca}, shock=None, BOOK_GUARD=True,
+                          ORDERBOOK_STREAM=on)
+        runs[on] = ([int(t["entry_time"]) for t in res.trades], res.skipped.get("book guard"))
+    assert runs[True] == runs[False] and runs[True][0] == [times[0] + 1] and runs[True][1] == 1
+
+
+@pytest.mark.skipif(not hasattr(OB, "usable_book"), reason="orderbook.usable_book is the red-team fix (wave-f-merge)")
+def test_usable_book_matches_the_orderbook_rule():
+    """engine.usable_book is orderbook.usable_book (red-team F-M5 / F-M6) on every kind of book; a drift between the two
+    after the merge fails here."""
+    books = _unusable_books() + [_stream(1.0, 5e5), _stream(1.0, 5e5, age=BOOK_MAX_AGE_MS),
+                                 proxy_from_frame(FeatureFrame("1m", _calm_then_wild()), 1_700_006_400_000 + 1980 * MIN,
+                                                  10.0, 0.01)]
+    for b in books:
+        assert usable_book(b) == OB.usable_book(b), b

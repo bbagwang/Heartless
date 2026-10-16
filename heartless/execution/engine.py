@@ -46,14 +46,17 @@ MAKER_M2_ATR = 0.25  # maker_m2 rests 0.25 signal ATR behind the decision close 
 class BookGuard:
     """ROADMAP 7.11: hold an entry while the symbol's book is abnormal against its own last 24 hours: spread >=
     BOOK_GUARD_SPREAD_MULT x its prior-24h median and >= BOOK_GUARD_MIN_SPREAD_BPS, or the depth within
-    +-ORDERBOOK_DEPTH_BPS (both sides) < BOOK_GUARD_DEPTH_FRAC x its prior-24h median.
+    +-ORDERBOOK_DEPTH_BPS (both sides) < BOOK_GUARD_DEPTH_FRAC x its prior-24h median, or - the missing-book clause
+    (ROADMAP 7.11 and 6절 2026-10-16, red-team F-M6) - ORDERBOOK_STREAM is on and ctx.book cannot back the rule
+    (usable_book false: no book, unsynced, stale, NaN figures or levels short of +-k; a defined 1m-bar proxy, which the
+    backtester and the replay serve under ORDERBOOK_STREAM, is usable).
 
     The figures are the live stream book's when it is usable (usable_stream_book: synced, fresh, its levels reaching
-    +-k on both sides; one sample per minute is kept per symbol) or, everywhere else (backtests, replays, live without
-    ORDERBOOK_STREAM, a stale or uncovered stream book), the conservative 1m-bar proxy of
-    exchange/orderbook.bar_book_proxy computed over the symbol's 1m bars on demand (book_proxy_series), current and
-    prior alike. The thresholds are ratios to the symbol's own usual values, so they mean the same on the proxy.
-    Fewer than MIN_SAMPLES prior minutes: no verdict (the entry is not held)."""
+    +-k on both sides; one sample per minute is kept per symbol) or, without a stream book (backtests, replays, live
+    without ORDERBOOK_STREAM), the conservative 1m-bar proxy of exchange/orderbook.bar_book_proxy computed over the
+    symbol's 1m bars on demand (book_proxy_series), current and prior alike. The thresholds are ratios to the symbol's
+    own usual values, so they mean the same on the proxy. Fewer than MIN_SAMPLES prior minutes: no verdict on the
+    spread and depth (the entry is not held for them)."""
 
     MIN_SAMPLES = 720  # half the window: a fresh stream or a short history judges nothing
     WINDOW = 1440  # prior-24h = the 1,440 minutes before the current one
@@ -63,6 +66,9 @@ class BookGuard:
         self.min_bps = float(getattr(settings, "book_guard_min_spread_bps", 5.0))
         self.frac = float(getattr(settings, "book_guard_depth_frac", 0.25))
         self.k_bps = float(getattr(settings, "orderbook_depth_bps", 10.0))
+        # ORDERBOOK_STREAM on: an entry without a usable book is held (the missing-book clause), never judged on the
+        # proxy - a stream that is down must not let entries through on a stand-in that cannot see the live book
+        self.stream = bool(getattr(settings, "orderbook_stream", False))
         self.samples: dict[str, deque] = {}  # symbol -> (minute, spread bps, depth both sides) of the stream book
         self.held = 0
 
@@ -92,6 +98,9 @@ class BookGuard:
 
     def check(self, view: MarketView, ctx: Context, now: int, tick: float) -> str:
         """Why the entry is held ('' = not held)."""
+        if self.stream and not usable_book(ctx.book):
+            self.held += 1
+            return "book guard: no usable book"
         s, d, ps, pd = self.figures(view, ctx, now, tick)
         ps = [x for x in ps if x == x]
         pd = [x for x in pd if x == x]
@@ -115,12 +124,21 @@ BOOK_MAX_AGE_MS = 3_000
 def usable_stream_book(b) -> bool:
     """Whether a ctx.book can back the book guard as a live stream book: source "stream", synced and covering +-k on both
     sides (finite spread, depths and imbalance: a book whose levels stop short of k reads NaN depth) and fresh
-    (staleness <= BOOK_MAX_AGE_MS). The same test as exchange/orderbook.usable_book (red-team F-M5 / F-M6); anything
-    else falls back to the 1m-bar proxy: a guard comparing NaN figures would never hold anything."""
+    (staleness <= BOOK_MAX_AGE_MS). The stream half of exchange/orderbook.usable_book (red-team F-M5 / F-M6): a guard
+    comparing NaN figures would never hold anything."""
     if getattr(b, "source", "none") != "stream":
         return False
     figs = (b.spread_bps, b.depth_bid_k, b.depth_ask_k, b.imbalance, b.staleness_ms)
     return all(x == x for x in figs) and b.staleness_ms <= BOOK_MAX_AGE_MS
+
+
+def usable_book(b) -> bool:
+    """exchange/orderbook.usable_book of the red-team fix (wave-f-merge), which this branch's orderbook.py predates: a
+    usable stream book (usable_stream_book) or a 1m-bar proxy with defined spread and depth; a missing ("none"), stale,
+    unsynced or uncovered book is not one. tests/test_fpreB_book_guard.py compares the two wherever both exist."""
+    if getattr(b, "source", "none") == "proxy":
+        return b.depth_bid_k == b.depth_bid_k and b.spread_bps == b.spread_bps
+    return usable_stream_book(b)
 
 
 def book_proxy_series(frame, now: int, k_bps: float, tick: float, n: int) -> tuple[np.ndarray, np.ndarray]:

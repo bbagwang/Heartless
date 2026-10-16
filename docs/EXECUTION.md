@@ -40,9 +40,11 @@ ROADMAP 7.7.2절(메이커 체결 프로토콜), 7.11절(호가 이상 시 진�
 
 - 스프레드 ≥ `BOOK_GUARD_SPREAD_MULT`(3) × 그 종목의 직전 24시간 중앙값, 그리고 ≥ `BOOK_GUARD_MIN_SPREAD_BPS`(5bp)
 - ±`ORDERBOOK_DEPTH_BPS`(10bp) 깊이(양쪽 합) < `BOOK_GUARD_DEPTH_FRAC`(25%) × 직전 24시간 중앙값
+- **결측 조항**(ROADMAP 7.11, 6절 2026-10-16 레드팀 반영 기록): `ORDERBOOK_STREAM` 이 켜져 있는데 쓸 책이 없음(`skipped["book guard"]`, 사유 `book guard: no usable book`). 책이 없거나(앱이 책 계산에 실패해 `EMPTY_BOOK` 을 준 경우 포함), 동기화되지 않았거나, 3초 넘게 갱신이 없거나, 값이 NaN 이거나, 호가가 ±k 까지 닿지 않는 경우입니다. 이때는 대용치로 판정하지 않습니다. 대용치는 지금 빠진 실시간 호가를 볼 수 없기 때문입니다.
 
-- 값의 원천: 쓸 수 있는 실시간 호가가 있으면 그 값과 분당 표본 1개씩 쌓은 직전 1,440분. 그 밖(백테스트, 리플레이, 스트림 없는 운영)에서는 1분봉 대용치(`orderbook.bar_book_proxy` 와 같은 식, `engine.book_proxy_series` 로 진입 순간에만 계산)를 지금 값과 직전 값 모두에 씁니다. 기준이 종목 자신의 평소 값 대비 비율이라 대용치에서도 뜻이 같습니다.
-- "쓸 수 있는 실시간 호가"(`engine.usable_stream_book`)는 `source == "stream"` 이고, 스프레드·양쪽 깊이·불균형이 모두 정의되며(호가 단계가 ±k 까지 닿음), 마지막 갱신이 3초(`BOOK_MAX_AGE_MS`) 안인 호가입니다. 레드팀 수정(F-M5·F-M6)의 `orderbook.usable_book` 과 같은 판정입니다. 오래되었거나 ±k 에 못 미치는 호가(예: 부분 스트림 20단계로는 BTC 의 ±10bp 를 덮지 못함)는 표본에 넣지 않고, 그 순간의 판정은 대용치로 합니다. NaN 끼리 비교해 아무것도 보류하지 않는 일이 없게 하기 위해서입니다.
+- 값의 원천: 쓸 수 있는 실시간 호가가 있으면 그 값과 분당 표본 1개씩 쌓은 직전 1,440분. 실시간 호가가 없는 곳(백테스트, 리플레이, 스트림을 끈 운영)에서는 1분봉 대용치(`orderbook.bar_book_proxy` 와 같은 식, `engine.book_proxy_series` 로 진입 순간에만 계산)를 지금 값과 직전 값 모두에 씁니다. 기준이 종목 자신의 평소 값 대비 비율이라 대용치에서도 뜻이 같습니다.
+- "쓸 수 있는 책"(`engine.usable_book`)은 레드팀 수정(F-M5·F-M6)의 `orderbook.usable_book` 과 같은 판정입니다. 실시간 호가(`engine.usable_stream_book`)는 `source == "stream"` 이고, 스프레드·양쪽 깊이·불균형이 모두 정의되며(호가 단계가 ±k 까지 닿음), 마지막 갱신이 3초(`BOOK_MAX_AGE_MS`) 안이어야 합니다. 대용치(`source == "proxy"`)는 스프레드와 깊이가 정의되면(1분봉이 있으면) 쓸 수 있습니다. 그래서 `ORDERBOOK_STREAM` 을 켠 백테스트·리플레이(대용치 책)의 판정은 스트림을 끈 것과 같습니다. 오래되었거나 ±k 에 못 미치는 호가(예: 부분 스트림 20단계로는 BTC 의 ±10bp 를 덮지 못함)는 표본에 넣지 않습니다. NaN 끼리 비교해 아무것도 보류하지 않는 일이 없게 하기 위해서입니다.
+- 병합 뒤에는 `tests/test_fpreB_book_guard.py` 가 `engine.usable_book` 과 `orderbook.usable_book` 을 모든 종류의 책에서 비교합니다.
 - 직전 표본이 720분 미만이면 판정하지 않습니다(새 스트림, 짧은 이력).
 - `ctx.book` 자체는 바뀌지 않습니다. 알파는 F-pre-B 이전과 같은 값을 봅니다.
 
