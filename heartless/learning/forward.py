@@ -6,14 +6,16 @@ gatekeeper's side of the protocol, the only way a block is ever opened:
 * `register()` (`heartless forward register`, and the bot's automated F3b path in code) appends one pre-registration
   to docs/results/forward_registrations.jsonl: candidate, family, config and code hash, evaluator and exact command,
   gate and criteria, block span, time and commit. It is refused unless it precedes its span: the first block must be
-  the earliest one starting at least 24 h later, and the span length follows the 7.9 rule.
+  the earliest one starting at least 24 h later (wall clock, cross-checked against the seal ledger and the newest
+  stored bar), and the span length follows the 7.9 rule.
 * `confirm()` (`heartless forward confirm FWD-k`, alias `forward open --block k`) opens an ended block exactly once:
   it checks the data is complete, appends the one `forward_open` line to the seal ledger (from then on the block is
   spent: ordinary history), then runs every registration whose span ends at the block once, nominal and stress, and
   writes docs/results/fwd_<block>_<candidate>.json. A block no registration covers is only opened with an explicit
   `--empty` (an empty opening spends the block with nothing confirmed, so it is never the default).
 * `rerun()` reruns a confirmation only when it produced no result (the reason goes into the registration ledger); a
-  leg (nominal or stress) whose result exists is never recomputed, and a confirmed registration is never run again.
+  leg (nominal or stress) whose result an earlier attempt left is never recomputed, a file the run did not write is
+  never adopted, and a confirmed registration is never run again.
 * `check_candidate()` refuses evaluating a configuration whose registration is still open on a window overlapping its
   span (7.9 "여러 블록 묶음": the earlier blocks of a multi-block span open on schedule and become ordinary history
   for everyone else, but not for the registered configuration until its one confirmation ran).
@@ -30,6 +32,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,9 +52,18 @@ RUN_ENV = "HEARTLESS_FORWARD_RUN"  # set for the evaluator processes of a confir
 MAX_MISSING_SHARE = 0.001  # a member is complete with at most 0.1 % of its bars missing (exchange-wide outages)
 FUNDING_SLACK_MS = 60_000
 MAX_FUNDING_GAP_MS = 8 * HOUR_MS  # Binance settles at least every 8 h; a longer gap is a missing settlement
+# an opening needs stored bars reaching this close to the block end: the data, not only the clock, shows it ended
+END_WITNESS_SLACK_MS = HOUR_MS
 # window and output flags the registration fixes itself: a command naming them would evaluate another window
 _WINDOW_FLAGS = {"--start": "{start}", "--end": "{end}", "--out": "{out}"}
-_FORBIDDEN = ("--years", "--split", "--unseal", "--days", "--train", "--valid")
+# --period (hourly / neutral evaluators) wins over --start/--end there, so it would move the window too
+_FORBIDDEN = ("--years", "--split", "--unseal", "--days", "--train", "--valid", "--period")
+# flags a registered command spells in full: argparse takes any unique prefix (allow_abbrev), so `--sta X` after
+# `--start {start}` would move the window, `--stres` would stress the nominal leg and `--sym` would hide the members
+# from the completeness check
+_FULL_ONLY = (*_FORBIDDEN, *_WINDOW_FLAGS, "--stress", "--symbols", "--universe", "--tag")
+_REFUSED_EVALUATORS = ("forward",)  # a confirmation run never registers, opens or reruns
+WITNESS_SYMBOLS = ("BTCUSDT", "ETHUSDT")  # always looked up for register's data witness (latest_bar_ms)
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,79}$")
 _HASH = re.compile(r"^[0-9a-f]{8,64}$")
 
@@ -61,9 +73,19 @@ class ForwardError(RuntimeError):
 
 
 def _now_ms() -> int:
-    from heartless.util.timeutil import now_ms
+    """The wall clock. Not timeutil.now_ms(): the replay harness installs its virtual clock there, and a deadline
+    checked on replayed time would accept a registration made after its block started."""
+    return int(time.time() * 1000)
 
-    return now_ms()
+
+def _refuse_virtual_clock(step: str) -> None:
+    """FORWARD steps write the real ledgers at real time: refused while a virtual clock is installed (a replayed
+    bot, whose F3b path would otherwise register from inside a replay)."""
+    from heartless.util import timeutil
+
+    if timeutil._clock is not None:
+        raise ForwardError(f"`forward {step}` refused under a virtual clock (replay): FORWARD steps happen at "
+                           f"wall-clock time on the real ledgers (ROADMAP 7.9)")
 
 
 def _utc(ms: int) -> str:
@@ -204,14 +226,21 @@ def _check_cap(family: str, cap, first: int, now_ms: int, regs: dict[str, dict])
 def normalize_command(command, stress: bool = False) -> list[str]:
     """A registered evaluator command as argv for `heartless` with the placeholders {start}, {end} (span dates, end
     exclusive) and {out} (the result JSON), appended when missing. Window flags with other values are refused: the
-    registration, not the command, fixes the evaluated window."""
+    registration, not the command, fixes the evaluated window. So is an abbreviation of a guarded flag (argparse
+    would expand it past these checks)."""
     argv = shlex.split(command) if isinstance(command, str) else [str(a) for a in (command or [])]
     if argv and argv[0] == "heartless":
         argv = argv[1:]
     if not argv or argv[0].startswith("-"):
         raise ForwardError(f"the command must start with the evaluator subcommand (e.g. lab), got {argv!r}")
+    if argv[0] in _REFUSED_EVALUATORS:
+        raise ForwardError(f"`{argv[0]}` is not an evaluator: a registered command evaluates the span (e.g. lab)")
     for i, tok in enumerate(argv):
         flag, eq, val = tok.partition("=")
+        if flag.startswith("--") and flag not in _FULL_ONLY and any(f.startswith(flag) for f in _FULL_ONLY):
+            near = ", ".join(f for f in _FULL_ONLY if f.startswith(flag))
+            raise ForwardError(f"{flag!r} abbreviates {near}: spell flags out in a registered command (argparse would "
+                               f"expand it after the window checks)")
         if flag in _FORBIDDEN:
             raise ForwardError(f"{flag} is not allowed in a registered command: the registration fixes the window")
         if flag == "--stress" and not stress:
@@ -356,8 +385,8 @@ def _git_dirty() -> bool | None:
         return None
 
 
-def default_code_hash(candidate: str) -> str | None:
-    """The alpha's source hash (trials.code_hash) for an alpha candidate, else the commit's tree hash of the package."""
+def alpha_code_hash(candidate: str) -> str | None:
+    """The alpha's source hash (trials.code_hash) when `candidate` names an alpha, else None."""
     try:
         from heartless.strategy.alphas import ALL_ALPHAS
 
@@ -365,8 +394,16 @@ def default_code_hash(candidate: str) -> str | None:
             from heartless.learning import trials
 
             return trials.code_hash([candidate])
-    except Exception:  # noqa: BLE001 - fall back to the tree hash
+    except Exception:  # noqa: BLE001 - no alpha hash
         pass
+    return None
+
+
+def default_code_hash(candidate: str) -> str | None:
+    """The alpha's source hash (trials.code_hash) for an alpha candidate, else the commit's tree hash of the package."""
+    h = alpha_code_hash(candidate)
+    if h:
+        return h
     try:
         out = subprocess.run(["git", "rev-parse", "HEAD:heartless"], cwd=seal.REPO_ROOT, capture_output=True,
                              text=True, timeout=5)
@@ -379,13 +416,19 @@ def register(candidate: str, config_hash: str, family: str, command, *, gate: st
              blocks=None, trades_per_30d: float | None = None, criteria: dict | None = None, stress_command=None,
              code_hash: str | None = None, bar: str = "1m", note: str = "", registrant: str = "gatekeeper",
              now_ms: int | None = None, commit: str | None = None, dirty: bool | None = None,
-             argv: list[str] | None = None, ledger: Path | str | None = None) -> dict:
+             data_latest_ms: int | None = None, argv: list[str] | None = None,
+             ledger: Path | str | None = None) -> dict:
     """Append one FORWARD pre-registration and return it (ForwardError when the protocol refuses it).
 
     `blocks` (e.g. "2..3") is optional: the span then starts at the target block (earliest starting >= 24 h later)
     and has the 7.9 length. `command` is the evaluator command as on TRAIN / VALID, without the window. The bot's
     automated path (F3b) calls this with registrant="F3b". `commit` / `dirty` default to the checkout's state; a
-    package with uncommitted changes is refused (the registration pins a commit)."""
+    package with uncommitted changes is refused (the registration pins a commit).
+
+    The deadline is checked on the wall clock and against two witnesses that do not depend on it: the seal ledger (a
+    block opened means the next one has started) and `data_latest_ms`, the newest stored bar (latest_bar_ms), which
+    must lie before the first block's start."""
+    _refuse_virtual_clock("register")
     now = _now_ms() if now_ms is None else int(now_ms)
     candidate, family, config_hash = str(candidate).strip(), str(family).strip(), str(config_hash).strip().lower()
     if not _NAME.match(candidate):
@@ -424,6 +467,11 @@ def register(candidate: str, config_hash: str, family: str, command, *, gate: st
             raise ForwardError(f"the span must be {n} block(s) for gate {gate}"
                                + (f" with {trades_per_30d} TRAIN trades per 30 days" if trades_per_30d is not None
                                   else "") + f" (ROADMAP 7.9 span rule), got {last - first + 1}")
+    start = seal.block_span(first)[0]
+    if data_latest_ms is not None and int(data_latest_ms) >= start:
+        raise ForwardError(f"stored bars reach {_utc(int(data_latest_ms))}, after {seal.block_name(first)} started "
+                           f"({_utc(start)}): the registration deadline passed (is the system clock behind? "
+                           f"ROADMAP 7.9)")
     nominal = normalize_command(command)
     stress = normalize_command(stress_command if stress_command is not None else nominal, stress=True)
     if criteria is None:
@@ -435,13 +483,17 @@ def register(candidate: str, config_hash: str, family: str, command, *, gate: st
     commit = seal.git_commit() if commit is None else commit
     dirty = _git_dirty() if dirty is None else dirty
     if dirty:
-        raise ForwardError("the package has uncommitted changes: commit first, a registration pins the code by commit")
+        raise ForwardError("the package has uncommitted changes: commit first, a registration records the code by its "
+                           "commit")
     code = (code_hash or default_code_hash(candidate) or "").strip()
     if not code:
         raise ForwardError("no code hash: pass --code-hash (no alpha of that name and no git tree hash)")
+    # "alpha": the alpha's source hash, which the confirmation run checks again before it evaluates anything
+    code_source = "given" if code_hash else ("alpha" if code == alpha_code_hash(candidate) else "tree")
     a, b = span_window(first, last)
     entry = {"event": "register", "id": None, "registered_utc": _utc(now), "candidate": candidate, "family": family,
-             "config_hash": config_hash, "code_hash": code, "evaluator": nominal[0], "command": nominal,
+             "config_hash": config_hash, "code_hash": code, "code_hash_source": code_source,
+             "evaluator": nominal[0], "command": nominal,
              "stress_command": stress, "gate": gate, "criteria": crit, "criteria_source": source,
              "trades_per_30d": trades_per_30d, "span_rule": f"{n} block(s)",
              "blocks": [seal.block_name(k) for k in range(first, last + 1)], "window": [_utc(a), _utc(b)],
@@ -454,6 +506,17 @@ def register(candidate: str, config_hash: str, family: str, command, *, gate: st
         if same:
             raise ForwardError(f"config hash {config_hash} is already registered ({', '.join(same)}): a configuration "
                                f"is confirmed once (ROADMAP 7)")
+        # the hash is typed by the registrant; the same command on the same code evaluates the same configuration
+        twin = [r["id"] for r in regs.values() if r["command"] == nominal and r.get("code_hash") == code]
+        if twin:
+            raise ForwardError(f"the same command on the same code is already registered ({', '.join(twin)}) under "
+                               f"another config hash: a configuration is confirmed once (ROADMAP 7)")
+        opened = seal.forward_openings()
+        if opened and first <= max(opened) + 1:
+            j = max(opened)
+            raise ForwardError(f"{seal.block_name(j)} was opened on {opened[j].get('utc')}, so "
+                               f"{seal.block_name(j + 1)} has started and {seal.block_name(first)} is past its "
+                               f"deadline (is the system clock behind? it reads {_utc(now)}; ROADMAP 7.9)")
         clash = [r["id"] for r in regs.values() if r["candidate"] == candidate and r["last"] == last]
         if clash:
             raise ForwardError(f"candidate name {candidate!r} already ends at {seal.block_name(last)} ({clash[0]}): "
@@ -511,11 +574,46 @@ def criteria_check(criteria: dict, summary: dict | None) -> dict:
     return out
 
 
+def _leg_path(block: str, candidate: str, leg: str) -> Path:
+    return RESULTS_DIR / f"fwd_{block}_{candidate}_{leg}.json"
+
+
+def _foreign(doc: dict | None, argv: list[str], reg: dict) -> str | None:
+    """Why a leg result already on disk is not this registration's own (None: adopt it, never recompute it). Only an
+    earlier attempt of the registration can have written one (every attempt logs run_started first), from the filled
+    command (the evaluators record their argv and generated_utc), after that first run_started."""
+    if reg["attempts"] == 0:
+        return "it existed before this registration's first run"
+    if doc is None:
+        return "it is not a readable JSON object"
+    got = doc.get("argv")
+    if not isinstance(got, list) or [str(x) for x in got[1:]] != [str(x) for x in argv]:
+        return "its argv is not this registration's command"
+    first = next((e.get("utc") for e in reg["runs"] if e.get("event") == "run_started"), None)
+    gen = doc.get("generated_utc")
+    if not isinstance(gen, str) or (first is not None and gen < str(first)):
+        return "it was generated before this registration's first run"
+    return None
+
+
+def _abort(ledger: Path, reg: dict, leg: str | None, rc, error: str) -> dict:
+    seal.append_line(ledger, {"event": "run_aborted", "id": reg["id"], "utc": _utc(_now_ms()), "leg": leg, "rc": rc,
+                              "error": error})
+    return {"id": reg["id"], "state": "aborted", "leg": leg, "rc": rc, "error": error}
+
+
 def _run(reg: dict, attempt: int, reason: str | None, runner, ledger: Path) -> dict:
     """One attempt of a registration's confirmation: the legs without a result, then the combined result file."""
     block = seal.block_name(reg["last"])
     seal.append_line(ledger, {"event": "run_started", "id": reg["id"], "utc": _utc(_now_ms()), "block": block,
                               "attempt": attempt, "reason": reason, "commit": seal.git_commit()})
+    code_now = alpha_code_hash(reg["candidate"]) if reg.get("code_hash_source") == "alpha" else None
+    if reg.get("code_hash_source") == "alpha" and code_now != reg.get("code_hash"):
+        # the registered configuration includes its alpha's source: other code would spend the one confirmation on
+        # a configuration nobody registered (run it from a checkout with the registered alpha source)
+        return _abort(ledger, reg, None, None, f"the source of alpha {reg['candidate']} changed since the "
+                                               f"registration (code hash {code_now}, registered {reg['code_hash']} "
+                                               f"at commit {reg.get('commit')})")
     values = {"start": _day(reg["start_ms"]), "end": _day(reg["end_ms"])}
     env = {**os.environ, RUN_ENV: reg["id"]}
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -525,31 +623,39 @@ def _run(reg: dict, attempt: int, reason: str | None, runner, ledger: Path) -> d
         if prior is not None:
             legs[leg] = {k: prior.get(k) for k in ("path", "summary", "config_hash_seen", "rc", "adopted")}
             continue
-        out = RESULTS_DIR / f"fwd_{block}_{reg['candidate']}_{leg}.json"
+        out = _leg_path(block, reg["candidate"], leg)
+        trades = RESULTS_DIR / f"fwd_{block}_{reg['candidate']}_{leg}_trades.json"
+        argv = _fill(cmd, {**values, "out": str(out), "trades": str(trades), "leg": leg})
         preexisting = out.exists()
         rc, error = None, None
-        if not preexisting:
-            trades = RESULTS_DIR / f"fwd_{block}_{reg['candidate']}_{leg}_trades.json"
+        if preexisting:
+            # a result that exists is never recomputed, but only one an interrupted attempt of this registration
+            # left behind is adopted: any other file at that path never evaluated this span
+            doc = _read_json(out)
+            why = _foreign(doc, argv, reg)
+            if why:
+                return _abort(ledger, reg, leg, None, f"{_rel(out)} is not this registration's result ({why}): move "
+                                                      f"it away, then `heartless forward rerun {reg['id']} --reason`")
+        else:
             try:
-                rc = runner(_fill(cmd, {**values, "out": str(out), "trades": str(trades), "leg": leg}), env)
+                rc = runner(argv, env)
             except Exception as e:  # noqa: BLE001 - recorded as an aborted run
                 error = f"{type(e).__name__}: {e}"
-        doc = _read_json(out)
+            doc = _read_json(out)
         if doc is None:
-            seal.append_line(ledger, {"event": "run_aborted", "id": reg["id"], "utc": _utc(_now_ms()), "leg": leg,
-                                      "rc": rc, "error": error or f"no result at {_rel(out)} (exit code {rc})"})
-            return {"id": reg["id"], "state": "aborted", "leg": leg, "rc": rc, "error": error}
-        # a result that exists is never recomputed, even one an interrupted attempt left behind
+            return _abort(ledger, reg, leg, rc, error or f"no result at {_rel(out)} (exit code {rc})")
         rec = {"path": _rel(out), "summary": doc.get("summary"), "rc": rc, "adopted": preexisting,
                "config_hash_seen": (doc.get("trial") or {}).get("config_hash")}
         seal.append_line(ledger, {"event": "leg_done", "id": reg["id"], "utc": _utc(_now_ms()), "leg": leg, **rec})
         legs[leg] = rec
     path = RESULTS_DIR / f"fwd_{block}_{reg['candidate']}.json"
-    keys = ("id", "registered_utc", "candidate", "family", "config_hash", "code_hash", "evaluator", "command",
-            "stress_command", "gate", "criteria", "criteria_source", "blocks", "window", "members", "bar", "commit")
+    keys = ("id", "registered_utc", "candidate", "family", "config_hash", "code_hash", "code_hash_source",
+            "evaluator", "command", "stress_command", "gate", "criteria", "criteria_source", "blocks", "window",
+            "members", "bar", "commit")
     seen = {leg: legs[leg].get("config_hash_seen") for leg in LEGS}
     doc = {"block": block, "registration": {k: reg.get(k) for k in keys}, "legs": legs,
            "config_hash_match": {leg: (None if h is None else h == reg["config_hash"]) for leg, h in seen.items()},
+           "code_hash_now": code_now,
            "criteria_check": criteria_check(reg["criteria"], legs["nominal"].get("summary")),
            "verdict": None, "verdict_note": "applied by the gatekeeper (ROADMAP 7.9); criteria_check is informational",
            "attempts": attempt, "commit": seal.git_commit(), "generated_utc": _utc(_now_ms())}
@@ -564,9 +670,16 @@ def confirm(block, *, data_check, empty: bool = False, incomplete_ok: str | None
             now_ms: int | None = None, argv: list[str] | None = None, ledger: Path | str | None = None) -> dict:
     """Open an ended FORWARD block exactly once and run every registration whose span ends at it (7.9 "개봉").
 
-    `data_check(k, registrations)` returns {"complete": bool, ...}; an incomplete block is refused unless
-    `incomplete_ok` gives the reason (recorded in the opening line). `runner(argv, env) -> exit code` runs one
-    evaluator command (subprocess_runner by default). Refusals record nothing."""
+    `data_check(k, registrations)` returns {"complete": bool, "latest_end_ms": ..., ...}; an incomplete block is
+    refused unless `incomplete_ok` gives the reason (recorded in the opening line). Stored bars must reach the block
+    end (latest_end_ms, within END_WITNESS_SLACK_MS) even then: the data, not only the clock, shows the block ended.
+    `runner(argv, env) -> exit code` runs one evaluator command (subprocess_runner by default). Refusals record
+    nothing.
+
+    The opening line is written before the runs, unlike the step order listed in 7.9: the evaluators read the span
+    through seal.check_window, which no unseal opens for a FORWARD block, so the block must be spent first. A run
+    that ends without a result leaves the block opened and the registration to `rerun`."""
+    _refuse_virtual_clock("confirm")
     k = seal.block_number(block)
     name = seal.block_name(k)
     a, b = seal.block_span(k)
@@ -592,7 +705,19 @@ def confirm(block, *, data_check, empty: bool = False, incomplete_ok: str | None
         if not ending and not spanning and not empty:
             raise ForwardError(f"no registration covers {name}: opening it spends the block with nothing confirmed. "
                                f"Pass --empty to record an empty opening (ROADMAP 7.9, e.g. FWD-01)")
+        foreign = [_rel(_leg_path(name, r["candidate"], leg)) for r in ending if r["attempts"] == 0 for leg in LEGS
+                   if _leg_path(name, r["candidate"], leg).exists()]
+        if foreign:
+            raise ForwardError(f"{', '.join(foreign)} already exist(s) before any run: a confirmation never adopts a "
+                               f"result it did not produce. Move them away first")
         report = data_check(k, ending) or {}
+        latest = report.get("latest_end_ms")
+        if latest is None or int(latest) < b - END_WITNESS_SLACK_MS:
+            seen = "no stored bar" if latest is None else f"stored bars end at {_utc(int(latest))}"
+            raise ForwardError(f"{name} ends {_utc(b)} but {seen} of its members: the data does not show the block "
+                               f"ended (fetch it; is the system clock right?). --incomplete-ok does not override this"
+                               + (f"; data check: {json.dumps(report.get('problems'))[:400]}"
+                                  if report.get("problems") else ""))
         if not report.get("complete"):
             if not (incomplete_ok or "").strip():
                 raise ForwardError(f"{name} data is not complete: {json.dumps(report.get('problems') or report)[:600]}"
@@ -610,6 +735,7 @@ def confirm(block, *, data_check, empty: bool = False, incomplete_ok: str | None
 
 def rerun(registration: str, reason: str, *, runner=None, ledger: Path | str | None = None) -> dict:
     """Rerun a confirmation that produced no result (7.9 "그 밖의 규칙"); the reason is recorded first."""
+    _refuse_virtual_clock("rerun")
     path = Path(ledger) if ledger else LEDGER
     rid = str(registration).strip().upper()
     if not (reason or "").strip():
@@ -652,8 +778,8 @@ def candle_problems(store, symbol: str, start: int, end: int) -> list[str]:
     return out + ([p] if p else [])
 
 
-def hourly_problems(store, symbol: str, start: int, end: int) -> list[str]:
-    """Missing 1h bars and funding settlements of `symbol` in [start, end) of the universe database (klines_1h)."""
+def _hourly_times(store, symbol: str, start: int, end: int) -> tuple[list[int], list[int]]:
+    """(open times of the 1h bars, open times of the bars carrying a funding settlement) in [start, end)."""
     import numpy as np
 
     from heartless.data.symbols_inventory import decode_month
@@ -666,6 +792,12 @@ def hourly_problems(store, symbol: str, start: int, end: int) -> list[str]:
         t += cols["open_time"][sel].tolist()
         if "funding" in cols:
             fund += cols["open_time"][sel & ~np.isnan(cols["funding"])].tolist()
+    return t, fund
+
+
+def hourly_problems(store, symbol: str, start: int, end: int) -> list[str]:
+    """Missing 1h bars and funding settlements of `symbol` in [start, end) of the universe database (klines_1h)."""
+    t, fund = _hourly_times(store, symbol, start, end)
     want = (end - start) // HOUR_MS
     out = [f"{want - len(t)} of {want} 1h bars missing"] if want and want - len(t) > MAX_MISSING_SHARE * want else []
     p = _funding_problem(fund, start, end, None)
@@ -675,12 +807,14 @@ def hourly_problems(store, symbol: str, start: int, end: int) -> list[str]:
 def data_completeness(settings, k: int, regs: list[dict]) -> dict:
     """7.9 "완비": every member of each registration ending at block k has all bars (1m from the candle database or
     1h from the universe database) and every funding settlement over the registration's span. A block no registration
-    ends at checks the symbols the candle database was recording when the block started."""
+    ends at checks the symbols the candle database was recording when the block started. `latest_end_ms` is the end
+    of the newest stored bar of any checked member (confirm's witness that the block ended)."""
     from heartless.core.store import Store
 
     a, b = seal.block_span(k)
     problems: dict[str, list[str]] = {}
     checked: list[str] = []
+    latest: int | None = None
     if not Path(settings.db_path).exists():  # never create a database just to find it empty
         return {"complete": False, "checked": [], "problems": {"-": [f"no candle database at {settings.db_path}"]}}
     cstore = Store(settings.db_path)
@@ -706,8 +840,15 @@ def data_completeness(settings, k: int, regs: list[dict]) -> dict:
                     continue
                 ustore = ustore or Store(settings.universe_db_path)
                 p = hourly_problems(ustore, sym, s, e)
+                t = max(_hourly_times(ustore, sym, max(s, e - DAY_MS), e)[0], default=None)
+                end_t = None if t is None else int(t) + HOUR_MS
             else:
                 p = candle_problems(cstore, sym, s, e)
+                t = cstore.query("SELECT MAX(open_time) t FROM candles WHERE symbol=? AND open_time>=? AND "
+                                 "open_time<?", (sym, s, e))[0]["t"]
+                end_t = None if t is None else int(t) + 60_000
+            if end_t is not None:
+                latest = end_t if latest is None else max(latest, end_t)
             checked.append(f"{sym}:{bar}")
             if p:
                 problems[sym] = p
@@ -717,7 +858,23 @@ def data_completeness(settings, k: int, regs: list[dict]) -> dict:
             ustore.close()
     if not checked and not problems:
         problems["-"] = ["no member to check (no symbol was being recorded when the block started)"]
-    return {"complete": not problems, "checked": checked, "problems": problems}
+    return {"complete": not problems, "checked": checked, "problems": problems, "latest_end_ms": latest}
+
+
+def latest_bar_ms(settings, symbols) -> int | None:
+    """Open time of the newest stored 1m bar of `symbols` in the candle database (None without one): register's
+    witness of the present that does not depend on the system clock (one indexed lookup per symbol)."""
+    from heartless.core.store import Store
+
+    if not Path(settings.db_path).exists():
+        return None
+    st = Store(settings.db_path)
+    try:
+        ts = [st.query("SELECT MAX(open_time) t FROM candles WHERE symbol=?", (s,))[0]["t"] for s in symbols]
+    finally:
+        st.close()
+    ts = [int(t) for t in ts if t is not None]
+    return max(ts) if ts else None
 
 
 def _resolve_universe(settings, store, name: str | None, start: int, end: int) -> list[str]:
@@ -841,10 +998,15 @@ def main_cli(settings, args) -> None:
                 criteria = json.loads(args.criteria) if args.criteria else None
             except ValueError as e:
                 fail(f"--criteria is not JSON: {e}")
+            try:  # the witness symbols: the members named by --symbols and the two references
+                named = (_members(normalize_command(args.command)) or {}).get("symbols") or []
+            except ForwardError:
+                named = []
+            latest = latest_bar_ms(settings, [*WITNESS_SYMBOLS, *named[:50]])
             e = register(args.candidate, args.config_hash, args.family, args.command, gate=args.gate,
                          blocks=args.blocks, trades_per_30d=args.trades_per_30d, criteria=criteria,
                          stress_command=args.stress_command, code_hash=args.code_hash, bar=args.bar, note=args.note,
-                         argv=args.argv)
+                         data_latest_ms=latest, argv=args.argv)
             print(f"registered {e['id']}: {e['candidate']} ({e['config_hash']}) on {e['blocks'][0]}..{e['blocks'][-1]} "
                   f"[{e['window'][0]} .. {e['window'][1]}), gate {e['gate']}; recorded in {_rel(LEDGER)}")
         elif cmd in ("confirm", "open"):
@@ -854,12 +1016,13 @@ def main_cli(settings, args) -> None:
                   + (f"; pending multi-block registrations: {', '.join(res['pending'])}" if res["pending"] else ""))
             for r in res["runs"]:
                 print(f"  {r['id']}: {r['state']}" + (f" -> {r['result']}" if r.get("result") else
-                                                       f" at {r.get('leg')} (rerun with a reason)"))
+                                                       f" at {r.get('leg') or 'the code check'}: {r.get('error')} "
+                                                       f"(rerun with a reason)"))
             if any(r["state"] != "confirmed" for r in res["runs"]):
                 sys.exit(1)
         elif cmd == "rerun":
             r = rerun(args.registration, args.reason)
-            print(f"{r['id']}: {r['state']}" + (f" -> {r['result']}" if r.get("result") else ""))
+            print(f"{r['id']}: {r['state']}" + (f" -> {r['result']}" if r.get("result") else f": {r.get('error')}"))
             if r["state"] != "confirmed":
                 sys.exit(1)
     except (ForwardError, seal.SealedError, ValueError) as e:

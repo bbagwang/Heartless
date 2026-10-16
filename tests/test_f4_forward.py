@@ -49,10 +49,10 @@ def _sandbox(tmp_path, monkeypatch):
 
 
 def _reg(**kw):
-    base = dict(candidate="alpha_x", config_hash=H, family="p2fam", command="lab --alpha alpha_x --universe top40",
-                gate="forward_directional", trades_per_30d=150.0, code_hash="feedface", commit="c0ffee", dirty=False,
-                now_ms=S(2) - 2 * DAY)
+    base = dict(candidate="alpha_x", config_hash=H, family="p2fam", gate="forward_directional", trades_per_30d=150.0,
+                code_hash="feedface", commit="c0ffee", dirty=False, now_ms=S(2) - 2 * DAY)
     base.update(kw)
+    base.setdefault("command", f"lab --alpha {base['candidate']} --universe top40")  # one configuration per candidate
     return forward.register(**base)
 
 
@@ -74,7 +74,7 @@ def _runner(calls, fail=(), check_hash=None):
     return run
 
 
-OK = lambda k, regs: {"complete": True, "checked": ["XUSDT:1m"]}  # noqa: E731
+OK = lambda k, regs: {"complete": True, "checked": ["XUSDT:1m"], "latest_end_ms": E(k)}  # noqa: E731
 
 
 def _lines(path) -> list[dict]:
@@ -224,6 +224,19 @@ def test_live_loops_are_exempt_from_the_forward_blocks_only(monkeypatch):
     seal.check_window(ORIGIN, ORIGIN + 1, back)
 
 
+def test_only_the_bot_loops_claim_the_live_exemption():
+    """Any Python caller could pass live_loop(...): the declaration keeps argv and JSON out, not code. So its callers
+    are pinned here; a new one (an evaluator, a script) must be a 7.9 live loop and be reviewed as one."""
+    import re
+
+    callers = {}
+    for path in sorted((seal.REPO_ROOT / "heartless").rglob("*.py")):
+        n = len(re.findall(r"\blive_loop\(|\bLiveLoop\(", path.read_text(encoding="utf-8")))
+        if n and path.name != "seal.py":
+            callers[path.relative_to(seal.REPO_ROOT).as_posix()] = n
+    assert callers == {"heartless/learning/research.py": 3}  # research cycle, discovery cycle + its worker
+
+
 class _App:
     def __init__(self, tmp_path, **kw):
         from heartless.strategy.params import StrategyParams
@@ -321,9 +334,9 @@ def test_registration_records_the_preregistered_fields():
 
 def test_span_rule_and_class_rules():
     def blocks(**kw):
-        return forward.register(**{**dict(candidate="c", family="p2fam", command="lab --alpha c", code_hash="f",
-                                          commit="c", dirty=False, now_ms=S(2) - 2 * DAY,
-                                          gate="forward_directional"), **kw})["blocks"]
+        kw = {**dict(candidate="c", family="p2fam", code_hash="f", commit="c", dirty=False, now_ms=S(2) - 2 * DAY,
+                     gate="forward_directional"), **kw}
+        return forward.register(command=f"lab --alpha {kw['candidate']}", **kw)["blocks"]
 
     assert blocks(config_hash="a" * 16, trades_per_30d=100) == ["FWD-02"]
     assert blocks(config_hash="b" * 16, trades_per_30d=50, candidate="c2") == ["FWD-02", "FWD-03"]
@@ -354,7 +367,7 @@ def test_registration_refusals():
     _reg()
     cases = [
         (dict(config_hash=H), "already registered"),  # a configuration is confirmed once
-        (dict(config_hash="1" * 16), "already ends at FWD-02"),  # same candidate name, same result file
+        (dict(config_hash="1" * 16, command="lab --alpha alpha_x --universe top20"), "already ends at FWD-02"),
         (dict(config_hash="2" * 16, candidate="b", dirty=True), "uncommitted"),
         (dict(config_hash="XYZ", candidate="b"), "config hash"),
         (dict(config_hash="2" * 16, candidate="../evil"), "candidate name"),
@@ -374,6 +387,97 @@ def test_registration_refusals():
     assert e["command"][:6] == ["lab", "--alpha", "b", "--start", "{start}", "--symbols"]
     assert e["command"].count("{start}") == 1 and e["members"] == {"symbols": ["A", "B"]}
     assert e["criteria_source"] == "custom" and len(_lines(forward.LEDGER)) == 2
+
+
+def test_abbreviated_or_window_flags_cannot_move_the_registered_window(tmp_path, monkeypatch):
+    """argparse expands any unique prefix: `--sta X` after `--start {start}` moved the evaluated window, `--stres`
+    stressed the nominal leg (review of F4). Guarded flags must be spelled out; --period (hourly / neutral) is out."""
+    tail = "--alpha b --start {start} --end {end} --out {out}"
+    for bad in ("--sta 2026-01-13", "--sta=2026-01-13", "--en 2026-09-30", "--ou x.json", "--stres", "--yea 2025",
+                "--uns 2025", "--spl valid", "--da 3", "--tra 2022-01-01:2024-12-31", "--vali 2026-01-13:2026-09-30",
+                "--peri VALID-F", "--period VALID-F", "--sym BTCUSDT", "--univ top40", "--ta fam", "--"):
+        with pytest.raises(forward.ForwardError):
+            forward.normalize_command(f"lab {tail} {bad}")
+    with pytest.raises(forward.ForwardError, match="abbreviates --stress"):
+        forward.normalize_command("lab --alpha b --stre", stress=True)
+    with pytest.raises(forward.ForwardError, match="not an evaluator"):
+        forward.normalize_command("forward confirm FWD-03 --empty")
+    ok = forward.normalize_command("lab --alpha b --set b.x=1 --symbols BTCUSDT --tag fam --trades-out {trades} "
+                                   "--by-side --chunk-days 0 --workers 1")
+    assert ok[-6:] == ["--start", "{start}", "--end", "{end}", "--out", "{out}"]
+    # what the evaluator parses from the filled command: the registered span, output and leg, nothing else
+    import heartless.cli as cli
+    from heartless.learning import lab
+
+    monkeypatch.setenv("HEARTLESS_DATA_DIR", str(tmp_path))
+    got = {}
+    monkeypatch.setattr(lab, "main_cli", lambda settings, args: got.update(vars(args)))
+    for argv, stressed in ((ok, False), (forward.normalize_command(ok, stress=True), True)):
+        cli.main(forward._fill(argv, {"start": "2026-11-06", "end": "2026-12-06", "out": "o.json", "trades": "t"}))
+        assert (got["start"], got["end"], got["out"], got["stress"], got["years"], got["unseal"]) == \
+            ("2026-11-06", "2026-12-06", "o.json", stressed, None, [])
+
+
+def test_the_same_command_is_not_registered_again_under_another_hash():
+    """The config hash is typed by the registrant: the same command on the same code is the same configuration and
+    is confirmed once, also on a later block."""
+    _reg()
+    with pytest.raises(forward.ForwardError, match="same command on the same code"):
+        _reg(config_hash="1" * 16, candidate="alpha_y", command="lab --alpha alpha_x --universe top40")
+    with pytest.raises(forward.ForwardError, match="same command on the same code"):
+        _reg(config_hash="1" * 16, candidate="alpha_y", command="heartless lab --alpha alpha_x --universe top40 "
+             "--start {start}", now_ms=S(3) - 2 * DAY)
+    e = _reg(config_hash="1" * 16, candidate="alpha_y", command="lab --alpha alpha_x --universe top40",
+             code_hash="beefcafe")  # other code: a new configuration
+    assert e["id"] == "FR-0002"
+
+
+def test_the_registration_deadline_does_not_rest_on_the_clock_alone(tmp_path, monkeypatch, capsys):
+    """A wall clock that runs behind, or the replay's virtual clock, must not admit a registration after its first
+    block started: the seal ledger and the stored bars are witnesses of the present."""
+    import time
+
+    from heartless.util import timeutil
+
+    prev = timeutil.set_clock(lambda: S(2) - 3 * DAY)  # what a replayed bot's F3b path would see
+    try:
+        assert abs(forward._now_ms() - time.time() * 1000) < 60_000  # the deadline reads the wall clock
+        with pytest.raises(forward.ForwardError, match="virtual clock"):
+            _reg()
+        with pytest.raises(forward.ForwardError, match="virtual clock"):
+            forward.confirm(1, empty=True, data_check=OK, runner=_runner([]), now_ms=E(1))
+        with pytest.raises(forward.ForwardError, match="virtual clock"):
+            forward.rerun("FR-0001", "x", runner=_runner([]))
+    finally:
+        timeutil.set_clock(prev)
+    with pytest.raises(forward.ForwardError, match="stored bars reach"):
+        _reg(data_latest_ms=S(2))
+    assert _reg(data_latest_ms=S(2) - 60_000)["id"] == "FR-0001"
+    seal.record_forward_open(1, {"runs": []})  # FWD-01 opened: FWD-02 has started, whatever the clock says
+    with pytest.raises(forward.ForwardError, match="FWD-01 was opened"):
+        _reg(config_hash="1" * 16, candidate="b", now_ms=S(2) - 2 * DAY)
+    assert _reg(config_hash="1" * 16, candidate="b", now_ms=S(3) - 2 * DAY)["blocks"] == ["FWD-03"]
+    assert [x["id"] for x in _lines(forward.LEDGER)] == ["FR-0001", "FR-0002"]
+    # the CLI looks the newest stored bar up (BTCUSDT, ETHUSDT and the --symbols members)
+    import heartless.cli as cli
+
+    data = tmp_path / "data"
+    data.mkdir()
+    st = Store(data / "heartless.db")
+    st.save_candles("ZUSDT", [Candle(S(3) + 60_000, 1, 1, 1, 1, 1, 1, 1, 1, S(3) + 119_999)])
+    st.close()
+    settings = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(data))
+    assert forward.latest_bar_ms(settings, ["BTCUSDT", "ZUSDT"]) == S(3) + 60_000
+    assert forward.latest_bar_ms(settings, ["BTCUSDT"]) is None
+    assert forward.latest_bar_ms(Settings(_env_file=None, HEARTLESS_DATA_DIR=str(tmp_path / "none")), ["Z"]) is None
+    monkeypatch.setenv("HEARTLESS_DATA_DIR", str(data))
+    monkeypatch.setattr(forward, "_git_dirty", lambda: False)
+    monkeypatch.setattr(forward, "_now_ms", lambda: S(3) - 3 * DAY)  # behind: its target FWD-03 holds bars
+    with pytest.raises(SystemExit):
+        cli.main(["forward", "register", "--candidate", "z", "--config-hash", "2" * 16, "--family", "p2fam", "--gate",
+                  "forward_directional", "--trades-per-30d", "150", "--code-hash", "f", "--command",
+                  "lab --alpha z --symbols ZUSDT"])
+    assert "stored bars reach" in capsys.readouterr().err and len(_lines(forward.LEDGER)) == 2
 
 
 # --- confirm: run once, empty opening ---------------------------------------------------------------------------------
@@ -431,15 +535,20 @@ def test_a_run_without_result_is_rerun_with_a_reason_and_keeps_its_results():
 def test_an_interrupted_leg_result_is_adopted_and_a_crashing_runner_aborts():
     _reg()
     forward.confirm(1, empty=True, data_check=OK, runner=_runner([]), now_ms=E(1))
+    seen = []
 
     def boom(argv, env):
+        seen.append(list(argv))
         raise MemoryError("killed")
 
     res = forward.confirm(2, data_check=OK, runner=boom, now_ms=E(2))
     assert res["runs"][0]["state"] == "aborted"
     assert "MemoryError" in [x for x in _lines(forward.LEDGER) if x["event"] == "run_aborted"][0]["error"]
+    # what the killed evaluator left behind: the registered command's own output (lab records argv, generated_utc)
     forward.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    (forward.RESULTS_DIR / "fwd_FWD-02_alpha_x_nominal.json").write_text(json.dumps({"summary": {"n": 3}}))
+    (forward.RESULTS_DIR / "fwd_FWD-02_alpha_x_nominal.json").write_text(json.dumps(
+        {"summary": {"n": 3}, "argv": ["/x/heartless/__main__.py", *seen[0]], "generated_utc": forward._utc(
+            forward._now_ms())}))
     calls = []
     assert forward.rerun("FR-0001", "killed", runner=_runner(calls))["state"] == "confirmed"
     assert [c[0] for c in calls] == ["stress"]
@@ -447,8 +556,86 @@ def test_an_interrupted_leg_result_is_adopted_and_a_crashing_runner_aborts():
     assert leg["adopted"] is True and leg["summary"] == {"n": 3}
 
 
+def test_a_result_file_the_run_did_not_produce_is_never_adopted():
+    """Any file at fwd_<block>_<candidate>_<leg>.json was adopted as the leg's result without a run, which spent the
+    one confirmation on, e.g., a VALID run written there (review of F4)."""
+    _reg()
+    forward.confirm(1, empty=True, data_check=OK, runner=_runner([]), now_ms=E(1))
+    forward.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    planted = forward.RESULTS_DIR / "fwd_FWD-02_alpha_x_nominal.json"
+    planted.write_text(json.dumps({"summary": {"n": 500, "avg_r": 0.5, "t_day": 9.0}}))
+    calls = []
+    with pytest.raises(forward.ForwardError, match="already exist"):  # refused before the opening: nothing recorded
+        forward.confirm(2, data_check=OK, runner=_runner(calls), now_ms=E(2))
+    assert 2 not in seal.forward_spent() and [x["event"] for x in _lines(forward.LEDGER)] == ["register"]
+    planted.unlink()
+    res = forward.confirm(2, data_check=OK, runner=_runner(calls, fail=("nominal",)), now_ms=E(2))
+    assert res["runs"][0]["state"] == "aborted"
+    argv = calls[0][1]
+    first = [x for x in _lines(forward.LEDGER) if x["event"] == "run_started"][0]["utc"]
+    foreign = [
+        ({"summary": {"n": 1}}, "argv"),  # no recorded command
+        ({"summary": {"n": 1}, "argv": ["heartless", *argv[:-6], "--start", "2026-01-13", "--end", "2026-10-01",
+                                        "--out", str(planted)], "generated_utc": "2099-01-01T00:00:00Z"}, "argv"),
+        ({"summary": {"n": 1}, "argv": ["heartless", *argv], "generated_utc": "2000-01-01T00:00:00Z"}, "generated"),
+    ]
+    for doc, why in foreign:
+        planted.write_text(json.dumps(doc))
+        calls.clear()
+        out = forward.rerun("FR-0001", "planted", runner=_runner(calls))
+        assert out["state"] == "aborted" and out["leg"] == "nominal" and why in out["error"] and not calls
+        assert json.loads(planted.read_text()) == doc  # neither adopted nor overwritten
+    assert first <= forward._utc(forward._now_ms())
+    planted.unlink()
+    out = forward.rerun("FR-0001", "planted file moved away", runner=_runner(calls))
+    assert out["state"] == "confirmed" and [c[0] for c in calls] == ["nominal", "stress"]
+    legs = [x for x in _lines(forward.LEDGER) if x["event"] == "leg_done"]
+    assert [x["adopted"] for x in legs] == [False, False] and legs[0]["summary"]["n"] == 120
+
+
+def test_a_changed_alpha_source_aborts_the_run_before_any_evaluation(monkeypatch):
+    """A registration derived from an alpha pins that alpha's source hash; the confirmation runs the checkout's code,
+    so it checks the hash first instead of spending the one confirmation on unregistered code."""
+    from heartless.strategy.alphas import ALL_ALPHAS
+
+    name = ALL_ALPHAS[0].name
+    e = _reg(candidate=name, code_hash=None)
+    assert e["code_hash_source"] == "alpha" and e["code_hash"] == forward.alpha_code_hash(name)
+    assert _reg(config_hash="1" * 16, candidate="b")["code_hash_source"] == "given"
+    forward.confirm(1, empty=True, data_check=OK, runner=_runner([]), now_ms=E(1))
+    real = forward.alpha_code_hash
+    monkeypatch.setattr(forward, "alpha_code_hash", lambda c: "0" * 16 if c == name else real(c))
+    calls = []
+    res = forward.confirm(2, data_check=OK, runner=_runner(calls), now_ms=E(2))
+    mine = [r for r in res["runs"] if r["id"] == "FR-0001"][0]
+    assert mine["state"] == "aborted" and "changed since the registration" in mine["error"]
+    assert {c[1][2] for c in calls} == {"b"}  # only the other registration was evaluated
+    monkeypatch.setattr(forward, "alpha_code_hash", real)
+    assert forward.rerun("FR-0001", "registered alpha source checked out", runner=_runner(calls))["state"] == \
+        "confirmed"
+    doc = json.loads((forward.RESULTS_DIR / f"fwd_FWD-02_{name}.json").read_text())
+    assert doc["code_hash_now"] == e["code_hash"] and doc["registration"]["code_hash_source"] == "alpha"
+
+
+def test_an_opening_needs_stored_bars_reaching_the_block_end():
+    """The clock alone does not open a block: a clock running ahead plus --incomplete-ok would have opened a block
+    still running. The newest stored bar must reach the block end (within an hour)."""
+    def check(latest):
+        return lambda k, regs: {"complete": False, "problems": {"XUSDT": ["gaps"]}, "latest_end_ms": latest}
+
+    for latest in (None, E(1) - 2 * 3_600_000):
+        with pytest.raises(forward.ForwardError, match="does not show the block ended"):
+            forward.confirm(1, empty=True, data_check=check(latest), incomplete_ok="delisted", runner=_runner([]),
+                            now_ms=E(1))
+    assert not seal.LEDGER.exists()
+    forward.confirm(1, empty=True, data_check=check(E(1) - 30 * 60_000), incomplete_ok="delisted", runner=_runner([]),
+                    now_ms=E(1))
+    assert seal.forward_spent() == {1}
+
+
 def test_empty_opening():
     calls = []
+    _reg(trades_per_30d=50)  # FWD-02..FWD-03 (registered before FWD-02 started, i.e. before FWD-01 could open)
     with pytest.raises(forward.ForwardError, match="--empty"):  # never spent by accident
         forward.confirm(1, data_check=OK, runner=_runner(calls), now_ms=E(1))
     assert not seal.LEDGER.exists()
@@ -457,14 +644,14 @@ def test_empty_opening():
     assert out["runs"] == [] and line["period"] == "FWD-01" and line["event"] == "forward_open"
     assert line["empty"] is True and line["runs"] == [] and line["window"] == ["2026-10-07T00:00:00Z",
                                                                               "2026-11-06T00:00:00Z"]
-    _reg(trades_per_30d=50)  # FWD-02..FWD-03
     _reg(config_hash="1" * 16, candidate="b", now_ms=S(3) - 2 * DAY)  # FWD-03
     # FWD-02: a registration spans it without ending there -> opens on schedule without --empty, runs nothing
     out = forward.confirm(2, data_check=OK, runner=_runner(calls), now_ms=E(2))
     assert out["runs"] == [] and out["pending"] == ["FR-0001"] and _lines(seal.LEDGER)[-1]["empty"] is False
     with pytest.raises(forward.ForwardError, match="--empty refused"):
         forward.confirm(3, empty=True, data_check=OK, runner=_runner(calls), now_ms=E(3))
-    bad = lambda k, regs: {"complete": False, "problems": {"XUSDT": ["5 of 43200 1m bars missing"]}}  # noqa: E731
+    bad = lambda k, regs: {"complete": False, "problems": {"XUSDT": ["5 of 43200 1m bars missing"]},  # noqa: E731
+                           "latest_end_ms": E(k)}
     with pytest.raises(forward.ForwardError, match="not complete"):
         forward.confirm(3, data_check=bad, runner=_runner(calls), now_ms=E(3))
     assert not calls and len(_lines(seal.LEDGER)) == 2
@@ -576,6 +763,7 @@ def test_data_completeness(tmp_path):
     st.close()
     rep = forward.data_completeness(s, 1, [])  # an empty opening checks what was being recorded at the start
     assert not rep["complete"] and sorted(rep["problems"]) == ["BUSDT", "CUSDT"] and len(rep["checked"]) == 3
+    assert rep["latest_end_ms"] == b  # the newest stored bar ends with the block
     reg = {"id": "FR-0001", "members": {"symbols": ["AUSDT"]}, "start_ms": a, "end_ms": b, "bar": "1m"}
     assert forward.data_completeness(s, 1, [reg])["complete"]
     reg2 = {**reg, "members": {"symbols": ["AUSDT", "ZUSDT"]}}  # a member without data
@@ -616,6 +804,7 @@ def test_hourly_completeness_from_the_universe_database(tmp_path):
     reg = {"id": "FR-0001", "members": {"symbols": ["AUSDT", "BUSDT"]}, "start_ms": a, "end_ms": b, "bar": "1h"}
     rep = forward.data_completeness(s, 1, [reg])
     assert rep["checked"] == ["AUSDT:1h", "BUSDT:1h"] and list(rep["problems"]) == ["BUSDT"]
+    assert rep["latest_end_ms"] == b
     missing = Settings(_env_file=None, HEARTLESS_DATA_DIR=str(tmp_path), UNIVERSE_DB=str(tmp_path / "none.db"))
     assert "no universe database" in forward.data_completeness(missing, 1, [reg])["problems"]["AUSDT"][0]
 
@@ -643,7 +832,15 @@ def test_forward_cli(tmp_path, monkeypatch, capsys):
         cli.main(["forward", "confirm", "FWD-01"])  # still running
     assert "runs until 2026-11-06" in capsys.readouterr().err
     now["t"] = E(1) + DAY
-    with pytest.raises(SystemExit):  # nothing recorded in this data dir: the completeness check fails
+    with pytest.raises(SystemExit):  # nothing stored: no bar shows the block ended, not even with --incomplete-ok
+        cli.main(["forward", "open", "--block", "1", "--empty", "--incomplete-ok", "test data dir"])
+    assert "does not show the block ended" in capsys.readouterr().err and not seal.LEDGER.exists()
+    (tmp_path / "data").mkdir(exist_ok=True)
+    st = Store(tmp_path / "data" / "heartless.db")  # the day before FWD-01 and its last two hours: bars missing
+    st.save_candles("BTCUSDT", [Candle(t, 1, 1, 1, 1, 1, 1, 1, 1, t + 59_999) for t in
+                                [*range(ORIGIN - DAY, ORIGIN, 60_000), *range(E(1) - 7_200_000, E(1), 60_000)]])
+    st.close()
+    with pytest.raises(SystemExit):  # the completeness check fails
         cli.main(["forward", "open", "--block", "1", "--empty"])
     assert "not complete" in capsys.readouterr().err and not seal.LEDGER.exists()
     cli.main(["forward", "open", "--block", "1", "--empty", "--incomplete-ok", "test data dir"])
