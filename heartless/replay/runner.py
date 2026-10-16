@@ -105,14 +105,14 @@ def _prepare_store(cfg: ReplayConfig, work: Path, symbols: list[str]) -> None:
     """Fresh bot store holding the `seed_days` of history before start, as a bot that has been collecting data would
     have (candles, funding; metrics only on request: the bot stores the metrics it polls, from its own start on).
     `symbols` are the traded and the market-context symbols: the context tracker warms up from this history."""
-    from heartless.core.store import Store
+    from heartless.core.store import Store, readonly_uri
 
     db = work / "heartless.db"
     Store(db).close()  # schema
     lo = cfg.start_ms - cfg.seed_days * MS_DAY
     con = sqlite3.connect(str(db), uri=True)
     try:
-        con.execute("ATTACH DATABASE ? AS src", (f"file:{Path(cfg.source_db).resolve()}?mode=ro",))
+        con.execute("ATTACH DATABASE ? AS src", (readonly_uri(cfg.source_db),))  # E2: no side file beside the source
         marks = ",".join("?" * len(symbols))
         cols = "symbol, open_time, open, high, low, close, volume, quote_volume, trades, taker_buy_volume, close_time"
         con.execute(f"INSERT INTO candles({cols}) SELECT {cols} FROM src.candles WHERE symbol IN ({marks}) AND "
@@ -311,6 +311,8 @@ class _Run:
         infos = symbol_infos(self.source, cfg.start_ms)
         await loop.sleep_until_ms(cfg.start_ms + cfg.app_start_offset_ms)
         app = Heartless(self.settings)
+        if cfg.symbols:  # --symbols: the bot trades exactly the requested symbols (docs/REPLAY.md "유니버스")
+            app.universe_pin = list(self.source.traded)
         checker = self.checker = InvariantChecker(app)
         for e in self.pending_errors:
             checker.violation("exceptions", f"before start: {e}")
@@ -646,8 +648,10 @@ class _Run:
                        "end_ms": cfg.end_ms, "virtual_days": round((cfg.end_ms - cfg.start_ms) / MS_DAY, 3)},
             "virtual_seconds": round(span_ms / 1000, 1),
             "source_db": str(cfg.source_db), "work_dir": str(self.work), "symbols": self.symbols,
-            "universe_final": list(app.universe), "settings": {k: getattr(app.s, k.lower(), None)
-                                                               for k in REPLAY_DEFAULTS} | {"timezone": app.s.timezone},
+            "universe_final": list(app.universe),
+            "universe": {"pinned": app.universe_pin is not None, "final": list(app.universe),
+                         "live_rules_leave_out": dict(app.universe_pin_rejected)},
+            "settings": {k: getattr(app.s, k.lower(), None) for k in REPLAY_DEFAULTS} | {"timezone": app.s.timezone},
             "loop": {"jumps": loop.jumps, "executor_jobs": loop.executor_jobs,
                      "frozen_wall_seconds": round(loop.frozen_wall_s, 1), "deadlocked": loop.deadlocked},
             "market": {"bars": market.bars_emitted, "minutes": market.minutes, "messages": market.messages,
@@ -719,6 +723,17 @@ def _thin(rows: list, n: int) -> list:
     return [rows[int(i * step)] for i in range(n)] + [rows[-1]]
 
 
+def _universe_line(s: dict) -> str:
+    """Pinned (--symbols) or chosen by the live rules; a pinned run names what the live rules would have left out."""
+    u = s.get("universe") or {}
+    final = u.get("final", s.get("universe_final", []))
+    if not u.get("pinned"):
+        return f"universe: live rules, {len(final)} symbols at the end"
+    out = u.get("live_rules_leave_out") or {}
+    return (f"universe: pinned to the requested symbols ({len(final)} at the end)"
+            + (f"; live rules would leave out {'; '.join(f'{k} ({v})' for k, v in out.items())}" if out else ""))
+
+
 def format_report(s: dict) -> str:
     """Human-readable summary of a replay run."""
     inv = s["invariants"]
@@ -729,7 +744,7 @@ def format_report(s: dict) -> str:
              f"{s['loop']['frozen_wall_seconds']:.0f}s waiting for executor work (virtual time frozen)",
              f"bars {s['market']['bars']:,} ({s['market']['minutes']:,} minutes, {s['market']['gaps']} gaps), "
              f"stream messages {s['market']['messages']:,}",
-             "", "invariants (runs / violations):"]
+             _universe_line(s), "", "invariants (runs / violations):"]
     for k, c in inv["checks"].items():
         lines.append(f"  {k:<12} {c['runs']:>9,} / {c['violations']:<5} {c['what']}")
     for v in inv["violations"][:25]:

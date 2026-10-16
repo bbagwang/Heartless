@@ -267,7 +267,9 @@ def bench_features(db_path: str, symbol: str, history_days: int = 23, minutes: i
     from heartless.data.features import TIMEFRAMES, FeatureFrame, MarketView
     from heartless.util.timeutil import MS_DAY, MS_MINUTE
 
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    from heartless.core.store import readonly_uri
+
+    con = sqlite3.connect(readonly_uri(db_path), uri=True)  # E2: a source candle DB, no -wal / -shm left beside it
     if end_ms is None:
         end_ms = int(con.execute("SELECT MAX(open_time) FROM candles WHERE symbol=?", (symbol,)).fetchone()[0]) + 1
     lo = end_ms - (history_days * MS_DAY + minutes * MS_MINUTE)

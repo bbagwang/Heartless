@@ -213,14 +213,14 @@ heartless discover --universe top40 --train 2022-01-13:2023-01-01 --valid 2023-0
 ## 10. 남은 일 (이 패키지의 소유 파일 밖)
 
 - `app.py`
-  - `select_universe` 대신 `live_selection`을 쓰고, `rest.book_ticker()`(전 종목)로 스프레드 규칙을 켭니다.
+  - `select_universe` 대신 `live_selection`을 쓰고, `rest.book_ticker()`(전 종목)로 스프레드 규칙을 켭니다. (Wave F 병합 검증에서 `UNIVERSE_MIN_AGE_DAYS`·`UNIVERSE_MAX_TICK_BPS`·`UNIVERSE_MAX_SPREAD_BPS`를 앱의 `select_universe` 호출에 넘겼습니다. 이전에는 `live_selection`만 읽어 설정을 바꿔도 앱 선택은 코드 상수 그대로였습니다. 기본값이 상수와 같아 기본 동작은 같고, 스프레드 규칙은 bookTicker를 받을 때까지 꺼져 있습니다.)
   - `reference` 종목을 컨텍스트 전용 스트림으로 구독하고, BTC 레짐을 그 스트림에서 계산합니다(지금은 BTC가 거래 유니버스에 있어야 레짐이 계산됨).
   - `CONTEXT_TOP_N`을 `MarketContextTracker`와 운영 저장소 메타(`meta_for(..., top_n)`)에 넘깁니다.
 - ~~`learning/lab.py`, `learning/discovery.py`: topN 유니버스에서 구성원 구간 밖의 거래(또는 표본)를 빼기(3절 6)~~ — F-pre-A에서 했습니다(lab은 구성원 구간만 실행, discover는 구성원 결정 행만; `docs/RESEARCH_TOOLS.md` 5.2). F-pre-A 이전의 topN 결과는 구성원이 아니었던 달을 포함합니다.
 - `tests/test_fix_7_universe.py`와 `select_universe`: 앱 재배선 때 `ALWAYS_INCLUDE`의 나이·거래대금 면제를 없앱니다(6절).
 - ~~`learning/lab.py`: 컨텍스트 설정 사전에 `"top_n": settings.context_top_n` 넣기~~ — F-pre-A에서 했습니다(lab·discover 모두 `CONTEXT_TOP_N`의 모드로 컨텍스트를 요청; `docs/RESEARCH_TOOLS.md` 5.3).
 - (완료, Wave F 병합) 연구 경로의 유니버스 DB 읽기(`resolve_for_run`, `member_windows_for`)와 1분봉 확인(`stored_candle_symbols`)은 E2의 읽기 전용 열기(`Store(..., readonly=True)`, `readonly_uri`)를 씁니다. 공유 `universe.db`에 스키마·-wal·-shm을 만들지 않습니다.
-- `replay/runner.py`: 리플레이의 `ALWAYS_INCLUDE`를 `BTCUSDT,ETHUSDT,SOLUSDT`로 고정해 거래 종목을 핀으로 박습니다. 리플레이 재현성 때문이며 동작은 그대로입니다.
-- `README.md`, `.env.example`: 새 설정(`UNIVERSE_MIN_AGE_DAYS`, `UNIVERSE_MAX_TICK_BPS`, `UNIVERSE_MAX_SPREAD_BPS`, `UNIVERSE_DB`, `CONTEXT_TOP_N`)과 `ALWAYS_INCLUDE` 기본값 변경을 반영합니다.
+- ~~`replay/runner.py`: 리플레이의 `ALWAYS_INCLUDE`를 `BTCUSDT,ETHUSDT,SOLUSDT`로 고정해 거래 종목을 핀으로 박습니다~~ — `ALWAYS_INCLUDE`는 기준 종목만 정하고 거래 종목을 고정하지 못했습니다(3일 스모크에서 12종목 중 9종목만 거래, 86b0469와 같음). Wave F 병합 검증에서 `--symbols`를 주면 요청 종목을 모두 거래 유니버스에 고정하고(`Heartless.universe_pin`), 운영 규칙이라면 빠졌을 종목은 요약·보고서에 남기게 했습니다([`REPLAY.md`](REPLAY.md) "유니버스").
+- ~~`README.md`, `.env.example`: 새 설정과 `ALWAYS_INCLUDE` 기본값 변경을 반영~~ — Wave F 병합 검증에서 했습니다. `.env.example`은 이제 모든 설정을 담고(테스트가 양방향 확인), README 설정 표에 F0·F7 행을 넣었습니다.
 - top40 구성원의 1분봉(약 5 GB)을 받는 일. 디스크 여유가 생긴 뒤 합니다.
 - 발굴 피처 `vwap_z`의 세션 첫 봉 문제(5절)를 발굴 엔진에서 고칠지 정합니다. 고치면 피처 정의가 바뀌므로 발굴 시도 원장에서 새 시도로 셉니다.

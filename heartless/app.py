@@ -21,7 +21,7 @@ from heartless.data.context import WARMUP_HOURS as CONTEXT_WARMUP_HOURS
 from heartless.data.context import MarketContextTracker, hour_close, hour_of
 from heartless.data.extras import MetricsSeries
 from heartless.data.features import LIVE_WINDOW, MarketView
-from heartless.data.universe import select_universe
+from heartless.data.universe import live_selection, select_universe
 from heartless.exchange.binance_rest import BinanceError, BinanceRest
 from heartless.exchange.binance_ws import MarketStream
 from heartless.exchange.live import LiveAccount
@@ -121,6 +121,11 @@ class Heartless:
         self.rest = BinanceRest(settings.binance_api_key, settings.binance_api_secret, settings.binance_testnet)
         self.symbols: dict[str, SymbolInfo] = {}
         self.universe: list[str] = []
+        # Replay --symbols (heartless/replay/runner.py, docs/REPLAY.md): trade exactly these symbols instead of the live
+        # rules' choice, so a replay exercises the symbols it was asked for. The rules still run on every refresh and
+        # the first rule each pinned symbol failed is kept, so the report still shows what live selection would drop.
+        self.universe_pin: list[str] | None = None
+        self.universe_pin_rejected: dict[str, str] = {}
         self.candles: dict[str, CandleArrays] = {}
         self.views: dict[str, MarketView] = {}
         self.tickers: dict[str, Ticker] = {}
@@ -436,10 +441,12 @@ class Heartless:
             if initial:
                 raise
             return
-        new = select_universe(self.symbols, tickers, self.s.universe_size, self.s.universe_min_quote_volume,
-                              self.s.always_include_list)
-        if not initial:
-            self._keep_members(new, tickers)
+        if self.universe_pin is not None:
+            new = self._pinned_universe(tickers)
+        else:
+            new = self._live_universe(tickers)
+            if not initial:
+                self._keep_members(new, tickers)
         # keep symbols with open positions
         held = {p.symbol for eng in self.engines.values() for p in eng.open_positions()}
         for sym in held:
@@ -466,6 +473,25 @@ class Heartless:
             self._f7_book_symbols()  # F7
             await self.emit("universe", {"message": f"유니버스 갱신: +{','.join(added) or '-'} / -{','.join(removed) or '-'}",
                                          "added": added, "removed": removed, "universe": self.universe})
+
+    def _live_universe(self, tickers: list[dict]) -> list[str]:
+        """The live selection with every rule from the settings (UNIVERSE_MIN_AGE_DAYS, _MAX_TICK_BPS and
+        _MAX_SPREAD_BPS used to reach live_selection only; the spread rule needs book tickers, not fetched here yet)."""
+        return select_universe(self.symbols, tickers, self.s.universe_size, self.s.universe_min_quote_volume,
+                               self.s.always_include_list, self.s.universe_min_age_days,
+                               max_tick_bps=self.s.universe_max_tick_bps, max_spread_bps=self.s.universe_max_spread_bps)
+
+    def _pinned_universe(self, tickers: list[dict]) -> list[str]:
+        """universe_pin in pin order, without the symbols exchangeInfo does not list as trading. The live selection
+        runs anyway: a pinned symbol it would not trade is logged once and recorded with the first rule it failed."""
+        live = set(self._live_universe(tickers))
+        rejected = live_selection(self.s, self.symbols, tickers).rejected
+        for sym in self.universe_pin or []:
+            if sym not in live and sym not in self.universe_pin_rejected:
+                why = rejected.get(sym, f"not among the {self.s.universe_size} most liquid eligible symbols")
+                self.universe_pin_rejected[sym] = why
+                log.info("universe pin keeps %s although the live selection leaves it out: %s", sym, why)
+        return [s for s in self.universe_pin or [] if s in self.symbols and self.symbols[s].status == "TRADING"]
 
     def _keep_members(self, new: list[str], tickers: list[dict]) -> None:
         """Universe hysteresis (UNIVERSE_KEEP_FRACTION): current members that fell out of `new` only because their 24h

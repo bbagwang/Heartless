@@ -418,3 +418,29 @@ def test_learning_loop_runs_for_real_inside_a_replay(tmp_path, small_frames):
     tg = s["telegram"]["by_type"]
     assert tg["research_started"] >= 2 and tg["research_done"] >= 2 and tg["promotion"] == 1
     assert tg["cmd:/research"] == 1
+
+
+def test_requested_symbols_are_pinned_and_the_report_names_what_live_rules_drop(tmp_path, small_frames):
+    """--symbols pins the traded universe: the 24h-volume floor (F0) left requested symbols untraded, so a smoke over
+    12 symbols exercised 9. The live rules still run and the report names each pinned symbol they would leave out;
+    without --symbols the live rules choose among the stored symbols as before."""
+    syms = ["BTCUSDT", "ETHUSDT", "XRPUSDT"]
+    src = build_source(tmp_path / "src.db", 1, syms)
+    floor = {**NO_LEARNING, "UNIVERSE_MIN_QUOTE_VOLUME": 1e18}  # every symbol fails the volume rule
+    runs = {}
+    for name, pick in (("pinned", syms), ("rules", None)):
+        runs[name] = run_replay(ReplayConfig(source_db=src, start_ms=START, end_ms=START + 30 * MS_MINUTE - 1,
+                                             work_dir=str(tmp_path / name), seed_days=SEED_DAYS, symbols=pick,
+                                             settings=floor, commands=[]))
+        assert runs[name]["passed"], runs[name]["report"]
+    u = runs["pinned"]["universe"]
+    assert u["pinned"] and u["final"] == syms and runs["pinned"]["universe_final"] == syms
+    # BTC / ETH are the replay's ALWAYS_INCLUDE (data references the live list keeps), XRP only trades pinned; the
+    # synthetic history starts SEED_DAYS before the window, so the first rule XRP fails is the listing age
+    why = u["live_rules_leave_out"]
+    assert list(why) == ["XRPUSDT"] and why["XRPUSDT"] == f"listed {SEED_DAYS:.1f}d ago < 30d"
+    assert (f"universe: pinned to the requested symbols (3 at the end); live rules would leave out XRPUSDT "
+            f"({why['XRPUSDT']})") in runs["pinned"]["report"]
+    u = runs["rules"]["universe"]
+    assert not u["pinned"] and u["final"] == ["BTCUSDT", "ETHUSDT"] and u["live_rules_leave_out"] == {}
+    assert "universe: live rules, 2 symbols at the end" in runs["rules"]["report"]

@@ -58,7 +58,11 @@ class ReplaySource:
         self.path = str(db_path)
         self.floor = int(floor_ms) if floor_ms is not None else -(2**62)
         self.ceil = int(ceil_ms) if ceil_ms is not None else 2**62
-        self._conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        from heartless.core.store import readonly_uri
+
+        # E2: a plain mode=ro open of a WAL source left -wal / -shm beside it (the shared longhist DB); readonly_uri
+        # opens a quiet database immutable (no side file) and one with a writer through the WAL as before
+        self._conn = sqlite3.connect(readonly_uri(self.path), uri=True, check_same_thread=False)
         stored = [r[0] for r in self._conn.execute("SELECT DISTINCT symbol FROM candles ORDER BY symbol")]
         want = [s.upper() for s in symbols] if symbols else stored
         missing = [s for s in want if s not in stored]

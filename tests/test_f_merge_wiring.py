@@ -7,12 +7,15 @@ places where Wave E (E1 lazy backtest frames, E2 read-only sources and research 
   forward.period_label; the research warm-up steps past a FORWARD block (it used to read seal.SEALED only)
 - E2 x F0 / F-pre-A: the research universe database, the 1m-candle presence check and the evaluators' ReadOnlyStore
   open their files read-only (no schema, no -wal / -shm)
+- merge verification: the replay source, the replay's seed copy and the F7 feature bench were the last plain
+  `mode=ro` openers (a WAL source got -wal / -shm beside it); they use E2's readonly_uri too
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -244,3 +247,45 @@ def test_evaluator_read_only_store_is_the_e2_read_only_store(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["u.db"]
     with pytest.raises(FileNotFoundError):
         hourly.ReadOnlyStore(tmp_path / "missing.db")
+
+
+# --- merge verification: the remaining raw mode=ro openers (replay source, replay seed copy, F7 bench) -------------------
+def _wal_source(path, days: int = 2, syms=("BTCUSDT", "ETHUSDT")) -> int:
+    """A WAL candle store closed cleanly (no -wal left), like the shared longhist DB between writers."""
+    st = Store(path)
+    t0 = _ms(2026, 3, 1)
+    for i, s in enumerate(syms):
+        ca = synth_candles(days * 1440, seed=7 + i, start_ms=t0, price=100.0 * (i + 1))
+        st.save_candles(s, [ca.candle_at(k) for k in range(ca.n)])
+    st.close()
+    con = sqlite3.connect(path)
+    assert con.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    con.close()  # the last writer-capable connection: removes -wal / -shm
+    assert not Path(f"{path}-wal").exists()
+    return t0
+
+
+def test_replay_source_seed_copy_and_feature_bench_leave_no_side_files(tmp_path):
+    """A plain `file:...?mode=ro` open of a WAL database creates -wal / -shm beside it (and fails in a read-only
+    folder): the replay smoke left them next to the shared longhist DB. All three now use E2's readonly_uri."""
+    from heartless.replay.market import ReplaySource
+    from heartless.replay.runner import ReplayConfig, _prepare_store
+    from heartless.util import perf
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    src = src_dir / "heartless.db"
+    t0 = _wal_source(src)
+    before = _digest(src)
+    rs = ReplaySource(str(src), ["BTCUSDT"], floor_ms=t0, ceil_ms=t0 + 2 * DAY)
+    assert rs.ticker_24h("BTCUSDT", t0 + DAY)["count"] == 1440
+    work = tmp_path / "work"
+    work.mkdir()
+    _prepare_store(ReplayConfig(source_db=str(src), start_ms=t0 + DAY, end_ms=t0 + 2 * DAY - 1, seed_days=1), work,
+                   ["BTCUSDT", "ETHUSDT"])
+    con = sqlite3.connect(work / "heartless.db")
+    assert con.execute("SELECT COUNT(*) FROM candles").fetchone()[0] == 2 * 1440
+    con.close()
+    res = perf.bench_features(str(src), "ETHUSDT", history_days=1, minutes=30)
+    assert res["updates"] == 30
+    assert sorted(p.name for p in src_dir.iterdir()) == ["heartless.db"] and _digest(src) == before

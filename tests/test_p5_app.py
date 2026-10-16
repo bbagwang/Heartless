@@ -344,3 +344,73 @@ def test_a_mode_switch_flatten_after_midnight_counts_for_the_new_day():
         assert live.stats.trades_today == 1
 
     _around_midnight(body)
+
+
+def _pin_app(**kw) -> Heartless:
+    from heartless.core.models import SymbolInfo
+
+    app = _app(UNIVERSE_SIZE=4, UNIVERSE_MIN_QUOTE_VOLUME=80e6, **kw)
+    app.symbols = {s: SymbolInfo(s, s[:-4], "USDT", 0.01, 0.001, 0.001, 5.0, 2, 3) for s in SYMS}
+
+    async def nothing(*a, **k):
+        return set()
+
+    app._backfill = nothing
+    app._build_views = lambda syms: None
+    app.rest = _Rest({"BTCUSDT": 9e9, "ETHUSDT": 5e9, "SOLUSDT": 1e9, "AVAXUSDT": 81e6, "LINKUSDT": 50e6})
+    return app
+
+
+def test_the_universe_rule_settings_reach_the_live_selection():
+    """UNIVERSE_MIN_AGE_DAYS and UNIVERSE_MAX_TICK_BPS were read only by universe.live_selection, which the app does not
+    call: the app's selection used the code constants, so setting them changed nothing."""
+    from heartless.util.timeutil import now_ms
+
+    app = _pin_app()
+    app.symbols["SOLUSDT"].onboard_date = now_ms() - 10 * MS_DAY  # listed 10 days ago
+    asyncio.run(app.refresh_universe(initial=True))
+    assert "SOLUSDT" not in app.universe  # default UNIVERSE_MIN_AGE_DAYS=30
+    app = _pin_app(UNIVERSE_MIN_AGE_DAYS=7)
+    app.symbols["SOLUSDT"].onboard_date = now_ms() - 10 * MS_DAY
+    asyncio.run(app.refresh_universe(initial=True))
+    assert "SOLUSDT" in app.universe
+
+    def priced(app, price):
+        rows = asyncio.run(_Rest.ticker_24h(app.rest))
+        for r in rows:
+            r["lastPrice"] = str(price if r["symbol"] == "ETHUSDT" else 100.0)
+        return rows
+
+    for kw, inside in (({}, False), ({"UNIVERSE_MAX_TICK_BPS": 150.0}, True)):
+        app = _pin_app(**kw)
+        rows = priced(app, 1.0)  # tick 0.01 at a price of 1.0: 100 bp
+
+        async def tickers(rows=rows):
+            return rows
+
+        app.rest.ticker_24h = tickers
+        asyncio.run(app.refresh_universe(initial=True))
+        assert ("ETHUSDT" in app.universe) is inside, kw
+
+
+def test_a_universe_pin_trades_the_pinned_symbols_and_records_what_live_selection_drops():
+    """Replay --symbols: the pinned symbols trade whatever the live rules say; each one the live selection would not
+    trade is recorded once with the first rule it failed, and a symbol the exchange no longer lists as trading drops."""
+    app = _pin_app()
+    app.universe_pin = ["LINKUSDT", "BTCUSDT", "AVAXUSDT"]
+    asyncio.run(app.refresh_universe(initial=True))
+    assert app.universe == ["LINKUSDT", "BTCUSDT", "AVAXUSDT"]  # pin order, the 50M LINK included
+    assert list(app.universe_pin_rejected) == ["LINKUSDT"]
+    assert app.universe_pin_rejected["LINKUSDT"].startswith("24h quote volume 50,000,000 < 80,000,000")
+    app.rest.vols["LINKUSDT"] = 10e6  # recorded once: the first reason stays
+    app.rest.vols["AVAXUSDT"] = 1e6  # a non-member would have needed 80M and a member 64M: still pinned
+    asyncio.run(app.refresh_universe())
+    assert app.universe == ["LINKUSDT", "BTCUSDT", "AVAXUSDT"]
+    assert app.universe_pin_rejected["LINKUSDT"].startswith("24h quote volume 50,000,000")
+    assert app.universe_pin_rejected["AVAXUSDT"].startswith("24h quote volume 1,000,000 < 80,000,000")
+    app.symbols["AVAXUSDT"].status = "SETTLING"
+    asyncio.run(app.refresh_universe())
+    assert app.universe == ["LINKUSDT", "BTCUSDT"]
+    app.universe_pin = None  # no pin: the live rules alone
+    asyncio.run(app.refresh_universe(initial=True))
+    assert app.universe == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]

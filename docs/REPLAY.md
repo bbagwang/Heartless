@@ -20,7 +20,11 @@ HEARTLESS_DATA_DIR=<저장소 사본 폴더> ARCHIVE_BACKFILL=false \
 - **리플레이 시장:** 공개 REST(klines, exchangeInfo, 24h 티커, 펀딩, 미결제약정·롱숏 지표)와 웹소켓(kline, bookTicker, markPrice)을 저장 이력으로 대신합니다(`market.py`). 1분봉마다 분 안의 네 시점(시가, 첫 극값, 둘째 극값, 종가; 양봉 O-L-H-C, 음봉 O-H-L-C)에 호가·마크가를 보내고, 종가 시각에 마감 kline을 보냅니다. 펀딩은 저장된 정산 시각대로 정산됩니다. 다음 정산 시각과 정산 주기는 저장된 정산 시각에서 종목별로 만들어(예: 2022년 11월 SOLUSDT의 2~4시간 주기) markPrice 스트림의 `T`, `premiumIndex`의 `nextFundingTime`, `fundingInfo`의 `fundingIntervalHours`(8시간이 아닌 종목만, Binance와 같은 방식)가 서로 일치합니다. 지표는 5분 버킷이 끝난 시각부터 보입니다. 그 시각에 존재하는 데이터만 응답합니다.
 - **텔레그램:** 실제 `TelegramBot`이 돌고 HTTP만 캡처 스텁으로 바뀝니다(`telegram.py`). 모든 메시지를 가상 시각·이벤트 종류와 함께 기록합니다. `--command '+2d=/pause'`처럼 정한 시각에 소유자 명령을 보낼 수 있습니다(`/close *`는 그 시각에 열린 포지션, `@confirm`은 마지막 확인 버튼).
 - **네트워크 차단:** 실제 HTTP·웹소켓·DNS 시도는 모두 예외를 내고 위반으로 기록됩니다(`netguard.py`).
-- **시장 컨텍스트 종목:** 원본에 있는 `CONTEXT_UNIVERSE` 종목도 함께 내줍니다(시드 이력 포함). exchangeInfo·1분봉·펀딩·지표 경로로는 보이지만 전체 24시간 티커에서는 빠지므로, 거래 유니버스는 `--symbols` 안에서만 고릅니다. 거래하지 않는 컨텍스트 종목에는 마감 kline만 보냅니다(호가·마크가 없음). 봇은 실제 운영과 같은 경로로 이 종목들을 백필·구독하고 정시마다 컨텍스트 스냅샷을 만듭니다.
+- **시장 컨텍스트 종목:** 원본에 있는 `CONTEXT_UNIVERSE` 종목도 함께 내줍니다(시드 이력 포함). exchangeInfo·1분봉·펀딩·지표 경로로는 보이지만 전체 24시간 티커에서는 빠지므로, 거래 후보는 `--symbols`(없으면 원본의 모든 종목)뿐입니다. 거래하지 않는 컨텍스트 종목에는 마감 kline만 보냅니다(호가·마크가 없음). 봇은 실제 운영과 같은 경로로 이 종목들을 백필·구독하고 정시마다 컨텍스트 스냅샷을 만듭니다.
+- **유니버스:** `--symbols`를 주면 그 종목을 모두 거래 유니버스에 고정합니다(`Heartless.universe_pin`, 요청 순서). 운영 선택 규칙([`UNIVERSE.md`](UNIVERSE.md) 6절)은 매 갱신 때 그대로 돌고, 규칙대로라면 빠졌을 종목은 처음 걸린 규칙과 함께 요약의 `universe.live_rules_leave_out`과 보고서의 `universe:` 줄에 남습니다. `--symbols`가 없으면 원본의 모든 종목 중에서 운영 규칙이 고릅니다(이전과 같음).
+  - 이유: Wave F 병합 검증(2026-10-16)의 3일 스모크(2026-09-01 ~ 03, 핵심 12종목)에서 AVAX·LTC·BCH의 24시간 거래대금이 하한 8천만 USDT보다 작아(정시마다 4,100만 ~ 7,500만) 12종목을 요청하고 9종목만 거래했습니다. 86b0469도 같은 날 같은 9종목을 골랐으므로 병합 결함이 아니라 의도한 F0 규칙이고(`ALWAYS_INCLUDE`가 BTC 하나로 줄어든 것과도 무관: 리플레이는 `BTCUSDT,ETHUSDT,SOLUSDT` 중 요청된 종목을 기준 종목으로 둠), 요청한 종목을 검사하지 못하는 쪽이 리플레이 도구의 빈틈이었습니다.
+  - 이전 리플레이 기록(아래 절들)은 고정 전이라 거래 종목이 그때의 규칙으로 정해졌습니다(예: C2 통합 리플레이의 "8종목으로 시작해 30시간 안에 12종목").
+- **원본 읽기:** 원본 DB(`ReplaySource`)와 시드 복사(`ATTACH`)는 E2의 `readonly_uri`로 엽니다. 이전의 `mode=ro` 열기는 WAL 원본(장기 DB) 옆에 -wal·-shm을 남겼습니다.
 - **학습 주기:** 리서치가 도는 동안 가상 시간이 멈추므로 기본 주기를 줄였습니다(리서치 7일마다, 후보 3개·폴드 2개·21일 창, 발굴 14일마다). `--set KEY=VALUE`로 바꿀 수 있습니다.
 
 ## 요약 필드
@@ -30,6 +34,7 @@ HEARTLESS_DATA_DIR=<저장소 사본 폴더> ARCHIVE_BACKFILL=false \
 | 필드 | 내용 |
 |---|---|
 | `passed`, `invariants` | 통과 여부, 검사별 실행·위반 횟수와 위반 목록(아래 불변식 표) |
+| `universe` | `pinned`(`--symbols`로 고정했는지), `final`(끝날 때 거래 유니버스, `universe_final`과 같음), `live_rules_leave_out`(고정한 종목 중 운영 선택이었다면 빠졌을 종목과 처음 걸린 규칙) |
 | `market` | 내보낸 1분봉 수, 분 수, 구멍, 스트림 메시지 수, 경로별 REST 호출 수(`rest_calls`, 예: `/fapi/v1/fundingRate`, `/fapi/v1/premiumIndex`, `/fapi/v1/fundingInfo`) |
 | `context` | 시장 컨텍스트: 유니버스, 컨텍스트 전용 종목, 원본이 내준 추가 종목(`served_extra`), 만든 스냅샷 수(`snapshots`)와 기대 정시 수(`hours_expected`), 빠진 정시(`missing`, `missing_first`), 유예(10초)를 넘겨 발행한 수(`late`), 오류 수, 스냅샷별 종목 수(`symbols_present` 최소·최대·평균), 컨텍스트 전용 kline 수와 구멍, 정시별 다이제스트(`digests`, `runner.context_digest`: 같은 데이터의 오프라인 빌드와 비트 단위 비교용) |
 | `learning.challenger_decisions` | 챌린저 판정 기록. 버전마다 첫 판정, 모든 승격·퇴출, 하루 한 번의 보류를 남깁니다. 항목: 시각, 슬롯, 버전, 출처, 경로(`absolute`/`relative`), **판정점**(`checkpoint`, 첫 판정점 전이면 null)과 다음 판정점, 결론(`verdict`)과 규칙(`rule`), 판정한 챌린저 기록(`challenger`: n·청산일·평균R·t_day·PF·낙폭), 현재 거래 수(`current_n`), 챔피언 거래 수, 일별 차이(`paired`), OOS 탈락 알파, 기준값(`bar`), 조건별 참/거짓(`checks`), 기준 챔피언 버전(`base`), 승격을 막은 충돌(`blockers`) |
