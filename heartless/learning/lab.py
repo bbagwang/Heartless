@@ -571,7 +571,8 @@ def evaluate(params, symbols: list[str], start: int, end: int, db_path: str, onl
     Every job's warm-up is at least the longest lookback_days of the evaluated alphas plus a margin (warmup_for), and
     the burn-in / run-off at least their longest max_hold_days plus a day (handoff_for).
 
-    `context` = {"db": market_context store path, "universe": [...], "build": bool, "top_n": int} attaches the market
+    `context` = {"db": market_context store path, "universe": [...], "build": bool, "top_n": int, "pit": universe.db
+    path or None (the point-in-time research store when top_n > 0)} attaches the market
     context: the rows of the window are built first when missing (and `build`), then every worker reads its symbol's
     rows. None runs without it (ctx.market stays empty).
 
@@ -824,9 +825,12 @@ def main_cli(settings, args) -> None:
     chunk_days = getattr(args, "chunk_days", None)
     commit, dirty = seal.git_commit(), git_dirty()  # the code state the run starts from (it may change while it runs)
     # top_n: the cross-section mode of the context store (CONTEXT_TOP_N); a store built in top-N mode is refused when
-    # asked for in the fixed mode, and the research store is built with top_n = 40 (docs/ROADMAP.md 7.11)
+    # asked for in the fixed mode, and the research store is built with top_n = 40 (docs/ROADMAP.md 7.11), point in
+    # time over every eligible perpetual of universe.db ("pit", ROADMAP section 6, 2026-10-16)
+    top_n = int(getattr(settings, "context_top_n", 0) or 0)
     context = {"db": str(settings.context_db_path), "universe": settings.context_universe_list,
-               "build": bool(settings.context_auto_build), "top_n": int(getattr(settings, "context_top_n", 0) or 0),
+               "build": bool(settings.context_auto_build), "top_n": top_n,
+               "pit": str(settings.universe_db_path) if top_n > 0 else None,
                "progress": lambda m: print(m, file=sys.stderr, flush=True)}
     from heartless.data.context import ContextMismatch
 

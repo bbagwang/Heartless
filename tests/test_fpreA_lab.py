@@ -136,6 +136,8 @@ def test_lab_cli_top_universe_reports_membership_and_passes_context_top_n(timer_
     err = capsys.readouterr().err
     assert "member-months" in err and "delisted in the window: GONEUSDT" in err
     assert seen["context"]["top_n"] == 40  # a store built with CONTEXT_TOP_N is asked for in its own mode
+    # ... the point-in-time research store over universe.db (ROADMAP section 6, 2026-10-16)
+    assert seen["context"]["pit"] == str(tmp_path / "universe.db")
     assert seen["member_windows"] == {"BIGUSDT": [(lab.parse_when("2023-12-01"), lab.parse_when("2024-01-03",
                                                                                                   end=True))]}
     assert seen["delisted"]["GONEUSDT"] < lab.parse_when("2023-12-11")

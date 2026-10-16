@@ -225,10 +225,13 @@ def _top_mask(vol: np.ndarray, top_n: int) -> np.ndarray:
     return np.isfinite(vol) & (pos < int(top_n))
 
 
-def members(grid: dict[str, np.ndarray], idx, top_n: int = 0) -> np.ndarray:
-    """[len(idx), symbols] bool: the hour's cross-section (present; with top_n > 0 only the top_n by 24h volume)."""
+def members(grid: dict[str, np.ndarray], idx, top_n: int = 0, member_mask: np.ndarray | None = None) -> np.ndarray:
+    """[len(idx), symbols] bool: the hour's cross-section (present; with top_n > 0 only the top_n by 24h volume;
+    with `member_mask` (point-in-time research stores, pit_members) present and in that mask)."""
     idx = np.asarray(idx, dtype=np.int64)
     pres = grid["present"][idx].astype(bool)
+    if member_mask is not None:
+        return pres & np.asarray(member_mask, dtype=bool)
     if not top_n or top_n <= 0:
         return pres
     with np.errstate(all="ignore"):
@@ -236,11 +239,14 @@ def members(grid: dict[str, np.ndarray], idx, top_n: int = 0) -> np.ndarray:
         return pres & _top_mask(_vol24(grid, idx, ok), top_n)
 
 
-def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1, top_n: int = 0) -> tuple[np.ndarray, np.ndarray]:
+def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1, top_n: int = 0,
+            member_mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Snapshot features at the grid rows `idx` (hour indices into the grid, each needs up to GRID_HOURS - 1 rows of
     history before it). grid: GRID_FIELDS -> [rows, symbols] arrays on a contiguous hour axis. Returns
     (symbol features [len(idx), symbols, len(SYMBOL_FEATURES)], market features [len(idx), len(MARKET_FEATURES)]).
-    top_n > 0 restricts the cross-section to `members()` (the symbol features of the others are NaN)."""
+    top_n > 0 restricts the cross-section to `members()` (the symbol features of the others are NaN); `member_mask`
+    ([len(idx), symbols] bool, the point-in-time selection of pit_members) restricts it the same way to the given
+    members instead (top_n is then not used)."""
     idx = np.asarray(idx, dtype=np.int64)
     close = grid["close"]
     k_n, s_n = len(idx), close.shape[1]
@@ -279,8 +285,10 @@ def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1, top_n: int = 0)
             f[f"above_ema{span}"] = np.where(ok, (c0 > e).astype(float), np.nan)
         btc_ret = {k: f[f"ret_{k}h"] for k in BTC_RET_HOURS}  # the market reference, member or not
         xs = pres
-        if top_n and top_n > 0:  # F0: the hour's liquidity top_n only (the fixed-list path never takes this branch)
-            xs = pres & _top_mask(vol, top_n)
+        if member_mask is not None or (top_n and top_n > 0):
+            # F0: the hour's liquidity top_n only, or the point-in-time members chosen outside (the fixed-list path
+            # never takes this branch)
+            xs = pres & (np.asarray(member_mask, dtype=bool) if member_mask is not None else _top_mask(vol, top_n))
             for name in list(f):
                 f[name] = np.where(xs, f[name], np.nan)
             vol = np.where(xs, vol, np.nan)
@@ -339,15 +347,13 @@ def compute(grid: dict[str, np.ndarray], idx, btc_col: int = -1, top_n: int = 0)
 
 
 # --- stage A: one symbol's hourly grid columns -------------------------------------------------------------------------
-def hourly_columns(open_time: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray, qvol: np.ndarray,
-                   g0: int, g1: int) -> dict[str, np.ndarray]:
-    """present / close (carried forward <= CARRY_HOURS) / high / low / qvol for the hours g0..g1 from 1m bars sorted
-    by open_time (bars from hour g0 - CARRY_HOURS on are needed for the carried close). The hour's quote volume is
-    summed in minute order, as the tracker does."""
-    base = g0 - CARRY_HOURS
+def _raw_minutes(open_time: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray, qvol: np.ndarray,
+                 base: int, g1: int) -> dict[str, np.ndarray]:
+    """Per hour base..g1 (hour indices) from 1m bars sorted by open_time: present (a bar in the hour), high, low, the
+    hour's last close (not carried) and the quote volume summed in minute order, as the tracker does."""
     n_ext = g1 - base + 1
-    out = {"present": np.zeros(n_ext, dtype=bool), "close": np.full(n_ext, np.nan), "high": np.full(n_ext, np.nan),
-           "low": np.full(n_ext, np.nan), "qvol": np.zeros(n_ext)}
+    out = {"present": np.zeros(n_ext, dtype=bool), "high": np.full(n_ext, np.nan), "low": np.full(n_ext, np.nan),
+           "last_close": np.full(n_ext, np.nan), "qvol": np.zeros(n_ext)}
     ot = np.asarray(open_time, dtype=np.int64)
     hrs = ot // MS_H
     sel = (hrs >= base) & (hrs <= g1)
@@ -359,19 +365,76 @@ def hourly_columns(open_time: np.ndarray, high: np.ndarray, low: np.ndarray, clo
         out["present"][rows] = True
         out["high"][rows] = np.maximum.reduceat(np.asarray(high, float)[sel], starts)
         out["low"][rows] = np.minimum.reduceat(np.asarray(low, float)[sel], starts)
-        last_close = np.full(n_ext, np.nan)
-        last_close[rows] = np.asarray(close, float)[sel][ends - 1]
+        out["last_close"][rows] = np.asarray(close, float)[sel][ends - 1]
         q = np.zeros((n_ext, 60))
         q[hh, (ot[sel] // MS_MIN) % 60] = np.asarray(qvol, float)[sel]
         acc = np.zeros(n_ext)
         for minute in range(60):
             acc = acc + q[:, minute]
         out["qvol"] = acc
+    return out
+
+
+def _carried(raw: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """present / close (the last close carried forward at most CARRY_HOURS) / high / low / qvol from raw hourly values."""
+    n_ext = len(raw["present"])
+    out = {"present": raw["present"], "close": np.full(n_ext, np.nan), "high": raw["high"], "low": raw["low"],
+           "qvol": raw["qvol"]}
+    if raw["present"].any():
         pos = np.arange(n_ext)
-        last = np.maximum.accumulate(np.where(out["present"], pos, -(10**9)))
+        last = np.maximum.accumulate(np.where(raw["present"], pos, -(10**9)))
         carry = (last >= 0) & (pos - last < CARRY_HOURS)
-        out["close"][carry] = last_close[last[carry]]
-    return {k: v[CARRY_HOURS:] for k, v in out.items()}
+        out["close"][carry] = raw["last_close"][last[carry]]
+    return out
+
+
+def hourly_columns(open_time: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray, qvol: np.ndarray,
+                   g0: int, g1: int) -> dict[str, np.ndarray]:
+    """present / close (carried forward <= CARRY_HOURS) / high / low / qvol for the hours g0..g1 from 1m bars sorted
+    by open_time (bars from hour g0 - CARRY_HOURS on are needed for the carried close). The hour's quote volume is
+    summed in minute order, as the tracker does."""
+    cols = _carried(_raw_minutes(open_time, high, low, close, qvol, g0 - CARRY_HOURS, g1))
+    return {k: v[CARRY_HOURS:] for k, v in cols.items()}
+
+
+def _raw_hours(open_time: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray, qvol: np.ndarray,
+               base: int, g1: int) -> dict[str, np.ndarray]:
+    """_raw_minutes' layout from 1h bars (universe.db blocks, one row per hour): the hour's own high, low, close and
+    quote volume."""
+    n_ext = g1 - base + 1
+    out = {"present": np.zeros(n_ext, dtype=bool), "high": np.full(n_ext, np.nan), "low": np.full(n_ext, np.nan),
+           "last_close": np.full(n_ext, np.nan), "qvol": np.zeros(n_ext)}
+    ot = np.asarray(open_time, dtype=np.int64)
+    if len(ot):
+        h = ot // MS_H - base
+        sel = (h >= 0) & (h < n_ext)
+        rows = h[sel]
+        out["present"][rows] = True
+        out["high"][rows] = np.asarray(high, float)[sel]
+        out["low"][rows] = np.asarray(low, float)[sel]
+        out["last_close"][rows] = np.asarray(close, float)[sel]
+        out["qvol"][rows] = np.asarray(qvol, float)[sel]
+    return out
+
+
+def merged_columns(minutes: dict[str, np.ndarray] | None, hours: dict[str, np.ndarray] | None, g0: int,
+                   g1: int) -> dict[str, np.ndarray]:
+    """hourly_columns' output where each hour comes from the 1m bars when the candle database has one in it and from
+    the universe.db 1h bar otherwise (raw values of _raw_minutes / _raw_hours over g0 - CARRY_HOURS .. g1), the close
+    then carried over the merged hours. An hour with 1m bars is bit-identical to hourly_columns; an hour from the 1h
+    archive differs only in the quote volume's precision (stored to 0.1% relative, symbols_inventory.QV_STEP) and in
+    being the exchange's hourly aggregate instead of the sum of the minute files."""
+    n_ext = g1 - (g0 - CARRY_HOURS) + 1
+    empty = {"present": np.zeros(n_ext, dtype=bool), "high": np.full(n_ext, np.nan), "low": np.full(n_ext, np.nan),
+             "last_close": np.full(n_ext, np.nan), "qvol": np.zeros(n_ext)}
+    m = minutes if minutes is not None else empty
+    hr = hours if hours is not None else empty
+    use_h = ~m["present"] & hr["present"]
+    raw = {"present": m["present"] | hr["present"]}
+    for k in ("high", "low", "last_close", "qvol"):
+        raw[k] = np.where(use_h, hr[k], m[k])
+    cols = _carried(raw)
+    return {k: v[CARRY_HOURS:] for k, v in cols.items()}
 
 
 def funding_column(times: np.ndarray, rates: np.ndarray, g0: int, g1: int) -> np.ndarray:
@@ -591,6 +654,9 @@ def source_status(meta, source: dict) -> tuple[str, int | None, str]:
                                   "retention), not a research build")
     if old["path"] != source["path"]:
         return "mismatch", None, f"it was built from {old['path']}, not from {source['path']}"
+    if old.get("universe_db") != source.get("universe_db"):
+        return "mismatch", None, (f"it was built over the universe database {old.get('universe_db') or '(none)'}, not "
+                                  f"{source.get('universe_db') or '(none)'}")
     if old.get("fingerprint") == source["fingerprint"]:
         return "same", None, ""
     o_r, n_r = old.get("ranges") or {}, source["ranges"]
@@ -801,8 +867,197 @@ def compute_unit(src, universe, a: int, b: int, top_n: int = 0) -> list[Snapshot
     return out
 
 
+# --- point-in-time research cross-section (ROADMAP section 6, 2026-10-16) ---------------------------------------------
+# A research store built with CONTEXT_TOP_N picks, at each hour close, the top_n USDT perpetuals by trailing 24h quote
+# volume among EVERY eligible perpetual trading in that hour, from the universe.db 1h blocks (red-team F-M3: the union
+# of a window's monthly members held symbols that qualified only years later and lacked liquid ones that never became
+# monthly members). The ranking reads the 1h archive for every candidate (one source for all); the features of a
+# chosen symbol use its 1m candles where the candle database has them and its 1h bars elsewhere (merged_columns). Such a
+# store records the universe PIT_UNIVERSE, so it never mixes with a fixed-list or a 1m top_n store.
+PIT_UNIVERSE = ("*",)
+
+
+def _open_universe(path):
+    from heartless.core.store import Store
+
+    if not path or not Path(path).is_file():
+        raise ContextMismatch(f"no universe database at {path}: the point-in-time research context (CONTEXT_TOP_N > 0) "
+                              f"ranks every USDT perpetual from its 1h blocks; run `heartless universe build` first")
+    return Store(path, readonly=True)  # a shared research dataset: only read (E2)
+
+
+def _pit_candidates(ustore, r0: int, h1: int) -> list[str]:
+    """Eligible USDT perpetuals (universe.eligible_research: perpetual, USDT-quoted, not a stablecoin, not an archive
+    copy of a settled contract) with a traded 1h bar somewhere in the hours r0..h1."""
+    from heartless.data.symbols_inventory import FUT_TABLE
+    from heartless.data.universe import eligible_research
+
+    inv = {r["symbol"]: r for r in ustore.load_symbol_inventory()}
+    lo, hi = r0 * MS_H, (h1 + 1) * MS_H - 1
+    out = set()
+    for b in ustore.kline_block_index(FUT_TABLE):
+        if not b["n"] or b["first_trade"] is None or b["last_trade"] < lo or b["first_trade"] > hi:
+            continue
+        row = inv.get(b["symbol"])
+        if row is not None and eligible_research(row) is None:
+            out.add(b["symbol"])
+    return sorted(out)
+
+
+def _hour_bars(ustore, symbol: str, base: int, h1: int) -> dict[str, np.ndarray]:
+    from heartless.data.symbols_inventory import FUT_TABLE, load_hourly
+
+    return load_hourly(ustore, symbol, base * MS_H, h1 * MS_H, FUT_TABLE)
+
+
+def pit_members(ustore, h_a: int, h_b: int, top_n: int) -> tuple[list[str], np.ndarray]:
+    """The point-in-time cross-section of the hour closes h_a..h_b (hour indices): (candidate symbols ascending, a
+    [hours, candidates] bool mask). At hour h the members are the top_n candidates by trailing 24h quote volume (the
+    hours h - 23 .. h, oldest first, as context._vol24) among those trading in hour h (a 1h bar with volume) with 24 h
+    of history (a close within the carry window 23 hours back), ties by name; only universe.db is read, so the choice
+    never depends on which symbols the candle database happens to hold. Also the S3 shock rule's cross-section."""
+    r0 = h_a - 23 - CARRY_HOURS
+    syms = _pit_candidates(ustore, r0, h_b)
+    n = h_b - r0 + 1
+    pres = np.zeros((n, len(syms)), dtype=bool)
+    close = np.full((n, len(syms)), np.nan)
+    qvol = np.zeros((n, len(syms)))
+    for j, sym in enumerate(syms):
+        b = _hour_bars(ustore, sym, r0 - CARRY_HOURS, h_b)
+        if not len(b["open_time"]):
+            continue
+        cols = _carried(_raw_hours(b["open_time"], b["high"], b["low"], b["close"], b["quote_volume"],
+                                   r0 - CARRY_HOURS, h_b))
+        pres[:, j] = cols["present"][CARRY_HOURS:]
+        close[:, j] = cols["close"][CARRY_HOURS:]
+        qvol[:, j] = cols["qvol"][CARRY_HOURS:]
+    idx = np.arange(h_a - r0, h_b - r0 + 1)
+    with np.errstate(all="ignore"):
+        ok = pres[idx] & (qvol[idx] > 0) & np.isfinite(_lag(close, idx, 23))
+        vol = _vol24({"qvol": qvol, "close": close}, idx, ok)
+    return syms, _top_mask(vol, top_n) if len(syms) else np.zeros((len(idx), 0), dtype=bool)
+
+
+def _load_symbol_pit(src, ustore, sym: str, g0: int, g1: int) -> dict[str, np.ndarray]:
+    """A chosen symbol's grid columns: 1m candles where the candle database has them, the 1h block elsewhere
+    (merged_columns); funding settlements of the candle database, completed by the 1h blocks' in other hours; 5m
+    open-interest metrics from the candle database only (the 1h dataset has none: NaN)."""
+    base = g0 - CARRY_HOURS
+    lo, hi = base * MS_H, hour_close(g1)
+    minutes = None
+    if src.context_candle_bounds(sym)[0] is not None:
+        ot, high, low, close, qv = src.context_candle_columns(sym, lo, hi - MS_MIN + 1)
+        if len(ot):
+            minutes = _raw_minutes(ot, high, low, close, qv, base, g1)
+    b = _hour_bars(ustore, sym, base, g1)
+    hours = (_raw_hours(b["open_time"], b["high"], b["low"], b["close"], b["quote_volume"], base, g1)
+             if len(b["open_time"]) else None)
+    cols = merged_columns(minutes, hours, g0, g1)
+    fr = [(int(t), float(r)) for t, r in src.load_funding(sym, lo - MS_H, hi) if r is not None]
+    have = {t // MS_H for t, _ in fr}
+    if len(b["open_time"]) and "funding" in b:
+        ok = np.isfinite(b["funding"])
+        fr += [(int(t), float(r)) for t, r in zip(b["open_time"][ok], b["funding"][ok]) if int(t) // MS_H not in have]
+    fr.sort()
+    cols["funding"] = funding_column(np.array([t for t, _ in fr], dtype=np.int64), np.array([r for _, r in fr]), g0, g1)
+    mrows = src.load_metrics(sym, g0 * MS_H - OI_LOOKBACK_MS - 2 * MS_H, hi) if hasattr(src, "load_metrics") else []
+    cols.update(metrics_columns(*_metric_arrays(mrows), g0, g1))
+    return cols
+
+
+def _month_pieces(a: int, b: int) -> list[tuple[int, int]]:
+    """Calendar-month pieces of [a, b] (ms)."""
+    out = []
+    d = datetime.fromtimestamp(int(a) / 1000, tz=timezone.utc)
+    lo = int(a)
+    y, m = d.year, d.month
+    while lo <= b:
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        nxt = int(datetime(y, m, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        out.append((lo, min(int(b), nxt - 1)))
+        lo = nxt
+    return out
+
+
+def compute_unit_pit(src, ustore, a: int, b: int, top_n: int) -> list[Snapshot]:
+    """compute_unit for a point-in-time store, one calendar month at a time: a year of 2025 chose 511 different
+    symbols at least once (new listings surge into the top 40 for a few hours), and one grid over all of them held
+    4 GB. Every snapshot reads at most GRID_HOURS rows before it and the members come from the mask, so a month's
+    grid over that month's chosen symbols gives the same bits as the year's grid over the year's."""
+    out: list[Snapshot] = []
+    for pa, pb in _month_pieces(a, b):
+        out += _compute_piece_pit(src, ustore, pa, pb, top_n)
+    return out
+
+
+def _compute_piece_pit(src, ustore, a: int, b: int, top_n: int) -> list[Snapshot]:
+    """The cross-section of every hour close in [a, b] from pit_members, the grid over the symbols chosen at least
+    once in it (and BTC, the market reference) from _load_symbol_pit."""
+    h_a, h_b = hour_of(a + MS_H - 1), hour_of(b)
+    if h_b < h_a:
+        return []
+    g0, g1 = h_a - GRID_HOURS + 1, h_b
+    cand, mask = pit_members(ustore, h_a, h_b, top_n)
+    syms = [s for s, hit in zip(cand, mask.any(axis=0)) if hit]
+    if BTC in cand and BTC not in syms:
+        syms = sorted(syms + [BTC])
+    col = {s: j for j, s in enumerate(cand)}
+    n_rows = g1 - g0 + 1
+    grid = {k: (np.zeros((n_rows, len(syms)), dtype=bool) if k == "present" else
+                np.zeros((n_rows, len(syms))) if k == "qvol" else np.full((n_rows, len(syms)), np.nan))
+            for k in GRID_FIELDS}
+    for j, sym in enumerate(syms):
+        cols = _load_symbol_pit(src, ustore, sym, g0, g1)
+        for k in GRID_FIELDS:
+            grid[k][:, j] = cols[k]
+    idx = np.arange(h_a - g0, h_b - g0 + 1)
+    mm = np.stack([mask[:, col[s]] for s in syms], axis=1) if syms else np.zeros((len(idx), 0), dtype=bool)
+    sym_f, mkt = compute(grid, idx, syms.index(BTC) if BTC in syms else -1, 0, member_mask=mm)
+    xs = members(grid, idx, member_mask=mm)
+    pres = grid["present"][idx]
+    return [Snapshot(hour_close(g0 + int(idx[r])), tuple(syms), xs[r].copy(), sym_f[r], mkt[r])
+            for r in range(len(idx)) if pres[r].any()]
+
+
+def pit_span(ustore) -> tuple[int, int] | None:
+    """(first hour close, last hour close) the universe.db 1h futures blocks cover."""
+    from heartless.data.symbols_inventory import FUT_TABLE, data_end
+
+    last = data_end(ustore, FUT_TABLE)
+    if last is None:
+        return None
+    first = ustore.query(f"SELECT MIN(first_ts) t FROM {FUT_TABLE} WHERE n>0")[0]["t"]
+    return hour_close(int(first) // MS_H), hour_close(int(last) // MS_H)
+
+
+def pit_source_info(src, ustore, universe_db) -> dict:
+    """source_info of a point-in-time store: every eligible inventory symbol's candle / funding / metrics range in the
+    candle database (the ones it holds), the universe.db path and its 1h data span as one more range entry, so an
+    appended universe.db month re-opens only the hours after it."""
+    from heartless.data.universe import eligible_research
+
+    ranges: dict = {}
+    for r in ustore.load_symbol_inventory():
+        if eligible_research(r) is not None:
+            continue
+        sym = r["symbol"]
+        if hasattr(src, "context_series_bounds"):
+            rng = src.context_series_bounds(sym)
+            if any(v is not None for v in rng.values()):
+                ranges[sym] = rng
+        else:
+            a, b = src.context_candle_bounds(sym)
+            if a is not None:
+                ranges[sym] = {"candles": [a, b]}
+    span = pit_span(ustore)
+    ranges["@universe.db"] = {"futures_1h": list(span) if span else None}
+    fp = hashlib.sha1(json.dumps(ranges, sort_keys=True).encode()).hexdigest()[:16]
+    return {"path": _real(getattr(src, "path", "")), "universe_db": _real(universe_db), "ranges": ranges,
+            "fingerprint": fp}
+
+
 def build(src, dst, start: int | None = None, end: int | None = None, universe=None, rebuild: bool = False,
-          progress=None, top_n: int = 0) -> dict:
+          progress=None, top_n: int = 0, pit=None) -> dict:
     """Compute and store the market context for the hour closes in [start, end] (default: all stored history),
     calendar year by calendar year, into `dst`, a store of its own (CONTEXT_DB; never the candle database `src`).
 
@@ -810,33 +1065,65 @@ def build(src, dst, start: int | None = None, end: int | None = None, universe=N
     where it stopped; `rebuild` recomputes everything. A store built from another candle database or for another
     universe raises ContextMismatch unless `rebuild` (history appended to the same source only re-opens the hours it
     can change). The whole build holds the store's exclusive lock and re-reads the metadata once it has it, so a
-    process that waited for another one's build skips what that one built."""
+    process that waited for another one's build skips what that one built.
+
+    `pit` (a universe.db path, with top_n > 0): a point-in-time research store (PIT_UNIVERSE; compute_unit_pit), the
+    universe argument is not used."""
     dst_path = _real(getattr(dst, "path", ""))
     if dst is None or dst is src or (dst_path and dst_path == _real(getattr(src, "path", ""))):
         raise ContextMismatch("the market context is never written into the candle database: give it its own file "
                               f"(CONTEXT_DB, default <data_dir>/{DB_NAME})")
-    universe = sorted(universe or DEFAULT_UNIVERSE)
-    syms = stored_symbols(src, universe)
-    if not syms:
-        raise RuntimeError("none of the context universe symbols has stored candles")
+    ustore = None
+    if pit is not None:
+        if not top_n or top_n <= 0:
+            raise ValueError("a point-in-time context store needs CONTEXT_TOP_N > 0")
+        ustore = _open_universe(pit)
+        universe = list(PIT_UNIVERSE)
+        span = pit_span(ustore)
+        syms = []
+        if span is None:
+            ustore.close()
+            raise RuntimeError(f"the universe database {pit} holds no 1h futures blocks")
+        source = pit_source_info(src, ustore, pit)
+    else:
+        universe = sorted(universe or DEFAULT_UNIVERSE)
+        syms = stored_symbols(src, universe)
+        if not syms:
+            raise RuntimeError("none of the context universe symbols has stored candles")
+        span = data_span(src, syms)
+        source = source_info(src, universe)
     t0 = time.time()
-    first, last = data_span(src, syms)
+    first, last = span
     a = max(int(start), first) if start is not None else first
     b = min(int(end), last) if end is not None else last
     stats = {"units": [], "rows": 0, "hours": 0, "seconds": 0.0, "universe": universe, "stored_symbols": syms}
+    try:
+        _build_units(src, dst, a, b, universe, source, rebuild, progress, top_n, ustore, pit, stats)
+    finally:
+        if ustore is not None:
+            ustore.close()
+    stats["seconds"] = round(time.time() - t0, 1)
+    return stats
+
+
+def _build_units(src, dst, a: int, b: int, universe: list[str], source: dict, rebuild: bool, progress, top_n: int,
+                 ustore, pit, stats: dict) -> None:
     with build_lock(getattr(dst, "path", None), progress=progress):
-        meta, note = _check_or_reset(dst, dst.get("context.meta"), source_info(src, universe), universe, rebuild,
-                                     top_n)
+        meta, note = _check_or_reset(dst, dst.get("context.meta"), source, universe, rebuild, top_n)
+        if pit is not None and meta.get("pit") != {"universe_db": _real(pit)}:
+            meta["pit"] = {"universe_db": _real(pit)}
+            dst.set("context.meta", meta)
         if note and progress:
             progress(f"context: {note}")
         if b < a:
-            return stats
+            return
         for ua, ub in year_units(a, b):
             if covered(meta, ua, ub):
                 stats["units"].append({"start": _iso(ua), "end": _iso(ub), "skipped": True})
                 continue
             u0 = time.time()
-            snaps = compute_unit(src, universe, ua, ub, top_n)
+            snaps = (compute_unit_pit(src, ustore, ua, ub, top_n) if ustore is not None
+                     else compute_unit(src, universe, ua, ub, top_n))
             rows = [r for sn in snaps for r in sn.rows()]
             if rows:
                 dst.save_market_context(rows)
@@ -851,17 +1138,27 @@ def build(src, dst, start: int | None = None, end: int | None = None, universe=N
             if progress:
                 progress(f"context {info['start'][:10]} .. {info['end'][:10]}: {info['hours']} hours, {info['rows']} "
                          f"rows ({info['seconds']}s)")
-    stats["seconds"] = round(time.time() - t0, 1)
-    return stats
 
 
-def usable(src, dst, universe, top_n: int = 0) -> tuple[bool, str, int | None, str]:
-    """Whether the stored context in `dst` may serve runs over `src` for `universe`, without building:
-    (ok, status, stable_until, why) with status "same" / "extended" / "mismatch" / "none" (nothing built)."""
+def _source_for(src, universe, pit):
+    if pit is None:
+        return source_info(src, universe), sorted(universe)
+    ustore = _open_universe(pit)
+    try:
+        return pit_source_info(src, ustore, pit), list(PIT_UNIVERSE)
+    finally:
+        ustore.close()
+
+
+def usable(src, dst, universe, top_n: int = 0, pit=None) -> tuple[bool, str, int | None, str]:
+    """Whether the stored context in `dst` may serve runs over `src` for `universe` (with `pit`: the point-in-time
+    store over that universe.db), without building: (ok, status, stable_until, why) with status "same" / "extended" /
+    "mismatch" / "none" (nothing built)."""
     meta = dst.get("context.meta")
     if not isinstance(meta, dict):
         return False, "none", None, "nothing built yet"
-    status, stable, why = source_status(meta, source_info(src, universe))
+    source, universe = _source_for(src, universe, pit)
+    status, stable, why = source_status(meta, source)
     if meta.get("universe") != sorted(universe):
         return False, "mismatch", None, (f"built for the universe {','.join(meta.get('universe') or [])}, not "
                                          f"{','.join(sorted(universe))}")
@@ -872,18 +1169,26 @@ def usable(src, dst, universe, top_n: int = 0) -> tuple[bool, str, int | None, s
     return status != "mismatch", status, stable, why
 
 
-def ensure(src, dst, start: int, end: int, universe, auto_build: bool = True, progress=None, top_n: int = 0) -> bool:
+def ensure(src, dst, start: int, end: int, universe, auto_build: bool = True, progress=None, top_n: int = 0,
+           pit=None) -> bool:
     """Make sure the rows of [start, end] exist, building the missing years when `auto_build` (ContextMismatch when
     `dst` belongs to another source or universe). True when a usable table is there for the window afterwards (an
     hour that is still missing reads as an empty ctx.market). Without `auto_build` a store that does not match reads
     as no context (False)."""
-    universe = sorted(universe or DEFAULT_UNIVERSE)
-    syms = stored_symbols(src, universe)
-    span = data_span(src, syms) if syms else None
+    if pit is not None:
+        ustore = _open_universe(pit)
+        try:
+            span = pit_span(ustore)
+        finally:
+            ustore.close()
+    else:
+        universe = sorted(universe or DEFAULT_UNIVERSE)
+        syms = stored_symbols(src, universe)
+        span = data_span(src, syms) if syms else None
     if span is None:
         return False
     a, b = max(int(start), span[0]), min(int(end), span[1])
-    ok, status, stable, why = usable(src, dst, universe, top_n)
+    ok, status, stable, why = usable(src, dst, universe, top_n, pit)
     meta = dst.get("context.meta")
     if ok and status == "same" and (b < a or covered(meta, a, b)):
         return True  # the common case: no lock, no write
@@ -891,7 +1196,7 @@ def ensure(src, dst, start: int, end: int, universe, auto_build: bool = True, pr
         if not ok and status != "none" and progress:
             progress(f"context store {getattr(dst, 'path', dst)} not used: {why}")
         return ok and (status == "same" or (stable is not None and b <= stable))
-    build(src, dst, a, b, universe, progress=progress, top_n=top_n)
+    build(src, dst, a, b, universe, progress=progress, top_n=top_n, pit=pit)
     return True
 
 
@@ -899,7 +1204,8 @@ def prepare(db_path: str, cfg: dict, start: int, end: int) -> str | None:
     """For research runs (lab, discovery): build the missing years of [start, end] when cfg["build"] (default True)
     and return the path of the store holding the rows, or None when no usable table exists. cfg: {"db": context store
     path (default <candle db directory>/context.db), "universe": [...], "build": bool, "progress": callable,
-    "top_n": the cross-section mode (0 = fixed list)}. Raises
+    "top_n": the cross-section mode (0 = fixed list), "pit": the universe.db path of a point-in-time research store
+    (with top_n > 0; ROADMAP section 6, 2026-10-16)}. Raises
     ContextMismatch for a store of another source / universe and for the candle database itself. The caller caps
     `end` at a sealed period."""
     from heartless.core.store import Store
@@ -913,7 +1219,8 @@ def prepare(db_path: str, cfg: dict, start: int, end: int) -> str | None:
     dst = Store(ctx_path)
     try:
         ok = ensure(src, dst, int(start), int(end), cfg.get("universe") or DEFAULT_UNIVERSE,
-                    auto_build=cfg.get("build", True), progress=cfg.get("progress"), top_n=int(cfg.get("top_n") or 0))
+                    auto_build=cfg.get("build", True), progress=cfg.get("progress"), top_n=int(cfg.get("top_n") or 0),
+                    pit=cfg.get("pit") or None)
     finally:
         dst.close()
         src.close()

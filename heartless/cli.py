@@ -765,8 +765,11 @@ def _discover(settings, args) -> None:
     templates = getattr(args, "templates", "classic") or "classic"
     context = None
     if getattr(args, "context", False):
+        # CONTEXT_TOP_N > 0: the point-in-time research store over every eligible perpetual of universe.db (ROADMAP
+        # section 6, 2026-10-16)
         context = {"db": str(settings.context_db_path), "universe": settings.context_universe_list,
                    "build": bool(settings.context_auto_build), "top_n": settings.context_top_n,
+                   "pit": str(settings.universe_db_path) if settings.context_top_n > 0 else None,
                    "progress": lambda m: print(m, file=sys.stderr, flush=True)}
     from heartless.learning import trials
 
@@ -869,6 +872,8 @@ def _context(settings, args) -> None:
     from heartless.learning.lab import parse_when
 
     universe = settings.context_universe_list
+    # CONTEXT_TOP_N > 0 builds the point-in-time research store from universe.db (ROADMAP section 6, 2026-10-16)
+    pit = str(settings.universe_db_path) if settings.context_top_n > 0 else None
     ctx_path = settings.context_db_path
     if os.path.realpath(ctx_path) == os.path.realpath(settings.db_path):
         print(f"error: CONTEXT_DB {ctx_path} is the candle database; the market context needs its own file "
@@ -887,7 +892,7 @@ def _context(settings, args) -> None:
         if args.action == "status":
             meta = dst.get("context.meta") or {}
             st = dst.market_context_stats()
-            ok, status, stable, why = C.usable(src, dst, universe, settings.context_top_n)
+            ok, status, stable, why = C.usable(src, dst, universe, settings.context_top_n, pit)
             verdict = {"same": "usable (same source, universe and definition)",
                        "extended": f"usable up to {_iso(stable)} UTC, newer source history is built on the next run "
                                    f"({why})",
@@ -908,7 +913,7 @@ def _context(settings, args) -> None:
         end = parse_when(args.end, end=True) if args.end else None
         t0 = time.time()
         stats = C.build(src, dst, start, end, universe, rebuild=args.rebuild, top_n=settings.context_top_n,
-                        progress=lambda m: print(m, file=sys.stderr, flush=True))
+                        progress=lambda m: print(m, file=sys.stderr, flush=True), pit=pit)
         built = [u for u in stats["units"] if not u.get("skipped")]
         print(f"context: {stats['hours']} hours / {stats['rows']} rows built in {len(built)} year(s), "
               f"{len(stats['units']) - len(built)} already built; {len(stats['stored_symbols'])}/{len(universe)} "

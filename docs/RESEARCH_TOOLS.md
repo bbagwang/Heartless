@@ -300,7 +300,11 @@ HEARTLESS_DATA_DIR=data/longhist ARCHIVE_BACKFILL=false CONTEXT_TOP_N=40 CONTEXT
   --tag maker_exec --out docs/results/wf_maker_exec_htf_trend_taker.json
 ```
 
-- 후보 집합(`CONTEXT_UNIVERSE`)은 1분봉이 있는 종목만 단면에 들어갑니다. 구성원 1분봉(F-data-1m)을 받은 뒤 그 목록을 넓힙니다.
+- **시점 기준 단면 (2026-10-16 등록 변경, ROADMAP 6절).** `CONTEXT_TOP_N > 0`이면 lab·discover·`heartless context build`가 `universe.db`(`UNIVERSE_DB`)로 시점 기준 연구 저장소를 만듭니다(컨텍스트 설정의 `"pit"`). 매 정시에 **그 시간 거래 중인 적격 USDT 무기한 전체** 중 직전 24시간 거래대금 상위 N종목을 고르고, `CONTEXT_UNIVERSE`는 쓰지 않습니다. 이전의 "후보 = `CONTEXT_UNIVERSE`(창 구성원의 합집합 예정)"는 미래 구성원 정보에 기대므로 버렸습니다(레드팀 F-M3).
+  - 순위는 모든 후보를 `universe.db` 1시간봉 거래대금으로 매깁니다(출처 하나). 고른 종목의 피처는 캔들 DB에 그 시간 1분봉이 있으면 1분봉, 없으면 1시간봉으로 계산합니다. 1시간봉 시간은 거래대금이 0.1% 해상도로 저장된 값이고(`symbols_inventory.QV_STEP`), OI 지표는 캔들 DB에만 있어 없는 종목은 NaN입니다.
+  - 저장소 메타의 유니버스는 `["*"]`, `pit`에 `universe.db` 경로가 남습니다. 고정 목록·1분봉 `top_n` 저장소와 서로 거부합니다. `universe.db`에 달이 더해지면 그 뒤 시간만 다시 만듭니다.
+  - `universe.db`가 없으면 `CONTEXT_TOP_N > 0`인 연구 실행은 이유를 밝히고 거부합니다(`heartless universe build` 먼저).
+  - 자세한 정의와 실측(개수·시간·메모리)은 [`UNIVERSE.md`](UNIVERSE.md) 7절에 있습니다.
 
 ### 5.4 시간 단위 방향 평가기 (`learning/hourly.py`)
 
