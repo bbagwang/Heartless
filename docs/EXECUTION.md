@@ -99,6 +99,8 @@ ROADMAP 7.7.2절(메이커 체결 프로토콜), 7.11절(호가 이상 시 진�
 
 이 브랜치는 아래 파일을 건드리지 않습니다(다른 흐름의 담당). 병합 뒤 각 담당이 연결합니다.
 
+`wave-f-merge`(a432463)와의 시험 병합은 충돌 없이 되고, 병합 트리에서 `tests/test_fpreB_*.py`, `tests/test_fpreA_*.py`, `tests/test_rt_context_pit.py`, `tests/test_rt_orderbook.py` 120개가 모두 통과합니다(S3 구성원과 `context.pit_members` 비교 테스트 포함).
+
 - `learning/lab.py`
   - `STRESS_SETTINGS` 에 `"MAKER_THROUGH_SPREAD": 1.0` 을 더합니다(스트레스 메이커 관통 폭 = 스프레드 전체).
   - 원장 해시의 체결 방식: `cfg = trials.lab_config(params.to_dict(), args.alpha, symbols, ..., exec=settings.exec_for(평가 알파들, params.exec))`. 지금은 파라미터 세트의 `exec` 만 해시에 들어가고, `EXEC_MODE` 로만 정한 방식은 taker 로 기록됩니다. 작업 설정(`settings=`)에도 `EXEC_MODE` 를 명시해 넘기면 작업자 환경에 기대지 않습니다.
@@ -106,6 +108,7 @@ ROADMAP 7.7.2절(메이커 체결 프로토콜), 7.11절(호가 이상 시 진�
   - 효율(결과는 같음): `evaluate()` 가 작업을 나누기 전에 `shock.schedule_for(settings, 창 시작 − 워밍업, 창 끝)` 을 한 번 만들어 파일로 저장하고 작업 설정에 `SHOCK_SCHEDULE` 을, 작업의 캔들 DB 를 `SHOCK_CANDLE_DB` 로 넘깁니다. `--db` 가 데이터 폴더의 DB 가 아닐 때 S0 원천이 어긋나지 않게 하려면 `SHOCK_CANDLE_DB` 는 꼭 넘겨야 합니다.
   - 상장폐지: 지금처럼 `delisted` 를 Backtester 에 넘기지 않으면 아무것도 바꿀 필요가 없습니다. 넘기게 되면 lab 의 재가격(`delisting_close`)을 지우고, 보고(`delisting_closes`)는 `exit_reason == "delisting"` 에서 읽습니다. 둘이 같이 있어도 두 번 청구되지는 않습니다(`tests/test_fpreB_engine.py`).
 - `learning/discovery.py`: `frame_features` 의 `vwap_z` 를 `features.vwap_z(frame, idx)` 로 바꿉니다(새 피처 버전).
+- `learning/trials.py`: `EXEC_MODES` 가 아직 `"maker"` 를 받습니다. 엔진은 `taker`·`maker_m1`·`maker_m2` 만 거래하므로 `config.EXEC_MODES` 를 가져다 쓰거나 `"maker"` 를 빼서, 원장 줄에 엔진이 거래하지 않는 방식이 남지 않게 합니다.
 - `learning/neutral.py`: CLI 에서 `SHOCK_LAYER` 가 켜져 있으면 `shock.EntryFilter(shock.schedule_for(settings, start, end))` 를 `entry_filter` 로 넘기고, 막힌 결정 수(`flt.blocked`)와 `sched.counts(start, end)` 를 결과 문서와 원장 `extra` 에 남깁니다(`heartless hourly` 와 같은 모양). `evaluate()` 의 `cfg["entry_filter"]` 는 `evaluator_policy` 인 필터면 넣지 않습니다(층은 구성이 아니라 평가기의 정책).
 - `exchange/orderbook.py`: 대용치 식(`bar_book_proxy`, `PROXY_*` 상수)을 바꾸면 `engine.book_proxy_series` 도 같이 바꿔야 합니다(`tests/test_fpreB_book_guard.py` 가 둘을 봉마다 비교합니다). `usable_book` 과 `engine.usable_stream_book` 은 같은 판정이어야 합니다.
 - `data/context.py`: S3 구성원은 `context.pit_members` 와 같아야 합니다. 병합 뒤 `tests/test_fpreB_shock.py` 의 비교 테스트가 자동으로 돕니다.
