@@ -1,0 +1,167 @@
+[
+ {
+  "symbol": "BTCUSDT",
+  "bars": 34560,
+  "updates": 1440,
+  "end_ms": 1791331200000,
+  "first_open": 1789257600000,
+  "last_open": 1791331140000,
+  "batch": {
+   "build_ms": 30.13,
+   "p50_ms": 8.522,
+   "p99_ms": 25.2015,
+   "max_ms": 34.17,
+   "mean_ms": 10.3729,
+   "frame_mb": 1.9,
+   "cpu_s_per_min_200_symbols": 2.075
+  },
+  "incremental": {
+   "build_ms": 40.84,
+   "p50_ms": 0.1486,
+   "p99_ms": 1.3069,
+   "max_ms": 33.23,
+   "mean_ms": 0.371,
+   "frame_mb": 2.27,
+   "cpu_s_per_min_200_symbols": 0.074,
+   "stats": {
+    "steps": 1440,
+    "bars": 1440,
+    "builds": 1,
+    "reanchors": 13,
+    "verified": 13,
+    "long_rebuilds": 0,
+    "long_kept": 0,
+    "long_offset_rebuilds": 0
+   },
+   "identical_to_batch": true
+  },
+  "speedup_p50": 57.3,
+  "vs_sliding_window": {
+   "values": 112728,
+   "bit_identical_share": 0.932785,
+   "features_differing": 26,
+   "largest_relative": {
+    "1h.ema200": 0.00012,
+    "15m.ema200": 5.82e-06,
+    "5m.ema200": 9.04e-07,
+    "1m.ema200": 5.35e-09,
+    "1h.ema50": 2.59e-11,
+    "1m.vol_z": 1.05e-11,
+    "5m.cvd20": 4.46e-12,
+    "1m.cvd20": 3.34e-13,
+    "5m.taker_ratio3": 1.79e-13,
+    "1m.vol_sma": 1.26e-13
+   }
+  }
+ },
+ {
+  "symbol": "SOLUSDT",
+  "bars": 34560,
+  "updates": 1440,
+  "end_ms": 1791331200000,
+  "first_open": 1789257600000,
+  "last_open": 1791331140000,
+  "batch": {
+   "build_ms": 31.53,
+   "p50_ms": 8.1219,
+   "p99_ms": 23.7934,
+   "max_ms": 32.03,
+   "mean_ms": 9.9613,
+   "frame_mb": 1.9,
+   "cpu_s_per_min_200_symbols": 1.992
+  },
+  "incremental": {
+   "build_ms": 36.61,
+   "p50_ms": 0.119,
+   "p99_ms": 0.8897,
+   "max_ms": 21.87,
+   "mean_ms": 0.318,
+   "frame_mb": 2.27,
+   "cpu_s_per_min_200_symbols": 0.064,
+   "stats": {
+    "steps": 1440,
+    "bars": 1440,
+    "builds": 1,
+    "reanchors": 13,
+    "verified": 13,
+    "long_rebuilds": 0,
+    "long_kept": 0,
+    "long_offset_rebuilds": 0
+   },
+   "identical_to_batch": true
+  },
+  "speedup_p50": 68.3,
+  "vs_sliding_window": {
+   "values": 112728,
+   "bit_identical_share": 0.968721,
+   "features_differing": 27,
+   "largest_relative": {
+    "1h.ema200": 0.000129,
+    "15m.ema200": 1.09e-05,
+    "5m.ema200": 9.7e-07,
+    "1m.ema200": 5.33e-09,
+    "1h.ema50": 4e-11,
+    "5m.vol_z": 9.79e-12,
+    "1m.cvd20": 2.2e-13,
+    "5m.cvd20": 2.05e-13,
+    "1m.chop": 1.64e-13,
+    "15m.cvd20": 1.32e-13
+   }
+  }
+ },
+ {
+  "symbol": "DOGEUSDT",
+  "bars": 34560,
+  "updates": 1440,
+  "end_ms": 1791331200000,
+  "first_open": 1789257600000,
+  "last_open": 1791331140000,
+  "batch": {
+   "build_ms": 28.91,
+   "p50_ms": 8.0854,
+   "p99_ms": 24.324,
+   "max_ms": 29.11,
+   "mean_ms": 9.8475,
+   "frame_mb": 1.9,
+   "cpu_s_per_min_200_symbols": 1.97
+  },
+  "incremental": {
+   "build_ms": 39.36,
+   "p50_ms": 0.1283,
+   "p99_ms": 1.3525,
+   "max_ms": 25.38,
+   "mean_ms": 0.3429,
+   "frame_mb": 2.27,
+   "cpu_s_per_min_200_symbols": 0.069,
+   "stats": {
+    "steps": 1440,
+    "bars": 1440,
+    "builds": 1,
+    "reanchors": 13,
+    "verified": 13,
+    "long_rebuilds": 0,
+    "long_kept": 0,
+    "long_offset_rebuilds": 0
+   },
+   "identical_to_batch": true
+  },
+  "speedup_p50": 63.0,
+  "vs_sliding_window": {
+   "values": 112728,
+   "bit_identical_share": 0.977477,
+   "features_differing": 16,
+   "largest_relative": {
+    "1h.ema200": 0.000345,
+    "15m.ema200": 4.04e-06,
+    "5m.ema200": 1.77e-06,
+    "1m.ema200": 7.9e-09,
+    "1h.ema50": 2.73e-11,
+    "1m.chop": 2.39e-13,
+    "5m.taker_ratio3": 1.54e-13,
+    "1h.taker_ratio3": 4.16e-14,
+    "15m.ema50": 2.25e-14,
+    "1h.kc_lo": 1.89e-14
+   }
+  }
+ }
+]

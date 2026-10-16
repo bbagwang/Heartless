@@ -1,0 +1,12 @@
+{
+ "what": "lab trade-list identity behind docs/PERFORMANCE.md sections 0 and 1.6 (F7 changed no research result): only the trade count and the sha256 of the --trades-out file are recorded, no performance figure",
+ "command": "heartless lab --alpha htf_trend --start 2026-05-01 --end 2026-07-01 --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT --workers 1 --trades-out <file>",
+ "data": "data/research/heartless.db opened read-only (E2), CONTEXT_AUTO_BUILD=false, ARCHIVE_BACKFILL=false",
+ "runs": [
+  {"code": "c16848a (F0) and 1f07ccd (F7) exports, 2026-10-15 (F7 package)", "trades": 54,
+   "sha256": "23063e75acec2921cbd8df50336b2dfa8e2e0af795ccab2c72be746165ceb083"},
+  {"code": "b18f4bb (wave-f-merge after the red-team fixes), 2026-10-16", "trades": 54,
+   "sha256": "23063e75acec2921cbd8df50336b2dfa8e2e0af795ccab2c72be746165ceb083"}
+ ],
+ "bench": "docs/results/f7_bench.json = python -m heartless.util.perf bench --db data/research/heartless.db --symbols BTCUSDT,SOLUSDT,DOGEUSDT --deviation --end 2026-10-07 --out docs/results/f7_bench.json, run at b18f4bb on 2026-10-16 (4 cores shared with other agents, nice 10)"
+}
