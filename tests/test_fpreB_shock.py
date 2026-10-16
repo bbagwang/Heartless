@@ -329,13 +329,12 @@ def test_s3_members_follow_the_context_rule():
     assert any(not math.isfinite(x) for x in xs.returns("GAPUSDT", h))
 
 
-def test_s3_members_equal_context_pit_members_when_available(tmp_path):
-    """After the merge with the point-in-time research context (context.pit_members), S3's members must be the same
-    set at every hour (ROADMAP 7.8: "the context's top_n member definition")."""
+def test_s3_members_equal_context_pit_members(tmp_path):
+    """The live detector's incremental members (_CrossSection.members) are context.pit_members' at every hour (ROADMAP
+    7.8: "the context's top_n member definition"); the offline schedule takes its members from pit_members itself."""
     from heartless.data import context as C
 
-    if not hasattr(C, "pit_members"):
-        pytest.skip("context.pit_members is not in this tree yet")
+    assert SH.CARRY_HOURS == C.CARRY_HOURS
     rng = np.random.default_rng(9)
     st = Store(tmp_path / "u.db")
     syms = [f"P{k:02d}USDT" for k in range(48)]

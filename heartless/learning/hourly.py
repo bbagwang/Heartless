@@ -942,24 +942,14 @@ def main_cli(settings, args) -> None:
                 raise ValueError("--alpha module:Class is required (or --equivalence)")
             alpha = load_alpha(args.alpha, args.set)
             tag = (args.tag or "").strip()
-            if tag and not getattr(settings, "shock_layer", False) and not getattr(alpha, "shock_exempt", False):
-                # ROADMAP 7.8: from F-pre-B on every evaluation runs with the shock layer, and the trial config hash
-                # leaves the layer out (evaluator policy): a trial without it would be recorded under the hash of the
-                # same configuration evaluated with it
-                raise ValueError("SHOCK_LAYER=false runs only without --tag: a trial is evaluated with the shock layer "
-                                 "(ROADMAP 7.8; the trial config hash does not hold it)")
-            # F-pre-B (ROADMAP 7.8): the shock layer's entry halt is the entry filter (an alpha with shock_exempt takes
-            # none); S0 from the candle database's BTC bars when it has them, S1-S3 from universe.db
-            shock_filter, shock_doc = None, None
-            if getattr(settings, "shock_layer", False):
-                from heartless.strategy import shock as SH
+            from heartless.strategy import shock as SH
 
-                # from S0_LEAD_MS before the window: an S0 firing in the 15 minutes before `start` halts its first
-                # decisions (a schedule reads no BTC 1m bar before its own start)
-                sched = SH.schedule_for(settings, start - SH.S0_LEAD_MS, end)
-                shock_filter = SH.EntryFilter.for_alpha(alpha, sched)
-                shock_doc = {"exempt": shock_filter is None, "firings": sched.counts(start, end),
-                             "missing": sched.meta.get("missing", [])}
+            # ROADMAP 7.8: a trial runs with the shock layer (its config hash does not hold the layer)
+            SH.check_trial_layer(settings, tag, getattr(alpha, "shock_exempt", False))
+            # F-pre-B (ROADMAP 7.8): the shock layer's entry halt is the entry filter (an alpha with shock_exempt takes
+            # none); S0 from the candle database's BTC bars when it has them, S1-S3 from universe.db; the schedule
+            # starts S0_LEAD_MS before the window (shock.evaluator_filter, shared with `heartless neutral`)
+            shock_filter, shock_doc = SH.evaluator_filter(settings, alpha, start, end)
             res = evaluate(alpha, start, end, settings.universe_db_path, symbols=symbols, top=top, stress=args.stress,
                            entry_filter=shock_filter, progress=lambda m: print(m, file=sys.stderr, flush=True))
             print(res.report())

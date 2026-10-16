@@ -34,6 +34,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from heartless.config import EXEC_MODES as ENGINE_EXEC_MODES
 from heartless.learning import seal
 
 LEDGER = seal.REPO_ROOT / "docs" / "results" / "p2_trials.jsonl"
@@ -52,8 +53,9 @@ WAVE_F = {
 # FORWARD blocks: FWD-k = [origin + 30 (k - 1) days, + 30 days) from 2026-10-07 00:00 UTC, as the seal defines them (F4)
 FWD_ORIGIN = seal.FORWARD_ORIGIN_MS
 FWD_BLOCK_MS = seal.FORWARD_BLOCK_MS
-# execution modes of a configuration (ROADMAP 7.7.2); taker is the default and is not hashed
-EXEC_MODES = ("taker", "maker", "maker_m1", "maker_m2")
+# execution modes of a configuration: the engine's (ROADMAP 7.7.2, config.EXEC_MODES); taker is the default and is not
+# hashed. A bare "maker" is no mode the engine trades, so a line recording it would be a trial nothing can rerun
+EXEC_MODES = ENGINE_EXEC_MODES
 DEFAULT_EXEC = "taker"
 
 

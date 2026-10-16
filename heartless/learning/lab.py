@@ -54,8 +54,10 @@ LOOKBACK_MARGIN_MS = 2 * MS_DAY
 # halts, drawdown pause) are switched off: otherwise a losing stretch silences an alpha for the rest of the
 # window and its statistics stop describing the signal. Per-trade sizing and per-symbol limits stay as in live.
 RESEARCH_SETTINGS = {"DAILY_LOSS_LIMIT_PCT": 1000.0, "WEEKLY_LOSS_LIMIT_PCT": 1000.0, "MAX_DRAWDOWN_HALT_PCT": 1000.0}
-# cost stress test: 1.5x fees and 2x slippage; an edge that only exists at nominal costs is not an edge
-STRESS_SETTINGS = {"TAKER_FEE": 0.00075, "MAKER_FEE": 0.0003, "BACKTEST_SLIPPAGE_BPS": 3.0}
+# cost stress test: 1.5x fees and 2x slippage; an edge that only exists at nominal costs is not an edge. A maker limit
+# fills only when a 1m bar trades through it by the whole synthetic spread under stress (0.5 nominal; ROADMAP 7.7.2,
+# docs/EXECUTION.md)
+STRESS_SETTINGS = {"TAKER_FEE": 0.00075, "MAKER_FEE": 0.0003, "BACKTEST_SLIPPAGE_BPS": 3.0, "MAKER_THROUGH_SPREAD": 1.0}
 # a position still open when its symbol stops trading (delisting) leaves at the last traded hour's close with this
 # multiple of the run's slippage (ROADMAP 7.4: 5x nominal, and 5x the doubled stress slippage = 10x nominal)
 DELIST_SLIP_MULT = 5.0
@@ -278,6 +280,8 @@ def _run_symbol(job: dict) -> dict:
         market = ContextTable.load(ctx_store, [sym], sim_start - MS_H, sim_end, source=job["db_path"])
         ctx_store.close()
     settings = Settings(_env_file=None, **{**RESEARCH_SETTINGS, **job.get("settings", {})})
+    if not settings.shock_candle_db:  # S0 of a job without BTC reads the BTC bars of the run's own candle database
+        settings = settings.model_copy(update={"shock_candle_db": str(job["db_path"])})
     for spec in job.get("extra_alphas") or ():
         register_alpha(spec)
     bt = Backtester(settings, {sym: info}, {sym: ca}, funding, metrics, market)
@@ -744,6 +748,47 @@ def _clean(obj):
     return obj
 
 
+def engine_settings(settings) -> dict:
+    """The F-pre-B settings of a lab run handed to every job (a job builds its Settings with _env_file=None, so what the
+    CLI read from .env would not reach it): the shock layer, the book guard and the execution modes the run is hashed
+    and recorded with, UNIVERSE_DB (S1-S3), and SHOCK_CANDLE_DB / SHOCK_SCHEDULE when set (without SHOCK_CANDLE_DB a
+    job reads S0 from the run's own candle database, _run_job)."""
+    out = {"SHOCK_LAYER": bool(settings.shock_layer), "BOOK_GUARD": bool(settings.book_guard),
+           "EXEC_MODE": str(settings.exec_mode), "UNIVERSE_DB": str(settings.universe_db_path)}
+    if settings.shock_candle_db:
+        out["SHOCK_CANDLE_DB"] = str(settings.shock_candle_db)
+    if settings.shock_schedule:
+        out["SHOCK_SCHEDULE"] = str(settings.shock_schedule)
+    return out
+
+
+def run_config(settings, params, only_alpha: str | None, symbols, meta: bool = False,
+               universe: str | None = None) -> dict:
+    """The trial-ledger configuration of a lab run (trials.lab_config) with the execution mode each evaluated alpha
+    really trades with: the parameter set's `exec`, then EXEC_MODE (Settings.exec_for, the engine's precedence), so a
+    maker run chosen by EXEC_MODE alone is not recorded under the taker hash. Taker modes are not hashed."""
+    from heartless.learning import trials
+
+    pd = params.to_dict()
+    cfg = trials.lab_config(pd, only_alpha, symbols, meta=meta, universe=universe)
+    return trials.lab_config(pd, only_alpha, symbols, meta=meta, universe=universe,
+                             exec=settings.exec_for(cfg["alphas"], getattr(params, "exec", None)))
+
+
+def shock_record(settings, alphas, start: int, end: int, progress=None) -> dict | None:
+    """The shock layer of a lab run as its result file and trial line record it (None with SHOCK_LAYER off): whether
+    every evaluated alpha is shock_exempt, the window's firings and the rules not evaluated, from the sources the jobs
+    use (the run's candle database or SHOCK_CANDLE_DB for S0, UNIVERSE_DB for S1-S3; each job builds its own schedule
+    over its loaded history from them)."""
+    if not settings.shock_layer:
+        return None
+    from heartless.strategy import shock as SH
+
+    sched = SH.schedule_for(settings, int(start) - SH.S0_LEAD_MS, int(end), progress=progress)
+    return {"exempt": bool(alphas) and all(SH.is_exempt(a) for a in alphas), "firings": sched.counts(start, end),
+            "missing": sched.meta.get("missing", [])}
+
+
 def main_cli(settings, args) -> None:
     import sys
 
@@ -804,10 +849,13 @@ def main_cli(settings, args) -> None:
 
     # the configuration's identity, as the trial ledger records it: F4 (ROADMAP 7.9) refuses a configuration with an
     # open FORWARD registration on a window overlapping its span (only its confirmation run passes)
-    cfg = trials.lab_config(params.to_dict(), args.alpha, symbols, meta=bool(getattr(args, "meta", False)),
-                            universe=universe)
+    cfg = run_config(settings, params, args.alpha, symbols, meta=bool(getattr(args, "meta", False)), universe=universe)
     try:
         seal.check_window(start, end, unseal, config_hash=trials.config_hash(cfg))
+        from heartless.strategy import shock as SH
+
+        # ROADMAP 7.8: a trial runs with the shock layer (the lab's config hash never held it)
+        SH.check_trial_layer(settings, tag, exempt=bool(cfg["alphas"]) and all(SH.is_exempt(a) for a in cfg["alphas"]))
     except (ValueError, seal.SealedError) as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
@@ -822,6 +870,12 @@ def main_cli(settings, args) -> None:
     extra_settings = dict(STRESS_SETTINGS) if getattr(args, "stress", False) else {}
     if getattr(args, "meta", False):
         extra_settings["META_LABEL"] = True
+    engine = engine_settings(settings)
+    shock_doc = shock_record(settings, cfg["alphas"], start, end)
+    if shock_doc is not None and shock_doc["missing"] and not shock_doc["exempt"]:
+        print(f"warning: shock layer rules {', '.join(shock_doc['missing'])} not evaluated (no BTC data: the candle "
+              f"database or SHOCK_CANDLE_DB for S0, UNIVERSE_DB for S1-S3)"
+              + ("; the trial records it under 'shock'" if tag else ""), file=sys.stderr)
     chunk_days = getattr(args, "chunk_days", None)
     commit, dirty = seal.git_commit(), git_dirty()  # the code state the run starts from (it may change while it runs)
     # top_n: the cross-section mode of the context store (CONTEXT_TOP_N); a store built in top-N mode is refused when
@@ -842,16 +896,19 @@ def main_cli(settings, args) -> None:
         member = {"member_windows": resolution["windows"], "delisted": resolution.get("delisted") or {}}
     try:
         res = evaluate(params, symbols, start, end, str(settings.db_path), only_alpha=args.alpha, workers=args.workers,
-                       settings=extra_settings, chunk_days=chunk_days, unseal=[p for p in unseal if p in touched],
-                       context=context, **member)
+                       settings={**engine, **extra_settings}, chunk_days=chunk_days,
+                       unseal=[p for p in unseal if p in touched], context=context, **member)
     except ContextMismatch as e:  # a context store of another source / universe: refused before any job ran
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
     trial = None
     if tag:
         s = res.summary()
+        # the F-pre-B switches and the shock layer's sources mark the line (the config hash holds neither: ROADMAP 7.8)
         trial = trials.record("lab", tag, cfg, (start, end), n=s["n"], avg_r=s["avg_r"], t_day=s["t_day"],
-                              extra={"stress": bool(getattr(args, "stress", False)), "dirty": dirty, "argv": argv})
+                              extra={"stress": bool(getattr(args, "stress", False)), "dirty": dirty, "argv": argv,
+                                     "engine": {k: engine[k] for k in ("SHOCK_LAYER", "BOOK_GUARD", "EXEC_MODE")},
+                                     "shock": shock_doc})
         n_fam = trials.family_tests(tag)
         print(f"trial ledger: {tag} config {trial['config_hash']} recorded; family N={n_fam}, TRAIN bar t_day >= "
               f"{trials.threshold(n_fam):.2f}", file=sys.stderr)
@@ -872,6 +929,7 @@ def main_cli(settings, args) -> None:
                "wave_f_period": trials.wave_f_period(start, end),
                "universe": universe, "trial": trial,
                "overrides": list(args.set or []), "override_adjustments": notes, "settings_overrides": extra_settings,
+               "engine": engine, "shock": shock_doc,
                "chunk_days": chunk_days, "workers": args.workers, "git_commit": commit,
                "git_dirty": dirty, "seal": seal.status(start, end, unseal), "argv": argv,
                "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}

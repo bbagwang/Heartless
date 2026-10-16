@@ -161,6 +161,7 @@ class NeutralStrategy:
     maintenance: float = MAINTENANCE
     max_positions: int = 8
     warmup_hours: int = 720
+    shock_exempt: bool = False  # ROADMAP 7.8: the shock layer's entry halt does not apply (registered exemptions only)
 
     def __init__(self, **params):
         unknown = set(params) - set(self.defaults)
@@ -557,7 +558,8 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
              unseal=()) -> NeutralResult:
     """Run `strategy` over [start, end] (ms, inclusive) hour by hour (module docstring for the order of events).
     `ctx` may be given directly (tests, synthetic series); otherwise it is loaded from `universe_db`.
-    `entry_filter(symbol, T)` can veto entries (e.g. the shock layer)."""
+    `entry_filter(symbol, T)` can veto entries (the shock layer: shock.evaluator_filter; a filter marked
+    `evaluator_policy` stays out of the config hash)."""
     t0 = time.time()
     start, end = int(start), int(end)
     seal.check_window(start, end, unseal)
@@ -702,7 +704,10 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
         equity.setdefault(d, prev_eq)
     cfg = {"tool": "neutral", **strategy.config(), "universe": f"top{int(top)}" if top else sorted(ctx.symbols),
            "exec": exec}
-    if entry_filter is not None:
+    if entry_filter is not None and not getattr(entry_filter, "evaluator_policy", False):
+        # a filter that is a choice of the configuration is part of its identity; the shock layer is not (the
+        # evaluator's own policy from F-pre-B on, as in the hourly evaluator: a carry / pairs configuration rerun with
+        # the layer keeps its hash and N, and the trial records the layer in `extra`)
         cfg["entry_filter"] = getattr(entry_filter, "__name__", type(entry_filter).__name__)
     return NeutralResult(strategy.name, strategy.family, cfg, start, end, float(capital),
                          {d: daily[d] for d in sorted(daily)}, {d: equity[d] for d in sorted(daily)}, positions_out,
@@ -857,15 +862,29 @@ def main_cli(settings, args) -> None:
         strategy = hourly.load_alpha(args.strategy, args.set)
         if not isinstance(strategy, NeutralStrategy):
             raise ValueError(f"{args.strategy} is not a NeutralStrategy")
-        res = evaluate(strategy, start, end, settings.universe_db_path, symbols=symbols, top=top,
-                       capital=float(args.capital), stress=bool(args.stress))
-        print(res.report())
-        doc = {**res.to_json(), "wave_f_period": trials.wave_f_period(start, end), "argv": list(args.argv),
-               "git_commit": seal.git_commit(),
-               "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
         tag = (args.tag or "").strip()
+        from heartless.strategy import shock as SH
+
+        # F-pre-B (ROADMAP 7.8): the shock layer's entry halt vetoes new positions (rebalances and exits go on); a
+        # trial runs with it, and its config hash does not hold it (the same rule as `heartless hourly`)
+        SH.check_trial_layer(settings, tag, getattr(strategy, "shock_exempt", False))
+        shock_filter, shock_doc = SH.evaluator_filter(settings, strategy, start, end)
+        res = evaluate(strategy, start, end, settings.universe_db_path, symbols=symbols, top=top,
+                       capital=float(args.capital), stress=bool(args.stress), entry_filter=shock_filter)
+        print(res.report())
+        if shock_doc is not None:
+            shock_doc["blocked_decisions"] = shock_filter.blocked if shock_filter is not None else 0
+            print(f"shock layer: {shock_doc['blocked_decisions']} candidate entries blocked; firings "
+                  f"{shock_doc['firings']}" + (" (strategy exempt)" if shock_doc["exempt"] else ""), file=sys.stderr)
+            if shock_doc["missing"] and not shock_doc["exempt"]:
+                print(f"warning: shock layer rules {', '.join(shock_doc['missing'])} not evaluated (no BTC data: "
+                      f"SHOCK_CANDLE_DB for S0, UNIVERSE_DB for S1-S3)"
+                      + ("; the trial records it under 'shock'" if tag else ""), file=sys.stderr)
+        doc = {**res.to_json(), "wave_f_period": trials.wave_f_period(start, end), "argv": list(args.argv),
+               "git_commit": seal.git_commit(), "shock": shock_doc,
+               "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
         if tag:
-            doc["trial"] = record(res, tag, extra={"argv": list(args.argv)})
+            doc["trial"] = record(res, tag, extra={"argv": list(args.argv), "shock": shock_doc})
             n_fam = trials.family_tests(tag)
             print(f"trial ledger: {tag} config {doc['trial']['config_hash']} recorded; family N={n_fam}, TRAIN bar "
                   f"t >= {trials.threshold(n_fam):.2f}", file=sys.stderr)

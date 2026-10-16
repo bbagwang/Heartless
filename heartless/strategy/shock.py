@@ -230,12 +230,16 @@ class _CrossSection:
             closes.append(c)
         return [log_return(closes[i], closes[i - 1]) for i in range(1, len(closes))]
 
-    def value(self, h: int, btc_rets: list[float], eligible: Callable[[str], bool] | None = None) -> float:
-        """The mean correlation with BTC's returns at hour close h over the members."""
+    def value(self, h: int, btc_rets: list[float], eligible: Callable[[str], bool] | None = None,
+              members: Iterable[str] | None = None) -> float:
+        """The mean correlation with BTC's returns at hour close h over the members: `members` when given (the offline
+        path passes context.pit_members'), else this cross-section's own choice (members())."""
         if len(btc_rets) < S3_HOURS or not all(math.isfinite(x) for x in btc_rets):
             return float("nan")
         rows = []
-        for sym in self.members(h, eligible):
+        for sym in (self.members(h, eligible) if members is None else members):
+            if sym not in self.bars:
+                continue
             r = self.returns(sym, h)
             if all(math.isfinite(x) for x in r):
                 rows.append(r)
@@ -543,10 +547,26 @@ def hourly_firings(hours: np.ndarray, closes: np.ndarray, cms: np.ndarray | None
     return out
 
 
+PIT_CHUNK_HOURS = 744  # hour closes per context.pit_members call offline (a month: its grid stays a few MB)
+
+
+def pit_members_by_hour(store, h_from: int, h_to: int) -> dict[int, list[str]]:
+    """{hour close: S3's members} for the hour closes h_from..h_to (multiples of an hour) from context.pit_members, the
+    research context's point-in-time top_n (ROADMAP 6절 2026-10-16: S3 uses the context's member definition) - the one
+    implementation of the rule; the live detector's incremental _CrossSection.members is pinned to it by tests."""
+    from heartless.data import context as C
+
+    # context hour index h closes at (h + 1) h - 1 ms, i.e. at the instant (h + 1) h
+    h_a, h_b = int(h_from) // MS_H - 1, int(h_to) // MS_H - 1
+    syms, mask = C.pit_members(store, h_a, h_b, S3_TOP)
+    return {(h_a + i + 1) * MS_H: [syms[j] for j in np.flatnonzero(mask[i])] for i in range(h_b - h_a + 1)}
+
+
 def cross_section_series(store, hours: np.ndarray, btc_closes: np.ndarray, progress=None) -> np.ndarray:
-    """S3's statistic at every hour close of `hours` (a complete grid) from universe.db: every eligible perpetual's
+    """S3's statistic at every hour close of `hours` (a complete grid) from universe.db: the members of each hour from
+    context.pit_members (pit_members_by_hour, PIT_CHUNK_HOURS at a time), their returns from every eligible perpetual's
     stored bars (universe.eligible_research: USDT perpetual, not a stablecoin) fed hour by hour to the _CrossSection the
-    live detector uses, which picks the context's point-in-time members."""
+    live detector uses (closes carried as there)."""
     out = np.full(len(hours), np.nan)
     if not len(hours):
         return out
@@ -554,13 +574,16 @@ def cross_section_series(store, hours: np.ndarray, btc_closes: np.ndarray, progr
     btc_rets = [float("nan")] + [log_return(float(btc_closes[k]), float(btc_closes[k - 1])) for k in range(1, len(hours))]
     xs = _CrossSection()
     pos = {int(h): k for k, h in enumerate(hours)}
+    members: dict[int, list[str]] = {}
     # the members' own history before the first hour: bars closing from KEEP_HOURS before it
     for h, bars in stored_cross_sections(store, h0 - KEEP_HOURS * MS_H, h1, progress):
         for sym, (c, q) in bars.items():  # the order of pushes does not matter
             xs.push(h, sym, c, q)
         k = pos.get(h)
         if k is not None:
-            out[k] = xs.value(h, btc_rets[max(0, k - S3_HOURS + 1):k + 1])
+            if h not in members:
+                members = pit_members_by_hour(store, h, min(h1, h + (PIT_CHUNK_HOURS - 1) * MS_H))
+            out[k] = xs.value(h, btc_rets[max(0, k - S3_HOURS + 1):k + 1], members=members[h])
         if h % MS_D == 0:
             xs.drop_stale(h)
     return out
@@ -830,3 +853,29 @@ class EntryFilter:
         if events is None or getattr(alpha, "shock_exempt", False):
             return None
         return cls(events)
+
+
+def check_trial_layer(settings, tag: str | None, exempt: bool = False) -> None:
+    """ROADMAP 7.8: from F-pre-B on every evaluation runs with the shock layer, and the trial config hash leaves the
+    layer out (evaluator policy), so a tagged run without it would be recorded under the hash of the same configuration
+    evaluated with it. ValueError for --tag with SHOCK_LAYER=false, unless what is evaluated is `exempt` (shock_exempt
+    alphas take no filter either way: hourly / neutral pass the alpha's flag, the lab whether every evaluated alpha
+    has it)."""
+    if tag and not getattr(settings, "shock_layer", False) and not exempt:
+        raise ValueError("SHOCK_LAYER=false runs only without --tag: a trial is evaluated with the shock layer "
+                         "(ROADMAP 7.8; the trial config hash does not hold it)")
+
+
+def evaluator_filter(settings, alpha, start: int, end: int, progress=None) -> tuple[EntryFilter | None, dict | None]:
+    """The shock layer of an offline evaluator run over [start, end] (`heartless hourly`, `heartless neutral` and the
+    family runners that call those evaluators; backtests build their own over the loaded history): (the entry filter,
+    the record a result file and its trial line keep: exempt, the window's firings, the rules not evaluated), or (None,
+    None) with SHOCK_LAYER off. The schedule starts S0_LEAD_MS before the window: an S0 firing in the 15 minutes before
+    `start` halts its first decisions (a schedule reads no BTC 1m bar before its own start). After the run, the
+    filter's `blocked` is the number of decisions (neutral: candidate entries) it vetoed."""
+    if not getattr(settings, "shock_layer", False):
+        return None, None
+    start, end = int(start), int(end)
+    sched = schedule_for(settings, start - S0_LEAD_MS, end, progress=progress)
+    flt = EntryFilter.for_alpha(alpha, sched)
+    return flt, {"exempt": flt is None, "firings": sched.counts(start, end), "missing": sched.meta.get("missing", [])}

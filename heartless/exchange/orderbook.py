@@ -117,15 +117,17 @@ def features_from_levels(bids: dict[float, float], asks: dict[float, float], k_b
 
 
 def usable_book(f: BookFeatures, max_age_ms: float = MAX_BOOK_AGE_MS) -> bool:
-    """Whether a book can back a book rule (the registered book_guard): a stream book that is synced, fresh (staleness
-    <= max_age_ms) and reaches k on both sides (finite depth), or the modelled 1m-bar proxy. A missing, unsynced,
-    stale or uncovered book is not one: a guard comparing NaN figures would never skip anything."""
+    """Whether a book can back a book rule (the registered book_guard, execution/engine.BookGuard): a stream book that
+    is synced, fresh (staleness <= max_age_ms) and reaches k on both sides (covered_bps >= k_bps, finite depth), or the
+    modelled 1m-bar proxy. A missing, unsynced, stale or uncovered book is not one: a guard comparing NaN figures would
+    never skip anything. features_from_levels already leaves the depth NaN below k; the coverage is checked here too so
+    a book whose coverage is unknown (NaN covered_bps or k_bps) never passes on depth figures alone."""
     if f.source == "proxy":
         return f.depth_bid_k == f.depth_bid_k and f.spread_bps == f.spread_bps
     if f.source != "stream":
         return False
     figs = (f.spread_bps, f.depth_bid_k, f.depth_ask_k, f.imbalance, f.staleness_ms)
-    return all(x == x for x in figs) and f.staleness_ms <= max_age_ms
+    return all(x == x for x in figs) and f.staleness_ms <= max_age_ms and f.covered_bps >= f.k_bps
 
 
 def _levels(rows) -> dict[float, float]:

@@ -19,7 +19,9 @@ from heartless.core.models import (Decision, EntryStyle, Fill, Position, Positio
                                    TradeRecord)
 from heartless.core.store import Store
 from heartless.data.features import MarketView
+from heartless.exchange import orderbook as _OB
 from heartless.exchange.base import Account, OrderResult
+from heartless.exchange.orderbook import MAX_BOOK_AGE_MS as BOOK_MAX_AGE_MS  # noqa: F401  (tests, docs)
 from heartless.exchange.symbols import min_qty_for_notional, norm_price, norm_qty
 from heartless.execution.allocator import Candidate, PortfolioAllocator
 from heartless.learning.bandit import AlphaBandit
@@ -48,8 +50,8 @@ class BookGuard:
     BOOK_GUARD_SPREAD_MULT x its prior-24h median and >= BOOK_GUARD_MIN_SPREAD_BPS, or the depth within
     +-ORDERBOOK_DEPTH_BPS (both sides) < BOOK_GUARD_DEPTH_FRAC x its prior-24h median, or - the missing-book clause
     (ROADMAP 7.11 and 6절 2026-10-16, red-team F-M6) - ORDERBOOK_STREAM is on and ctx.book cannot back the rule
-    (usable_book false: no book, unsynced, stale, NaN figures or levels short of +-k; a defined 1m-bar proxy, which the
-    backtester and the replay serve under ORDERBOOK_STREAM, is usable).
+    (exchange/orderbook.usable_book false: no book, unsynced, stale, NaN figures or covered_bps short of k; a defined
+    1m-bar proxy, which the backtester and the replay serve under ORDERBOOK_STREAM, is usable).
 
     The figures are the live stream book's when it is usable (usable_stream_book: synced, fresh, its levels reaching
     +-k on both sides; one sample per minute is kept per symbol) or, without a stream book (backtests, replays, live
@@ -117,28 +119,17 @@ class BookGuard:
         return ""
 
 
-# a stream book older than this is not the market (exchange/orderbook.MAX_BOOK_AGE_MS of the red-team fix F-M6)
-BOOK_MAX_AGE_MS = 3_000
+def usable_book(b) -> bool:
+    """exchange/orderbook.usable_book, the registered check of the book guard's missing-book clause (red-team F-M5 /
+    F-M6): a fresh, synced stream book whose levels cover +-k (covered_bps >= k_bps, finite depth), or a 1m-bar proxy
+    with defined spread and depth. A missing ("none" / no ctx.book), stale, unsynced or uncovered book is not one."""
+    return b is not None and _OB.usable_book(b)
 
 
 def usable_stream_book(b) -> bool:
-    """Whether a ctx.book can back the book guard as a live stream book: source "stream", synced and covering +-k on both
-    sides (finite spread, depths and imbalance: a book whose levels stop short of k reads NaN depth) and fresh
-    (staleness <= BOOK_MAX_AGE_MS). The stream half of exchange/orderbook.usable_book (red-team F-M5 / F-M6): a guard
-    comparing NaN figures would never hold anything."""
-    if getattr(b, "source", "none") != "stream":
-        return False
-    figs = (b.spread_bps, b.depth_bid_k, b.depth_ask_k, b.imbalance, b.staleness_ms)
-    return all(x == x for x in figs) and b.staleness_ms <= BOOK_MAX_AGE_MS
-
-
-def usable_book(b) -> bool:
-    """exchange/orderbook.usable_book of the red-team fix (wave-f-merge), which this branch's orderbook.py predates: a
-    usable stream book (usable_stream_book) or a 1m-bar proxy with defined spread and depth; a missing ("none"), stale,
-    unsynced or uncovered book is not one. tests/test_fpreB_book_guard.py compares the two wherever both exist."""
-    if getattr(b, "source", "none") == "proxy":
-        return b.depth_bid_k == b.depth_bid_k and b.spread_bps == b.spread_bps
-    return usable_stream_book(b)
+    """Whether a ctx.book can back the book guard as a live stream book: usable_book and source "stream" (a proxy is
+    judged by the guard's own on-demand series, book_proxy_series, not sampled)."""
+    return getattr(b, "source", "none") == "stream" and usable_book(b)
 
 
 def book_proxy_series(frame, now: int, k_bps: float, tick: float, n: int) -> tuple[np.ndarray, np.ndarray]:

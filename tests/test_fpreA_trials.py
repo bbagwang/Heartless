@@ -105,14 +105,15 @@ def test_reruns_keep_n_and_lines_carry_the_labels(ledger):
     trials.record("screen", "carry_neutral", {**cfg, "exec": "taker"}, trials.fwd_span(2), n=2)
     trials.record("hourly", "carry_neutral", cfg, (W["TRAIN-B"][0], W["TRAIN-B"][1] - 1), n=5)
     assert trials.family_tests("carry_neutral") == 1  # one configuration, five evaluations
-    trials.record("neutral", "carry_neutral", {**cfg, "exec": "maker"}, train, n=10)
+    trials.record("neutral", "carry_neutral", {**cfg, "exec": "maker_m1"}, train, n=10)
     assert trials.family_tests("carry_neutral") == 2  # the maker variant is a new trial
     fam = trials.summary(trials.load())["carry_neutral"]
     assert fam["wave_f"] == {"TRAIN-F": 3, "VALID-F": 1, "FWD-02": 1, "TRAIN-B": 1}
     assert fam["tools"] == {"screen": 4, "hourly": 1, "neutral": 1} and fam["configs"] == 2
     rep = trials.report(trials.load(), "carry_neutral")
-    assert "FWD-02" in rep and "exec=maker" in rep and "stress" in rep
-    with pytest.raises(ValueError, match="unknown execution mode"):
-        trials.record("screen", "carry_neutral", {**cfg, "exec": "limit"}, train)
+    assert "FWD-02" in rep and "exec=maker_m1" in rep and "stress" in rep
+    for bad in ("limit", "maker"):  # "maker" is no mode the engine trades (config.EXEC_MODES)
+        with pytest.raises(ValueError, match="unknown execution mode"):
+            trials.record("screen", "carry_neutral", {**cfg, "exec": bad}, train)
     with pytest.raises(ValueError, match="unknown trial tool"):
         trials.record("gate", "carry_neutral", cfg, train)

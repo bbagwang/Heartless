@@ -2,7 +2,6 @@
 the guard's spread / depth rules against the symbol's own prior 24 hours (stream samples and proxy alike), and the
 engine holding an entry in a backtest only while the guard is on."""
 import numpy as np
-import pytest
 
 from heartless.config import Settings
 from heartless.core.models import Candle
@@ -49,9 +48,9 @@ def _ctx(book=None):
                    book=book or BookFeatures())
 
 
-def _stream(spread, depth_side, age=50.0):
+def _stream(spread, depth_side, age=50.0, covered=12.0):
     return BookFeatures(spread_bps=spread, imbalance=0.0, depth_bid_k=depth_side, depth_ask_k=depth_side,
-                        staleness_ms=age, source="stream")
+                        staleness_ms=age, k_bps=10.0, source="stream", covered_bps=covered)
 
 
 def test_guard_rules_on_stream_samples():
@@ -151,7 +150,9 @@ def _unusable_books():
             _stream(1.0, 5e5, age=BOOK_MAX_AGE_MS + 1),  # stale
             BookFeatures(spread_bps=1.0, staleness_ms=50.0, source="stream"),  # levels short of +-k (NaN depth)
             BookFeatures(k_bps=10.0, source="stale"),  # the red-team orderbook's stale marker (wave-f-merge)
-            BookFeatures(k_bps=10.0, source="proxy")]  # a proxy without bars
+            BookFeatures(k_bps=10.0, source="proxy"),  # a proxy without bars
+            _stream(1.0, 5e5, covered=9.5),  # depth figures but levels reaching only 9.5 bp (coverage flag below k)
+            _stream(1.0, 5e5, covered=float("nan"))]  # depth figures without a known coverage
 
 
 def test_missing_book_clause_with_the_stream_on():
@@ -191,12 +192,36 @@ def test_backtest_under_the_stream_judges_the_proxy_book(monkeypatch, tmp_path):
     assert runs[True] == runs[False] and runs[True][0] == [times[0] + 1] and runs[True][1] == 1
 
 
-@pytest.mark.skipif(not hasattr(OB, "usable_book"), reason="orderbook.usable_book is the red-team fix (wave-f-merge)")
 def test_usable_book_matches_the_orderbook_rule():
-    """engine.usable_book is orderbook.usable_book (red-team F-M5 / F-M6) on every kind of book; a drift between the two
-    after the merge fails here."""
+    """engine.usable_book is orderbook.usable_book (red-team F-M5 / F-M6, wired at the F-pre-B integration) on every
+    kind of book, including the coverage flag (covered_bps >= k_bps); no ctx.book at all is no book."""
     books = _unusable_books() + [_stream(1.0, 5e5), _stream(1.0, 5e5, age=BOOK_MAX_AGE_MS),
+                                 _stream(1.0, 5e5, covered=10.0),
                                  proxy_from_frame(FeatureFrame("1m", _calm_then_wild()), 1_700_006_400_000 + 1980 * MIN,
                                                   10.0, 0.01)]
     for b in books:
         assert usable_book(b) == OB.usable_book(b), b
+    assert BOOK_MAX_AGE_MS == OB.MAX_BOOK_AGE_MS and not usable_book(None) and not usable_stream_book(None)
+    assert usable_book(_stream(1.0, 5e5, covered=10.0)) and not usable_book(_stream(1.0, 5e5, covered=9.99))
+
+
+def test_a_book_from_the_stream_reaches_the_guard_with_its_coverage():
+    """A real stream book (features_from_levels): levels reaching +-12 bp are usable and judged on their samples; the
+    same book cut at +-6 bp (covered_bps < k) is held under ORDERBOOK_STREAM, and is never sampled."""
+    mid = 100.0
+    bids = {round(mid - 0.01 * k, 2): 5_000.0 for k in range(1, 13)}  # 1..12 bp below the mid
+    asks = {round(mid + 0.01 * k, 2): 5_000.0 for k in range(1, 13)}
+    full = OB.features_from_levels(bids, asks, 10.0, 20.0)
+    cut = OB.features_from_levels({p: q for p, q in bids.items() if p >= 99.94},
+                                  {p: q for p, q in asks.items() if p <= 100.06}, 10.0, 20.0)
+    assert full.covered_bps >= 10.0 and usable_stream_book(full)
+    assert cut.covered_bps < 10.0 and not usable_book(cut) and not usable_stream_book(cut)
+    fr = FeatureFrame("1m", _calm_then_wild())
+    calm = int(fr.close_time[1980])
+    g = BookGuard(Settings(_env_file=None, ORDERBOOK_STREAM=True, BOOK_GUARD=True))
+    assert g.check(_V(fr), _ctx(full), calm, 0.01) == ""
+    assert g.check(_V(fr), _ctx(cut), calm, 0.01) == "book guard: no usable book"
+    g.observe(_ctx(cut), calm)
+    assert g.samples == {}
+    g.observe(_ctx(full), calm)
+    assert len(g.samples["XUSDT"]) == 1
