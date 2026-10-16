@@ -1,6 +1,6 @@
 # 급변 대응 층 (F-pre-B)
 
-ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코드는 `heartless/strategy/shock.py` 하나이고, 백테스터·lab·시간 단위 평가기·운영 엔진이 같은 코드를 씁니다. 정의값은 등록(`docs/results/wave_f_registration.json` 의 `shock_protocol`)에 고정되어 있고, 성과를 보고 고치지 않습니다.
+ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코드는 `heartless/strategy/shock.py` 하나이고, 백테스터·lab·시간 단위 평가기·두 다리 중립 평가기·운영 엔진이 같은 코드를 씁니다. 정의값은 등록(`docs/results/wave_f_registration.json` 의 `shock_protocol`)에 고정되어 있고, 성과를 보고 고치지 않습니다.
 
 ## 1. 감지 규칙
 
@@ -23,7 +23,7 @@ ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코�
   - BTC 도 다른 종목처럼 구성원이 됩니다(자기 상관 1). 상장 경과일 조건은 컨텍스트 정의에 없으므로 두지 않습니다.
   - 각 구성원의 수익률은 최대 24시간 이월한 종가로 계산합니다(`context._carried` 와 같은 규칙). 24개 수익률이 다 정의되지 않은 구성원은 평균에서 빠지고, 다음 순위로 채우지 않습니다.
   - 분산이 0인 종목은 상관에서 빠집니다. 상관이 20개 미만이면 그 시간 값은 없음(NaN)입니다.
-  - 병합 뒤 `context.pit_members` 와 구성원이 같은지 확인하는 테스트(`tests/test_fpreB_shock.py`)가 그 함수가 있을 때 자동으로 돕니다.
+  - 오프라인 일정(`cross_section_series`)은 각 정시의 구성원을 `context.pit_members` 에서 직접 받습니다(744시간씩, `pit_members_by_hour`; F-pre-B 통합). 규칙의 구현은 그 하나입니다. 온라인 감지기(`_CrossSection.members`)는 한 시간씩 들어오는 봉으로 같은 규칙을 점진적으로 계산하고, `tests/test_fpreB_shock.py` 가 매 정시 `context.pit_members` 와 같은 집합인지, 오프라인 통계와 비트 단위로 같은지 확인합니다. 장기 `universe.db` 에서 통합 전 코드와 S3 통계가 바이트 단위로 같습니다(2026-04 ~ 06, TRAIN-F 전체; 6절).
 - **수치 재현성**: 합은 모두 `math.fsum`(정확 반올림), 로그·제곱근은 스칼라 `math` 함수, 중앙값은 정렬입니다. 그래서 오프라인 계산과 온라인 계산이 비트 단위로 같습니다.
 
 ## 2. 시각 규약
@@ -52,9 +52,9 @@ ROADMAP 7.8절의 급변 대응 프로토콜을 구현한 문서입니다. 코�
 | 경로 | 연결 | 상태 |
 |---|---|---|
 | 백테스터 (`learning/backtester.py`) | `Backtester(shock="auto")`: SHOCK_LAYER 가 켜져 있으면 불러온 이력 전체에 대해 한 번 계산해 모든 실행에 씁니다. S0 는 실행 자신의 BTCUSDT 1분봉, 없으면 SHOCK_CANDLE_DB 의 BTC. S1~S3 는 UNIVERSE_DB | 완료 |
-| lab (`learning/lab.py`) | 작업자마다 Backtester 가 위 규칙으로 일정을 만듭니다(프로세스 안 캐시). SHOCK_SCHEDULE 을 주면 그 파일을 읽고, 없으면 써 둡니다 | 동작함. 부모 프로세스에서 한 번 만드는 연결은 6절 |
+| lab (`learning/lab.py`) | 작업자마다 Backtester 가 위 규칙으로 일정을 만듭니다(프로세스 안 캐시). SHOCK_SCHEDULE 을 주면 그 파일을 읽고, 없으면 써 둡니다. CLI 는 `SHOCK_LAYER`·`BOOK_GUARD`·`EXEC_MODE`·`UNIVERSE_DB`(주어지면 `SHOCK_CANDLE_DB`·`SHOCK_SCHEDULE`)를 모든 작업에 넘기고(작업은 `.env` 를 읽지 않음, `lab.engine_settings`), `SHOCK_CANDLE_DB` 가 없으면 작업은 실행 자신의 캔들 DB 에서 S0 를 읽습니다. 결과 문서와 원장 줄에 `engine`(세 스위치)과 `shock`(창의 발동 수, 평가하지 못한 규칙, `lab.shock_record`)을 남기고, `--tag` 는 층이 켜져 있어야 합니다(평가하는 알파가 모두 `shock_exempt` 면 예외) | 완료(통합). 부모에서 일정을 한 번 만들어 작업에 나눠 주는 효율 연결은 6절 |
 | 시간 단위 평가기 (`learning/hourly.py`) | `heartless hourly` 가 `EntryFilter.for_alpha(alpha, schedule)` 를 `entry_filter` 로 넘깁니다. 결과 JSON 과 원장 줄의 `shock` 에 발동 수와 막힌 결정 수. 층은 평가기의 정책이라(`EntryFilter.evaluator_policy`) 구성 해시에 넣지 않습니다. lab 해시도 층을 담지 않으므로, 한 구성의 TRAIN·스트레스·VALID·FORWARD 실행이 층 도입 전후로 같은 해시입니다. 그래서 `--tag` 실행(원장 기록)은 `SHOCK_LAYER` 가 켜져 있어야 하고, 꺼져 있으면 평가 전에 거부합니다(`shock_exempt` 알파는 예외, 검토에서 추가). 규칙이 평가되지 못하면(BTC 데이터 없음) 경고하고 `shock.missing` 에 남깁니다 | 완료 |
-| 두 다리 중립 평가기 (`learning/neutral.py`) | `EntryFilter` 는 스칼라 시각도 받습니다(`entry_filter(symbol, T) -> bool`) | 연결은 6절 |
+| 두 다리 중립 평가기 (`learning/neutral.py`) | `heartless neutral` 이 `shock.evaluator_filter`(창 시작 `S0_LEAD_MS` 앞부터의 일정, `EntryFilter.for_alpha`)를 `entry_filter` 로 넘겨 새 포지션만 막습니다(리밸런스·청산·청산 단계의 상장폐지는 그대로). 결과 JSON 과 원장 줄의 `shock` 에 발동 수와 막힌 후보 진입 수. 층은 구성 해시에 넣지 않고(`evaluator_policy`, 시간 단위 평가기와 같은 규칙), `--tag` 는 층이 켜져 있어야 합니다(`shock.check_trial_layer`, `heartless hourly` 와 공용). `N.evaluate` 를 직접 부르는 계열 실행기는 `entry_filter=shock.evaluator_filter(settings, strategy, start, end)[0]` 로 같은 층을 씁니다 | 완료(통합) |
 | 킬 스위치·리서치 창 (`learning/research.py`) | `AlphaKillSwitch.evaluate` 의 경보선은 `shock_kill_switch_h(app, now, KILL_SWITCH_H)`, 리서치 사이클 창은 `ResearchManager.lookback_days(now)`. 둘 다 앱의 `app.shock`(운영 감지기)에게 묻고, 없거나 SHOCK_LAYER 가 꺼져 있으면 설정값 그대로 | 완료. 앱이 `app.shock` 을 붙이면 작동(5절) |
 | 운영 (`app.py`) | `ShockDetector` 를 `app.shock` 과 모든 엔진의 `TradingEngine.shock` 으로 | F6, 5절 |
 
@@ -94,11 +94,12 @@ det.research_lookback_days(now, settings.research_lookback_days)  # 리서치 �
 
 ## 6. 다른 파일에 필요한 연결
 
-전체 목록은 `docs/EXECUTION.md` 7절입니다. 충격 층에 해당하는 것:
+전체 목록은 `docs/EXECUTION.md` 7절입니다. 충격 층에 해당하는 것과 F-pre-B 통합(`wave-f-merge`)에서의 처리:
 
-- `learning/lab.py`: `evaluate()` 가 작업을 나누기 전에 `shock.schedule_for(settings, start − warm-up, end)` 로 일정을 만들어 파일에 저장하고 작업 설정에 `SHOCK_SCHEDULE` 과 `SHOCK_CANDLE_DB`(작업의 캔들 DB)를 넣으면, 작업마다 다시 계산하지 않습니다. 지금도 결과는 같습니다(작업자마다 계산). `--tag` 실행은 원장에 `SHOCK_LAYER` 를 남기고, 꺼져 있으면 거부하거나 경고합니다(7.8: F-pre-B 이후 lab 결과에는 대응 1과 S0 가 들어감).
-- `learning/neutral.py`: CLI 에서 `EntryFilter(schedule)` 를 `entry_filter` 로 넘기고, 막힌 결정 수와 발동 수를 결과 문서와 원장 `extra` 에 남깁니다. 구성의 `entry_filter` 항목은 `getattr(entry_filter, "evaluator_policy", False)` 이면 넣지 않습니다(시간 단위 평가기와 같은 규칙).
-- `app.py`: 5절. 시작 메시지의 킬 스위치 설명(`-{kill_switch_h}σ`)은 충격 뒤 30일 동안 실제 경보선(`app.shock.kill_switch_h(now, …)`)을 보여 주어야 합니다. 리서치 창을 쓰는 다른 곳(`_ensure_context` 의 컨텍스트 채움 범위)은 120일 그대로 두어도 됩니다(45일은 그 안에 있음).
+- `learning/lab.py`: **처리함.** 작업 설정에 `SHOCK_LAYER`·`BOOK_GUARD`·`EXEC_MODE`·`UNIVERSE_DB` 를 넘기고, `SHOCK_CANDLE_DB` 가 없으면 작업이 자기 캔들 DB 에서 S0 를 읽습니다. `--tag` 는 층이 꺼져 있으면 거부하고, 원장 줄과 `--out` 문서에 `engine`·`shock` 을 남깁니다. **남음(효율만, 결과는 같음)**: 부모에서 일정을 한 번 만들어 `SHOCK_SCHEDULE` 로 나눠 주는 일. 작업마다 불러온 이력(워밍업·번인·런오프)을 모두 덮는 구간이어야 하고, 덮지 못하면 작업이 공유 파일을 자기 구간으로 다시 쓰므로 그 구간 계산을 lab 의 작업 분할과 함께 정해야 합니다.
+- `learning/neutral.py`: **처리함.** 위 4절 표. 이미 원장에 있는 캐리·페어 구성은 층을 켜고 다시 돌려도 해시와 N 이 그대로입니다.
+- `data/context.py`: **처리함.** 오프라인 S3 구성원은 `context.pit_members` 그대로입니다(1절).
+- `app.py`: 5절(F6). 시작 메시지의 킬 스위치 설명(`-{kill_switch_h}σ`)은 충격 뒤 30일 동안 실제 경보선(`app.shock.kill_switch_h(now, …)`)을 보여 주어야 합니다. 리서치 창을 쓰는 다른 곳(`_ensure_context` 의 컨텍스트 채움 범위)은 120일 그대로 두어도 됩니다(45일은 그 안에 있음).
 
 ## 7. 보고 (성과 수치 없음)
 

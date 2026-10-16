@@ -31,7 +31,7 @@ ROADMAP 7.7.2절(메이커 체결 프로토콜), 7.11절(호가 이상 시 진�
 - **다음 봉부터**: 봉 마감에 결정한 주문은 다음 봉에 호가에 올라가므로 그 봉이 "주문을 넣은 봉"입니다. 체결은 그다음 1분봉부터 셉니다(`paper.maker_eligible_from`). 운영에서 봉 중간에 넣은 주문도 같은 식입니다.
 - **거래대금**: 그 1분봉의 거래대금이 주문 명목의 `MAKER_MIN_VOLUME_MULT`(기본 20)배보다 작으면 그 봉에서는 체결되지 않습니다.
 - **가격과 비용**: 지정가에 체결, 메이커 수수료 2bp, 슬리피지 0.
-- **스트레스**: `MAKER_THROUGH_SPREAD=1.0`(스프레드 전체), 수수료 ×1.5, 테이커 슬리피지 ×2(lab 의 `STRESS_SETTINGS` 에 `MAKER_THROUGH_SPREAD` 를 더해야 함, 7절).
+- **스트레스**: `MAKER_THROUGH_SPREAD=1.0`(스프레드 전체), 수수료 ×1.5, 테이커 슬리피지 ×2(lab 의 `STRESS_SETTINGS`, F-pre-B 통합에서 더함).
 - **틱 모드**(운영 페이퍼, 리플레이): 메이커 주문은 틱으로 체결되지 않고, 마감된 1분봉마다 `PaperAccount.on_bar_close(symbol, candle)` 가 위 규칙으로 판정합니다(체결 시각은 봉 마감). 봉 모드는 같은 판정을 봉 경로 안에서 합니다. 판정식은 하나(`_maker_through`)입니다.
 
 ## 3. 호가 이상 시 진입 보류 (`BOOK_GUARD`, 기본 켜짐)
@@ -43,8 +43,8 @@ ROADMAP 7.7.2절(메이커 체결 프로토콜), 7.11절(호가 이상 시 진�
 - **결측 조항**(ROADMAP 7.11, 6절 2026-10-16 레드팀 반영 기록): `ORDERBOOK_STREAM` 이 켜져 있는데 쓸 책이 없음(`skipped["book guard"]`, 사유 `book guard: no usable book`). 책이 없거나(앱이 책 계산에 실패해 `EMPTY_BOOK` 을 준 경우 포함), 동기화되지 않았거나, 3초 넘게 갱신이 없거나, 값이 NaN 이거나, 호가가 ±k 까지 닿지 않는 경우입니다. 이때는 대용치로 판정하지 않습니다. 대용치는 지금 빠진 실시간 호가를 볼 수 없기 때문입니다.
 
 - 값의 원천: 쓸 수 있는 실시간 호가가 있으면 그 값과 분당 표본 1개씩 쌓은 직전 1,440분. 실시간 호가가 없는 곳(백테스트, 리플레이, 스트림을 끈 운영)에서는 1분봉 대용치(`orderbook.bar_book_proxy` 와 같은 식, `engine.book_proxy_series` 로 진입 순간에만 계산)를 지금 값과 직전 값 모두에 씁니다. 기준이 종목 자신의 평소 값 대비 비율이라 대용치에서도 뜻이 같습니다.
-- "쓸 수 있는 책"(`engine.usable_book`)은 레드팀 수정(F-M5·F-M6)의 `orderbook.usable_book` 과 같은 판정입니다. 실시간 호가(`engine.usable_stream_book`)는 `source == "stream"` 이고, 스프레드·양쪽 깊이·불균형이 모두 정의되며(호가 단계가 ±k 까지 닿음), 마지막 갱신이 3초(`BOOK_MAX_AGE_MS`) 안이어야 합니다. 대용치(`source == "proxy"`)는 스프레드와 깊이가 정의되면(1분봉이 있으면) 쓸 수 있습니다. 그래서 `ORDERBOOK_STREAM` 을 켠 백테스트·리플레이(대용치 책)의 판정은 스트림을 끈 것과 같습니다. 오래되었거나 ±k 에 못 미치는 호가(예: 부분 스트림 20단계로는 BTC 의 ±10bp 를 덮지 못함)는 표본에 넣지 않습니다. NaN 끼리 비교해 아무것도 보류하지 않는 일이 없게 하기 위해서입니다.
-- 병합 뒤에는 `tests/test_fpreB_book_guard.py` 가 `engine.usable_book` 과 `orderbook.usable_book` 을 모든 종류의 책에서 비교합니다.
+- "쓸 수 있는 책"(`engine.usable_book`)은 레드팀 수정(F-M5·F-M6)의 `orderbook.usable_book` 그 자체입니다(F-pre-B 통합에서 연결, 책이 아예 없으면 거짓). 실시간 호가(`engine.usable_stream_book`)는 `source == "stream"` 이고, 스프레드·양쪽 깊이·불균형이 모두 정의되며, 호가 단계가 닿는 거리 `covered_bps` 가 `k_bps` 이상이고(깊이를 잴 수 있음), 마지막 갱신이 3초(`BOOK_MAX_AGE_MS` = `orderbook.MAX_BOOK_AGE_MS`) 안이어야 합니다. 대용치(`source == "proxy"`)는 스프레드와 깊이가 정의되면(1분봉이 있으면) 쓸 수 있습니다. 그래서 `ORDERBOOK_STREAM` 을 켠 백테스트·리플레이(대용치 책)의 판정은 스트림을 끈 것과 같습니다. 오래되었거나 ±k 에 못 미치는 호가(예: 부분 스트림 20단계로는 BTC 의 ±10bp 를 덮지 못함)는 표본에 넣지 않습니다. NaN 끼리 비교해 아무것도 보류하지 않는 일이 없게 하기 위해서입니다.
+- `tests/test_fpreB_book_guard.py` 가 `engine.usable_book` 과 `orderbook.usable_book` 을 모든 종류의 책(덮는 거리가 k 에 못 미치거나 모르는 책 포함)에서 비교하고, `features_from_levels` 로 만든 실제 스트림 책이 덮는 거리에 따라 보류되는지 확인합니다.
 - 직전 표본이 720분 미만이면 판정하지 않습니다(새 스트림, 짧은 이력).
 - `ctx.book` 자체는 바뀌지 않습니다. 알파는 F-pre-B 이전과 같은 값을 봅니다.
 
@@ -99,22 +99,22 @@ ROADMAP 7.7.2절(메이커 체결 프로토콜), 7.11절(호가 이상 시 진�
 
 ## 7. 다른 파일에 필요한 연결
 
-이 브랜치는 아래 파일을 건드리지 않습니다(다른 흐름의 담당). 병합 뒤 각 담당이 연결합니다.
+F-pre-B 브랜치는 아래 파일을 건드리지 않았습니다(다른 흐름의 담당). F-pre-B 통합(`wave-f-merge`, 병합 deddd30, 연결 ae13da6)에서 처리한 것과 남은 것입니다.
 
-`wave-f-merge`(a432463)와의 시험 병합은 충돌 없이 되고, 병합 트리에서 `tests/test_fpreB_*.py`, `tests/test_fpreA_*.py`, `tests/test_rt_context_pit.py`, `tests/test_rt_orderbook.py` 120개가 모두 통과합니다(S3 구성원과 `context.pit_members` 비교 테스트 포함).
-
-- `learning/lab.py`
-  - `STRESS_SETTINGS` 에 `"MAKER_THROUGH_SPREAD": 1.0` 을 더합니다(스트레스 메이커 관통 폭 = 스프레드 전체).
-  - 원장 해시의 체결 방식: `cfg = trials.lab_config(params.to_dict(), args.alpha, symbols, ..., exec=settings.exec_for(평가 알파들, params.exec))`. 지금은 파라미터 세트의 `exec` 만 해시에 들어가고, `EXEC_MODE` 로만 정한 방식은 taker 로 기록됩니다. 작업 설정(`settings=`)에도 `EXEC_MODE` 를 명시해 넘기면 작업자 환경에 기대지 않습니다.
-  - 충격 층 기록: `--tag` 실행의 원장 `extra` 와 `--out` 문서에 `SHOCK_LAYER`·`BOOK_GUARD`·`EXEC_MODE` 를 남깁니다. ROADMAP 7.8 대로 F-pre-B 이후 lab 결과에는 대응 1과 S0 가 들어가야 하므로, `SHOCK_LAYER=false` 인 `--tag` 실행은 거부하거나 경고하는 편이 맞습니다.
-  - 효율(결과는 같음): `evaluate()` 가 작업을 나누기 전에 `shock.schedule_for(settings, 창 시작 − 워밍업, 창 끝)` 을 한 번 만들어 파일로 저장하고 작업 설정에 `SHOCK_SCHEDULE` 을, 작업의 캔들 DB 를 `SHOCK_CANDLE_DB` 로 넘깁니다. `--db` 가 데이터 폴더의 DB 가 아닐 때 S0 원천이 어긋나지 않게 하려면 `SHOCK_CANDLE_DB` 는 꼭 넘겨야 합니다.
-  - 상장폐지: 지금처럼 `delisted` 를 Backtester 에 넘기지 않으면 아무것도 바꿀 필요가 없습니다. 넘기게 되면 lab 의 재가격(`delisting_close`)을 지우고, 보고(`delisting_closes`)는 `exit_reason == "delisting"` 에서 읽습니다. 둘이 같이 있어도 두 번 청구되지는 않습니다(`tests/test_fpreB_engine.py`).
-- `learning/discovery.py`: `frame_features` 의 `vwap_z` 를 `features.vwap_z(frame, idx)` 로 바꿉니다(새 피처 버전).
-- `learning/trials.py`: `EXEC_MODES` 가 아직 `"maker"` 를 받습니다. 엔진은 `taker`·`maker_m1`·`maker_m2` 만 거래하므로 `config.EXEC_MODES` 를 가져다 쓰거나 `"maker"` 를 빼서, 원장 줄에 엔진이 거래하지 않는 방식이 남지 않게 합니다.
-- `learning/neutral.py`: CLI 에서 `SHOCK_LAYER` 가 켜져 있으면 `shock.EntryFilter(shock.schedule_for(settings, start, end))` 를 `entry_filter` 로 넘기고, 막힌 결정 수(`flt.blocked`)와 `sched.counts(start, end)` 를 결과 문서와 원장 `extra` 에 남깁니다(`heartless hourly` 와 같은 모양). `evaluate()` 의 `cfg["entry_filter"]` 는 `evaluator_policy` 인 필터면 넣지 않습니다(층은 구성이 아니라 평가기의 정책).
-- `exchange/orderbook.py`: 대용치 식(`bar_book_proxy`, `PROXY_*` 상수)을 바꾸면 `engine.book_proxy_series` 도 같이 바꿔야 합니다(`tests/test_fpreB_book_guard.py` 가 둘을 봉마다 비교합니다). `usable_book` 과 `engine.usable_stream_book` 은 같은 판정이어야 합니다.
-- `data/context.py`: S3 구성원은 `context.pit_members` 와 같아야 합니다. 병합 뒤 `tests/test_fpreB_shock.py` 의 비교 테스트가 자동으로 돕니다.
-- `app.py`(F6)
-  - 충격 층: `docs/SHOCK.md` 5절(`ShockDetector` 를 `prime`, `app.shock`, 모든 엔진의 `shock` 으로; BTC 1분봉마다 `observe_minute`, 정시마다 `observe_hour`; `_btc_shock_check` 제거).
+- `learning/lab.py` — **처리함**
+  - `STRESS_SETTINGS` 에 `"MAKER_THROUGH_SPREAD": 1.0`(스트레스 메이커 관통 폭 = 스프레드 전체).
+  - 원장 해시의 체결 방식: `lab.run_config` 가 `trials.lab_config(..., exec=settings.exec_for(평가 알파들, params.exec))` 를 씁니다. `EXEC_MODE` 로만 정한 메이커 실행도 그 방식으로 해시됩니다(taker 는 해시에 들어가지 않아 기존 해시 그대로).
+  - 작업 설정: `SHOCK_LAYER`·`BOOK_GUARD`·`EXEC_MODE`·`UNIVERSE_DB`(주어지면 `SHOCK_CANDLE_DB`·`SHOCK_SCHEDULE`)를 모든 작업에 명시해 넘깁니다(`lab.engine_settings`; 작업은 `.env` 를 읽지 않음). `SHOCK_CANDLE_DB` 가 없으면 작업은 실행 자신의 캔들 DB 에서 S0 를 읽습니다(`lab --db` 와 데이터 폴더가 달라도 어긋나지 않음).
+  - 기록: `--tag` 실행의 원장 줄에 `engine`(`SHOCK_LAYER`·`BOOK_GUARD`·`EXEC_MODE`)과 `shock`(창의 발동 수, 평가하지 못한 규칙), `--out` 문서에 `engine`(작업에 넘긴 값)과 `shock`. `SHOCK_LAYER=false` 인 `--tag` 실행은 작업 전에 거부합니다(평가하는 알파가 모두 `shock_exempt` 면 예외).
+  - **남음(효율만, 결과는 같음)**: 부모에서 충격 일정을 한 번 만들어 `SHOCK_SCHEDULE` 로 나눠 주는 일(`docs/SHOCK.md` 6절).
+  - 상장폐지: lab 은 `delisted` 를 Backtester 에 넘기지 않으므로 바꿀 것이 없습니다. 넘기게 되면 lab 의 재가격(`delisting_close`)을 지우고, 보고(`delisting_closes`)는 `exit_reason == "delisting"` 에서 읽습니다. 둘이 같이 있어도 두 번 청구되지는 않습니다(`tests/test_fpreB_engine.py`).
+- `learning/trials.py` — **처리함**: `EXEC_MODES` 는 `config.EXEC_MODES`(`taker`·`maker_m1`·`maker_m2`)입니다. 엔진이 거래하지 않는 `"maker"` 는 원장에 기록되지 않습니다(지금까지 기록된 줄 0개).
+- `learning/neutral.py` — **처리함**: `docs/SHOCK.md` 4절. `evaluate()` 의 `cfg["entry_filter"]` 는 `evaluator_policy` 인 필터(충격 층)를 넣지 않습니다.
+- `exchange/orderbook.py` — **처리함**: `engine.usable_book` 이 `orderbook.usable_book` 을 그대로 쓰고, 그 판정에 덮는 거리(`covered_bps ≥ k_bps`)를 명시했습니다(3절). 대용치 식(`bar_book_proxy`, `PROXY_*` 상수)을 바꾸면 `engine.book_proxy_series` 도 같이 바꿔야 합니다(`tests/test_fpreB_book_guard.py` 가 둘을 봉마다 비교).
+- `data/context.py` — **처리함**: 오프라인 S3 구성원은 `context.pit_members` 그대로입니다(`docs/SHOCK.md` 1절).
+- `learning/discovery.py` — **남음(F3)**: `frame_features` 의 `vwap_z` 를 `features.vwap_z(frame, idx)` 로 바꾸는 일은 새 피처 버전입니다(ROADMAP 7.10). 가설 파이프라인의 피처 버전과 함께 바꿉니다.
+- `app.py`(F6) — **남음**
+  - 충격 층: `docs/SHOCK.md` 5절(`ShockDetector` 를 `prime`, `app.shock`, 모든 엔진의 `shock` 으로; BTC 1분봉마다 `observe_minute`, 정시마다 `observe_hour` 를 엔진이 그 봉을 결정하기 전에; `_btc_shock_check` 제거).
   - 메이커 체결: 페이퍼 계정마다 마감된 1분봉을 `PaperAccount.on_bar_close(symbol, candle)` 로 넘깁니다(틱 모드에서는 메이커 주문이 틱으로 체결되지 않음). 메이커 방식으로 켜진 알파가 있으면 `ORDERBOOK_STREAM` 을 켭니다(ROADMAP 7.7.2).
+  - 호가 가드와 스트림 모드: 결측 조항 때문에 `ORDERBOOK_STREAM` 을 켜고 `ORDERBOOK_MODE=partial`(20단계)이면 틱이 촘촘한 종목(BTC 20단계 ≈ 0.3bp < 10bp)의 진입이 모두 보류됩니다. 스트림을 켤 때는 `diff` 모드를 쓰거나 시작 검사로 막습니다.
   - 시작 메시지의 체결 방식 표시: 알파별 `engine.exec_mode(alpha)`.

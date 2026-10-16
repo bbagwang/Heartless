@@ -557,5 +557,92 @@
    "trial_merge": "wave-f-merge bdd200f + this branch: the same two hashes; 154 F-pre-A/B, red-team and p1_prep tests pass there with none skipped (S3 members = context.pit_members, engine.usable_book = orderbook.usable_book)"
   },
   "train_f_start_inside_a_halt": "no: no S1-S3 firing in the 2 h and no S0 firing in the 15 minutes before 2022-01-13 00:00 (longhist, counts only), so train_f_shock stands under the boundary fix"
+ },
+ "integration": {
+  "what": "F-pre-B integration into wave-f-merge (merge deddd30 of wave-f-fpb 50cb6b1 into bdd200f, wiring ae13da6): identity, equivalence and counts only, no performance figures",
+  "merge": "no textual conflicts (the branches touch disjoint files)",
+  "wiring": [
+   "book guard: engine.usable_book = exchange/orderbook.usable_book, which checks covered_bps >= k_bps for stream books",
+   "S3 offline: cross_section_series takes each hour's members from context.pit_members (744 hour closes a call); the live _CrossSection is pinned to it by tests",
+   "heartless neutral: shock layer as entry_filter (shock.evaluator_filter, schedule from S0_LEAD_MS before the window), evaluator_policy filters out of the config hash, --tag refused with SHOCK_LAYER=false",
+   "lab: trial config hashes params exec then EXEC_MODE (lab.run_config); STRESS_SETTINGS MAKER_THROUGH_SPREAD 1.0; --tag refused with SHOCK_LAYER=false; SHOCK_LAYER / BOOK_GUARD / EXEC_MODE / UNIVERSE_DB handed to every job and recorded (engine, shock); a job reads S0 from the run's candle database without SHOCK_CANDLE_DB",
+   "trials.EXEC_MODES = config.EXEC_MODES (no bare maker)"
+  ],
+  "s3_equivalence": {
+   "what": "S3 statistic of shock.py at deddd30 (own member rule) vs ae13da6 (context.pit_members) on data/longhist/universe.db read-only, bytes of the float64 series",
+   "2026-04-01..2026-06-30": {
+    "sha256_16": "9ade56a174a2a620",
+    "finite_hours": 2907,
+    "identical": true,
+    "firings": {
+     "S1": 25,
+     "S2": 86,
+     "S3": 0
+    }
+   },
+   "TRAIN-F 2022-01-13..2025-12-31": {
+    "sha256_16": "0e5c7a4d5f270f9e",
+    "finite_hours": 35474,
+    "identical": true,
+    "firings": {
+     "S1": 314,
+     "S2": 1143,
+     "S3": 288
+    },
+    "seconds": {
+     "before": 100.6,
+     "after": 67.4
+    }
+   }
+  },
+  "identity": {
+   "commit": "ae13da6",
+   "command": "heartless lab --alpha htf_trend --start 2026-05-01 --end 2026-07-01 --universe core --workers 1 (scratch copy of data/research/heartless.db, UNIVERSE_DB=data/longhist/universe.db)",
+   "layers_off_taker": {
+    "settings": "SHOCK_LAYER=false BOOK_GUARD=false EXEC_MODE=taker",
+    "trades": 111,
+    "sha256_trades": "a6accc69a928d6df96fb705fd374b1475828e993bc29f764db23671638d851f4"
+   },
+   "shipped_defaults": {
+    "settings": "SHOCK_LAYER=true BOOK_GUARD=true EXEC_MODE=taker",
+    "trades": 110,
+    "sha256_trades": "65daca64b8dcdc98feb51b15278d79828fcec5046237b4f30531e35d36371b1a",
+    "window_firings": {
+     "S0": 0,
+     "S1": 22,
+     "S2": 86,
+     "S3": 0,
+     "halt_hours": 111
+    },
+    "missing": []
+   },
+   "f7_six_symbols": {
+    "command": "the same with --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT (layers off, taker)",
+    "trades": 54,
+    "sha256_trades": "23063e75acec2921cbd8df50336b2dfa8e2e0af795ccab2c72be746165ceb083"
+   }
+  },
+  "tests": "1,171 passed, 0 skipped, 11 min 37 s (ae13da6 + docs), nice 10 under contention",
+  "replay": {
+   "window": "2026-09-01..2026-09-03",
+   "symbols": "12 core pinned",
+   "source": "data/longhist/heartless.db read-only",
+   "settings": "shipped defaults (the app does not attach a ShockDetector until F6: the book guard runs on the 1m-bar proxy, the shock layer does not)",
+   "passed": true,
+   "invariant_violations": 0,
+   "checks": [
+    "positions",
+    "stops",
+    "orphans",
+    "ledger",
+    "exceptions",
+    "pnl_reports"
+   ],
+   "bars": 34560,
+   "gaps": 0,
+   "context_snapshots": "49/49",
+   "speedup": 630.7,
+   "rss_peak_mb": 217.1
+  }
  }
 }

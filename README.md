@@ -209,7 +209,7 @@ python tools/calibrate_promotion.py --out docs/results/e2_promotion_calibration.
 | `ORDERBOOK_STREAM` | false | 로컬 호가창(`ctx.book`). 쓰는 알파가 생길 때까지 꺼짐 |
 | **급변 대응·체결 방식·호가 보류 (F-pre-B)** | | |
 | `SHOCK_LAYER` | true | 급변 대응 층(S0 15분, S1~S3 2시간 신규 진입 중단, 킬 스위치 h 6, 리서치 창 45일, [`docs/SHOCK.md`](docs/SHOCK.md)) |
-| `SHOCK_CANDLE_DB` / `SHOCK_SCHEDULE` | (비어 있음) | BTC 를 불러오지 않은 백테스트의 S0 원천 / 미리 만든 충격 일정 파일 |
+| `SHOCK_CANDLE_DB` / `SHOCK_SCHEDULE` | (비어 있음) | BTC 를 불러오지 않은 백테스트의 S0 원천(비면 데이터 폴더의 `heartless.db`, lab 작업은 그 실행의 캔들 DB) / 미리 만든 충격 일정 파일 |
 | `EXEC_MODE` | taker | 체결 방식 `taker`, `maker_m1`, `maker_m2` 중 하나, 또는 `알파:방식,...`(파라미터 세트의 `exec` 가 우선, [`docs/EXECUTION.md`](docs/EXECUTION.md)) |
 | `MAKER_THROUGH_SPREAD` / `MAKER_MIN_VOLUME_MULT` | 0.5 / 20 | 메이커 체결에 필요한 관통 폭(합성 스프레드 배수, 스트레스 1.0) / 1분봉 거래대금 하한(주문 명목 배수) |
 | `BOOK_GUARD` | true | 호가 이상 시 진입 보류(실시간 호가 또는 1분봉 대용치. `ORDERBOOK_STREAM` 이 켜져 있는데 쓸 책이 없어도 보류) |

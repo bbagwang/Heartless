@@ -245,10 +245,10 @@ Wave F 계열 연구자가 모두 쓰는 기반입니다(`docs/ROADMAP.md` 7.3·
   - 어느 구획에도 다 들어가지 않으면 `other`입니다. 2022-01-01 ~ 01-12, 2026-01-01 ~ 01-12처럼 구획 밖 날을 포함하거나, TRAIN과 VALID에 걸친 창이 여기에 해당합니다. 그래서 TRAIN-F는 `--start 2022-01-13 --end 2026-01-01`로 돌립니다(`--years`는 01-01부터라 `other`).
   - P2 시기의 `period`(TRAIN/VALID/other)는 그대로 함께 남습니다. 기존 줄과 기존 테스트가 그 값을 읽기 때문입니다.
   - `trials.wave_f_period(start, end)`, `trials.wave_f_periods(...)`(들어 있는 구획 전부), `trials.fwd_span(k)`. 상수는 `docs/results/wave_f_registration.json`과 같은지 테스트로 확인합니다.
-- **체결 방식 `exec`.** 구성(config) 안의 `exec`(`taker` | `maker` | `maker_m1` | `maker_m2`, 알파별 매핑도 됨)가 구성 해시에 들어갑니다.
+- **체결 방식 `exec`.** 구성(config) 안의 `exec`(`taker` | `maker_m1` | `maker_m2` = `config.EXEC_MODES`, 알파별 매핑도 됨)가 구성 해시에 들어갑니다. 엔진이 거래하지 않는 `maker` 는 F-pre-B 통합부터 거부합니다(그때까지 기록된 줄 0개).
   - `taker`가 기본값이고 해시에서 빠집니다. 그래서 지금까지의 모든 해시(전부 테이커)가 그대로입니다.
   - **재현 증거**: `docs/results/p2_trials.jsonl`의 135줄 모두에서 저장된 구성을 다시 해시하면 저장된 해시와 같습니다. `exec: "taker"`를 넣어도 같고, `maker_m1`을 넣으면 달라집니다. 계열 N(ts_trend 27, positioning_flow 21, vol_breakout 23, discovery_daily 105,068, xs_rank 20, funding_carry 7)도 7.7.2의 값 그대로입니다(`tests/test_fpreA_trials.py`).
-  - lab은 `params["exec"][알파]`(F-pre-B의 엔진 설정)가 있으면 그 값을 구성에 넣습니다. 모르는 방식 이름은 거부합니다(오타가 새 시도로 세어지지 않게).
+  - lab은 평가하는 알파마다 실제로 거래하는 방식을 구성에 넣습니다: `params["exec"][알파]`(F-pre-B의 엔진 설정), 없으면 `EXEC_MODE`(`lab.run_config` → `Settings.exec_for`, 엔진과 같은 우선순위; F-pre-B 통합). 모르는 방식 이름은 거부합니다(오타가 새 시도로 세어지지 않게).
   - 줄에는 `exec`가 따로도 기록되고, `heartless trials --family X`가 `exec=maker_m1`, `stress`를 표시합니다.
 - **재실행은 N을 늘리지 않습니다.** 구성에는 창과 비용이 없습니다. 그래서 같은 구성의 스트레스, VALID, FORWARD 실행은 같은 해시입니다.
   - topN 유니버스는 구성에 `"symbols": "top40"`(규칙 이름)으로 들어갑니다. 구간마다 달라지는 종목 목록을 넣으면 VALID 재실행이 새 구성이 되기 때문입니다.
@@ -353,7 +353,7 @@ class VolumeFade(HourlyAlpha):             # 예시 형식일 뿐, 가설이 아
 - **펀딩**: 정산 s가 진입 마감 ≤ s < 청산 마감이면 붙습니다. s 직전 봉의 종가로 계산합니다(`PaperAccount.apply_funding`). 정산 시각에 진입한 포지션은 그 정산을 냅니다. lab은 다음 1분 시가에 체결하므로 그 정산을 내지 않습니다. 이 한 가지가 두 평가기의 알려진 차이입니다(기준 알파는 01:00 UTC에 결정해 피함).
 - **상장폐지**: 마지막 거래 시간 마감에 슬리피지 5배(스트레스 10배)로 닫고, 그 봉에서는 결정하지 않습니다(그 뒤로 체결할 거래가 없음). 창 시작 전의 상장폐지도 같습니다. 그 뒤의 평평한 거래량 0 봉에서는 결정하지 않습니다(검토 수정).
 - **창 끝**: 열린 포지션은 마지막 마감에서 보통 비용으로 닫습니다(lab과 같음).
-- **진입 막기 고리**: `evaluate(..., entry_filter=f)`, `f(symbol, 진입 시각 배열) -> bool 배열`입니다. F-pre-B의 충격 층(7.8절)을 여기에 연결합니다(`shock_exempt` 알파는 거르지 않음). 거른 이름은 구성 해시에 들어갑니다.
+- **진입 막기 고리**: `evaluate(..., entry_filter=f)`, `f(symbol, 진입 시각 배열) -> bool 배열`입니다. F-pre-B의 충격 층(7.8절)이 여기에 연결되어 있습니다(`heartless hourly`, `shock.evaluator_filter`; `shock_exempt` 알파는 거르지 않음). 구성이 고른 필터의 이름은 구성 해시에 들어가고, 충격 층(`evaluator_policy`)은 평가기의 정책이라 들어가지 않습니다(원장 줄의 `shock` 에 기록, `docs/SHOCK.md` 4절).
 
 **통계와 원장**
 - lab과 같은 통계입니다: 평균R, PF, t_day(UTC 청산일 군집, `lab.group_stats`), 연도(진입 기준), 롱·숏, 종목별, 청산 사유별.
@@ -440,6 +440,7 @@ print(res.report()); hourly.record(res, "liq_cascade")
 - 일별 순손익 % (거래 없는 날 0 포함), **관문 t = 일별 순손익의 뉴이-웨스트 HAC t**(Bartlett, 고정 lag 14일, `t`·`t_hac`; ROADMAP 6절 2026-10-16), 정보용 일별 단순 t(`t_daily` = 평균 / (표준편차 / √일수))와 7일 블록 t(`weekly_t`), 연환산 = 일평균 × 365, 일별 자산 곡선의 최대낙폭, 달력 연도·분기 합계, 강제 청산 수, 데이터 끝 청산 수(`data_end_closes`), 포지션 수, 수수료·펀딩 합계, 최소 현금(음수면 현금이 모자란 규칙)
   - 이유: 캐리 손익은 며칠씩 이어지므로 단순 t가 증거를 부풀립니다. 합성 AR(1)(ρ 0.7, 엣지 0, 1,460일)에서 단순 t ≥ 3이 HAC t ≥ 3보다 몇 배 자주 나옵니다. lag 0의 HAC t는 단순 t와 같습니다(`tests/test_rt_neutral_hac.py`).
 - `neutral.record(result, family)`, 또는 CLI `--tag`가 원장에 `tool = "neutral"` 한 줄을 남깁니다. `t_day` 자리에 HAC t, 줄 안에 `neutral`(일수, HAC t와 lag, 일별 단순 t, 주 블록 t, 연환산, 최대낙폭, 강제 청산, 데이터 끝 청산)이 들어갑니다.
+- **충격 층** (F-pre-B 통합): `heartless neutral` 은 `SHOCK_LAYER` 가 켜져 있으면 7.8절의 진입 중단을 `entry_filter` 로 겁니다(`shock.evaluator_filter`, 창 시작 `S0_LEAD_MS` 앞부터의 일정). 막히는 것은 새 포지션뿐이고 리밸런스·청산은 그대로입니다. 층은 구성 해시에 들어가지 않으므로(`evaluator_policy`) 원장에 있는 캐리·페어 구성을 층을 켜고 다시 돌려도 해시와 N 이 그대로이고, `--tag` 는 층이 켜져 있어야 합니다(`shock_exempt` 전략은 예외). 결과 JSON 과 원장 줄의 `shock` 에 창의 발동 수, 막힌 후보 진입 수, 평가하지 못한 규칙이 남습니다. `N.evaluate` 를 직접 부르는 계열 실행기는 `entry_filter=shock.evaluator_filter(settings, strategy, start, end)[0]` 를 넘깁니다.
 - **관문 계산**: `neutral.train_gate(결과, N, stress=스트레스 결과)`와 `neutral.confirmation_gate(결과, "valid" | "forward")`가 등록 JSON(`docs/results/wave_f_registration.json` "gates")의 기준으로 조건마다 참·거짓과 값을 돌려줍니다. 스트레스 결과가 없으면 TRAIN 관문의 스트레스 조건은 실패입니다. 관문 담당이 결과 파일로 다시 계산할 때 이 함수를 씁니다.
 
 **합성 데이터로 확인한 것** (`tests/test_fpreA_neutral.py`)
@@ -482,7 +483,7 @@ print(res.report())   # 3일, 비용 41bp x 0.075 C, 펀딩 7회 수취
 
 ### 5.6 다른 패키지에 넘기는 것
 
-- **F-pre-B**: 충격 층은 `hourly.evaluate`·`neutral.evaluate`의 `entry_filter`로 연결합니다(`shock_exempt`는 연결하는 쪽에서 처리). lab의 `exec`는 `params["exec"][알파]`로 두면 원장 해시에 자동으로 들어갑니다. 백테스터가 상장폐지 강제 청산을 직접 하게 되면, lab의 `delisting_close` 재가격은 그 결과와 겹치지 않게 정리합니다(지금은 lab이 종료 청산을 다시 매김).
+- **F-pre-B** (F-pre-B 통합에서 처리): 충격 층은 `heartless hourly`·`heartless neutral` 이 `entry_filter` 로 겁니다(`shock.evaluator_filter`, `shock_exempt` 는 연결하는 쪽에서 처리). lab의 `exec`는 `params["exec"][알파]`, 없으면 `EXEC_MODE` 가 원장 해시에 들어갑니다(`lab.run_config`). 백테스터가 상장폐지 강제 청산을 직접 하게 되면, lab의 `delisting_close` 재가격은 그 결과와 겹치지 않게 정리합니다(지금은 lab이 `delisted` 를 넘기지 않고 종료 청산을 다시 매김; 둘이 겹쳐도 두 번 청구되지 않음, `tests/test_fpreB_engine.py`).
 - **F-data-h**: OI·프리미엄 1h를 h1 블록(값은 close 열)으로 `oi_1h`·`premium_1h` 표에 넣고 `Store._F0_TABLES`에 추가하면, `HourlyBars.oi`·`premium`에 시가 시각으로 맞춰 들어옵니다. 다른 형식이면 `hourly.OPTIONAL_SERIES`의 적재 함수를 바꿉니다.
 - **F4**: 평가기들은 `seal.check_window`로 창을 검사하고, F4의 봉인이 개봉 전 FWD 블록과 겹치는 창을 거부합니다(`docs/FORWARD.md`). lab·discover는 자기 구성 해시도 넘겨(`check_window(..., config_hash=...)`), FORWARD 등록이 열린 구성은 그 묶음과 겹치는 창에서 거부됩니다. 원장 줄의 FWD 표시는 `forward.period_label`이 냅니다(Wave F 병합).
 - **`docs/UNIVERSE.md`**: 3절 6과 10절의 "lab·discover가 아직 거르지 않음"은 이 패키지로 해소되었고, 그 문서에 반영했습니다(Wave F 병합).
