@@ -103,7 +103,7 @@
  },
  "statistics": {
   "directional": "R units; avg_r, PF, t_day = day-clustered t of trades grouped by UTC exit day (lab.group_stats); years by entry time",
-  "neutral": "percent of capital C; daily net PnL marking both legs at each UTC day end (zero days included); t = mean / (sd / sqrt(days)); annualized net return = daily mean x 365; max drawdown on the daily equity curve; calendar years and quarters; weekly-block t kept for information (daily carry PnL is autocorrelated)"
+  "neutral": "percent of capital C; daily net PnL marking both legs at each UTC day end (zero days included); gating t = Newey-West HAC t of the daily net PnL (Bartlett kernel, fixed lag 14 days; amended 2026-10-16), plain daily t informational; annualized net return = daily mean x 365; max drawdown on the daily equity curve; calendar years and quarters; weekly-block t kept for information (daily carry PnL is autocorrelated)"
  },
  "evaluators": {
   "lab": {
@@ -169,20 +169,19 @@
    "filtered_avg_r_gt_unfiltered_union_avg_r": true
   },
   "train_neutral": {
-   "t_daily_net_ge": "max(3, sqrt(2 ln N_family))",
    "annualized_net_return_gt": 0.02,
    "annualized_net_return_note": "after all fees and slippage: the draft's 'costs + 2%' (gross must beat costs by 2 points a year)",
    "max_drawdown_lt": 0.03,
    "every_year_net_positive": true,
    "stress_annualized_net_return_gt": 0.0,
-   "forced_liquidations": 0
+   "forced_liquidations": 0,
+   "t_hac14_daily_net_ge": "max(3, sqrt(2 ln N_family))"
   },
   "valid_directional": {
    "avg_r_gt": 0.0,
    "t_day_ge": 1.0
   },
   "valid_neutral": {
-   "t_daily_net_ge": 1.0,
    "every_quarter_net_positive": true,
    "quarters": [
     [
@@ -197,7 +196,8 @@
      "2026-07-01",
      "2026-09-30"
     ]
-   ]
+   ],
+   "t_hac14_daily_net_ge": 1.0
   },
   "forward_directional": {
    "avg_r_gt": 0.0,
@@ -205,10 +205,10 @@
    "over": "the registered span"
   },
   "forward_neutral": {
-   "t_daily_net_ge": 1.0,
    "span_net_positive": true,
    "span_blocks": 3,
-   "over": "the registered span (3 blocks, one quarter)"
+   "over": "the registered span (3 blocks, one quarter)",
+   "t_hac14_daily_net_ge": 1.0
   },
   "stress_in_confirmation": "reported, not gating (as the P2 VALID gate)",
   "power_note": "a zero-edge candidate passes a confirmation with probability about 0.16 (t >= 1.0 one-sided); the TRAIN gate carries the overfitting control",
@@ -558,7 +558,7 @@
    "S0": "BTC 5-minute move >= 3% -> 15 minutes without new entries (existing live rule, added to the backtester); every minute",
    "S1": "|BTC 1h log return| >= 4 x sd of the prior 720 hourly returns; hourly",
    "S2": "BTC 24h realized vol (sqrt of the sum of squared 1h returns) >= 2.5 x median of the same statistic over the prior 30 days; hourly",
-   "S3": "mean 24h correlation of 1h returns with BTC over the 40 perpetuals with the highest prior-24h quote volume (the context top_n member definition) >= 0.80 and >= its prior 30-day mean + 0.25; hourly"
+   "S3": "mean 24h correlation of 1h returns with BTC over the 40 eligible USDT perpetuals trading at that hour with the highest prior-24h quote volume, point in time from universe.db (amended 2026-10-16; not the union of window members) >= 0.80 and >= its prior 30-day mean + 0.25; hourly"
   },
   "shock_state": "starts at the hour close where any of S1-S3 fires; ends after 24 h without a firing",
   "responses": {
@@ -709,7 +709,7 @@
   "universe": "live universe = universe.live_selection (USDT perpetual, TRADING, no stablecoins, listed 30 days, 24h quote volume, tick <= 10 bp, book spread <= 5 bp) top UNIVERSE_SIZE, re-selected hourly; no hard-coded coins",
   "always_include": "BTCUSDT by default, a data subscription for the regime/context reference, not a trading guarantee; separated from the traded list in the F6 rewiring",
   "context": {
-   "research": "stores built with top_n = 40 over every research-universe member of the window",
+   "research": "stores built with top_n = 40 point in time: every eligible USDT perpetual trading at that hour (universe.db 1h blocks), ranked by prior-24h quote volume (amended 2026-10-16; previously the union of window members, which depended on future membership)",
    "live": "F6 rewiring sets CONTEXT_TOP_N = 40 over every perpetual passing the live exchange filters; the fixed 20-symbol CONTEXT_UNIVERSE is retired"
   },
   "invariants": "alpha/strategy code never reads symbol names; a new alpha must pass the invariant tests (rename, price multiples) and the cut-at-decision test before its ledger record",
@@ -907,5 +907,16 @@
   "decisions": "docs/results/wf_decisions.json",
   "report": "docs/RESEARCH_F.md",
   "evidence": "heartless/strategy/evidence.json"
- }
+ },
+ "amendments": [
+  {
+   "date": "2026-10-16",
+   "what": [
+    "neutral gating t -> Newey-West HAC t, lag 14 days",
+    "research context and S3 cross-section point in time",
+    "parallelism beyond 2 agents with disjoint worktrees"
+   ],
+   "seen": "no neutral/pairs/context-class results"
+  }
+ ]
 }
