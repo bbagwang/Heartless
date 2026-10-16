@@ -245,6 +245,28 @@ def test_delisting_closes_the_position_with_5x_slippage_on_that_leg():
     assert _run(Scripted(enter=_close(8), leave=_close(15)), ctx2).positions == []
 
 
+def test_a_leg_whose_data_ends_early_closes_the_position_there():
+    """Review fix: the spot series stops after bar 39 without a delisting (a market built to an earlier end, or a
+    delisting inside the inventory's 3-day slack) while the perp trades on and rises 20%. The position used to stay
+    open with a frozen spot price, booking an unhedged perp loss; it now closes at the spot's last bar ("data_end",
+    nominal costs) and the later perp move does not reach the book."""
+    n = 96
+    perp = np.full(n, 100.0)
+    perp[50:] = 120.0
+    ctx = N.synthetic_context(T0, {("AUSDT", "perp"): {"close": perp, "funding": np.full(n, np.nan)},
+                                   ("AUSDT", "spot"): {"close": np.full(40, 100.0)}}, end=T0 + n * H - 1)
+    r = N.evaluate(Scripted(enter=_close(10)), T0, T0 + n * H - 1, ctx=ctx, capital=10_000.0)
+    pos = r.positions[0]
+    assert pos["reason"] == "data_end" and pos["closed"] == N._iso(_close(39))
+    flat = _run(Scripted(enter=_close(10), leave=_close(39)), _ctx(n=96))  # the same round trip at constant prices
+    assert r.stats()["total_pct"] == pytest.approx(flat.stats()["total_pct"], abs=1e-9)
+    # the spot market cannot be entered on its last bar, so nothing reopens after it
+    assert len(r.positions) == 1
+    # visible in the statistics and the report (a lagging market build is not a silently flat tail)
+    assert r.stats()["data_end_closes"] == 1 and "data_end=1" in r.report()
+    assert flat.stats()["data_end_closes"] == 0 and "data_end" not in flat.report()
+
+
 def test_entries_only_for_members_and_positions_survive_membership_loss():
     """Members: AUSDT in January only. An entry proposed in February is refused; a January position stays open into
     February until its own exit."""

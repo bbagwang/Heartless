@@ -235,6 +235,15 @@ def test_discover_delisting_close_marks_rows_cut_by_the_end_of_trading(walk_db):
     assert r5[0] < r1[0]
 
 
+def test_discover_skips_member_spans_after_the_last_traded_hour(walk_db):
+    """Review fix: a member span that starts after the symbol's delisting (month m ranks on m-1, so a symbol delisted
+    late in m-1 can be a member of m) has no decision to enter: its jobs are dropped before any build."""
+    feb = (_ms(2024, 2, 1), _ms(2024, 3, 1) - 1)
+    with pytest.raises(RuntimeError, match="last traded hour"):
+        D.build_dataset(walk_db, ["AUSDT"], _ms(2024, 1, 25), _ms(2024, 3, 10) - 1, "1h", workers=1,
+                        windows={"AUSDT": [feb]}, delisted={"AUSDT": _ms(2024, 1, 20) - 1})
+
+
 def test_discover_mine_reports_membership(walk_db):
     tr = (_ms(2024, 1, 20), _ms(2024, 2, 20) - 1)
     va = (_ms(2024, 2, 20), _ms(2024, 3, 14) - 1)
@@ -260,6 +269,14 @@ def test_member_windows_for_a_frozen_list(tmp_path):
     assert res["delisted"] == {}
     dec = U.member_windows_for(tmp_path / "universe.db", ["GONEUSDT"], M("2023-12"), M("2024-01") - 1, 2)
     assert dec["windows"]["GONEUSDT"] == [(M("2023-12"), M("2024-01") - 1)] and "GONEUSDT" in dec["delisted"]
+    # review fix: GONE is a December member but stopped trading on 12-10; a window starting after that keeps its span
+    # and now reports the earlier delisting, so the span is not traded on the flat files that follow the last trade
+    late = U.member_windows_for(tmp_path / "universe.db", ["GONEUSDT"], M("2023-12") + 14 * DAY, M("2024-01") - 1, 2)
+    assert late["windows"]["GONEUSDT"] == [(M("2023-12") + 14 * DAY, M("2024-01") - 1)]
+    assert late["delisted"]["GONEUSDT"] < M("2023-12") + 14 * DAY
+    res = U.resolve_for_run(tmp_path / "universe.db", tmp_path / "no_candles.db", M("2023-12") + 14 * DAY,
+                            M("2024-01") - 1, 2)
+    assert "GONEUSDT" in res["research"] and res["delisted"]["GONEUSDT"] == late["delisted"]["GONEUSDT"]
     assert U.member_months({"A": [(M("2024-01") + 5, M("2024-03") - 1)]}) == {"A": 2}
     with pytest.raises(ValueError, match="cannot be ranked"):
         U.member_windows_for(tmp_path / "universe.db", ["BIGUSDT"], M("2023-10"), M("2023-11") - 1, 2)

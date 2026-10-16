@@ -167,7 +167,7 @@ def lab_config(params: dict, only_alpha: str | None, symbols, meta: bool = False
     `exec`: the execution mode per evaluated alpha (a mode for all, or {alpha: mode}); default the params' own
     `exec` mapping when they carry one (the engine setting of ROADMAP 7.7.2), else taker. Only non-taker modes enter
     the configuration, so taker runs hash exactly as before. `universe`: a topN universe name; its member list
-    depends on the window, so the configuration records the rule (and the evaluated symbols) instead of a list that a
+    depends on the window, so the configuration records the rule name ("top40") instead of a member list that a
     VALID or FORWARD rerun would change."""
     if only_alpha:
         alphas = [only_alpha]

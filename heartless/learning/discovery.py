@@ -902,11 +902,14 @@ def build_dataset(db_path: str, symbols: list[str], start: int, end: int, tf: st
     jobs = [{"db_path": db_path, "symbol": s, "start": a, "end": b, "tf": tf, "cost": cost or {},
              "unseal": sorted(unseal or ()), "templates": tmpls, "context_db": context_db}
             for s in symbols for a, b in ranges[s]]
+    if delisted:  # a job whose decisions all come after the symbol's last traded hour has nothing to enter
+        jobs = [j for j in jobs if j["symbol"] not in delisted or j["start"] < int(delisted[j["symbol"]])]
     for j in jobs:
         if delisted and j["symbol"] in delisted:
             j["delist_close"] = int(delisted[j["symbol"]])
     if not jobs:
-        raise RuntimeError("no data to build a discovery dataset (no symbol has a membership span in the window)")
+        raise RuntimeError("no data to build a discovery dataset (no symbol has a membership span in the window "
+                           "before its last traded hour)")
     asm = _Assembler(jobs, list(FEATURES_X if context_db else FEATURES), [(t, sd) for t in tmpls for sd in (1, -1)])
     if workers <= 1:
         for i, j in enumerate(jobs):

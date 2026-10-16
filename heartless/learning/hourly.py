@@ -23,7 +23,8 @@ of trades with the same entry hour and side, mean |R difference| <= 0.02 R on th
   s + 1 h (HourlyBars.funding[k] is settled at the open of bar k).
 * delisting: a symbol's data ends at its last traded hour (universe.delisting_closes); a position still open then is
   closed at that hour's close with 5x the slippage (10x nominal under stress). No decision is made on that last bar
-  (nothing trades after it, as in the lab); entries are never blocked in advance.
+  (nothing trades after it, as in the lab); entries are never blocked in advance. A delisting before the window
+  start counts too: the flat zero-volume files after it never trade (a member month can follow the last trade).
 * membership (--universe topN): only decisions whose entry falls in a membership span count; a position open when
   membership ends follows its exit rules. Positions still open at the end of the window are closed at its last close.
 
@@ -91,7 +92,10 @@ def _optional_table(table: str) -> Callable:
     return load
 
 
-# name -> loader(store, symbol, start, end) -> (open_times, values) | None; F-data-h may replace the loaders
+# name -> loader(store, symbol, start, end) -> (open_times, values) | None; F-data-h may replace the loaders.
+# Contract (no look-ahead): a value keyed at open time t[k] is visible to the decision at the close of bar k
+# (t[k] + 1 h), so it must be known by then: an OI snapshot taken at the top of hour H goes on the bar opening at
+# H - 1 h or later, a premium-index 1h kline on its own open time (its close is the hour's last value)
 OPTIONAL_SERIES: dict[str, Callable] = {"oi": _optional_table("oi_1h"), "premium": _optional_table("premium_1h")}
 
 
@@ -663,14 +667,17 @@ def _daily_mtm(bars: HourlyBars, i: np.ndarray, x: np.ndarray, sim: dict, take: 
     prev = np.zeros(len(u))
     if len(u) > 1:  # the previous day-end mark of the same trade (0 before its first)
         prev[1:] = np.where(rep[1:] == rep[:-1], u[:-1], 0.0)
-    days = (ct[d] - 1) // MS_D
-    np.add.at(out["acc"], days - out["day0"], u - prev)
+    # a trade entered at the close T = start (decided just before the window, a member entry of the window) is marked
+    # first at a day end before the window's first day: its entry costs belong to that first day, not to a slot that
+    # would be dropped (or, as a negative index, wrap to the end of the array)
+    days = np.maximum((ct[d] - 1) // MS_D - out["day0"], 0)
+    np.add.at(out["acc"], days, u - prev)
     last_u = np.zeros(len(take))
     if len(u):
         lastpos = np.cumsum(cnt) - 1
         has = cnt > 0
         last_u[has] = u[lastpos[has]]
-    np.add.at(out["acc"], exit_time // MS_D - out["day0"], sim["r"][take] - last_u)
+    np.add.at(out["acc"], np.maximum(exit_time // MS_D - out["day0"], 0), sim["r"][take] - last_u)
 
 
 def evaluate(alpha: HourlyAlpha, start: int, end: int, universe_db, symbols: list[str] | None = None,
@@ -701,7 +708,10 @@ def evaluate(alpha: HourlyAlpha, start: int, end: int, universe_db, symbols: lis
                 raise ValueError("give symbols or top")
             syms = sorted(dict.fromkeys(s.upper() for s in symbols))
             windows = {s: [(start, end)] for s in syms}
-        delist = U.delisting_closes(store, syms, start, end)
+        # every delisting up to the window end, also one before its start: a member month can follow the last traded
+        # hour (month m ranks on m-1's volume, so a symbol delisted late in m-1 can still rank, and a window may start
+        # mid-month), and the flat zero-volume files the archive keeps publishing after a delisting must not trade
+        delist = U.delisting_closes(store, syms, None, end)
         if top:
             months = U.member_months(windows)
             membership = {"rule": f"top{int(top)} (docs/UNIVERSE.md); entries only in member months",

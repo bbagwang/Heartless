@@ -272,11 +272,15 @@ def _top_universe(settings, args, cmd: str) -> dict | None:
         sys.exit(2)
     # Wave F (docs/ROADMAP.md 7.4): entries count only in member months, so the union's look-ahead is gone; the lab
     # runs only the membership spans, discover keeps only member decision rows
+    dl = res.get("delisted") or {}
+    before = sorted(s for s, v in dl.items() if v < start)
     print(f"membership: {res.get('member_months_total', 0)} member-months over {len(res['symbols'])} symbols "
           f"({res['member_share']:.0%} of their symbol-hours), {res.get('skipped_member_months', 0)} member-months "
           f"skipped; delisted in the window: "
-          f"{', '.join(sorted(res.get('delisted') or {})) or 'none'}; only entries in member months count (no "
-          f"look-ahead from the union of monthly members)", file=sys.stderr, flush=True)
+          f"{', '.join(sorted(s for s in dl if s not in before)) or 'none'}"
+          + (f"; delisted before the window (members without trading): {', '.join(before)}" if before else "")
+          + "; only entries in member months count (no look-ahead from the union of monthly members)",
+          file=sys.stderr, flush=True)
     args.universe_resolution = res
     return res
 

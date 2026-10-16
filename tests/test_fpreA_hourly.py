@@ -238,6 +238,45 @@ def test_daily_equity_is_continuous(tmp_path):
     assert r.daily_r[T0 // D + 1] != 0.0 and r.trades[0]["exit_time"] // D == T0 // D + 2
 
 
+def test_daily_equity_books_an_entry_at_the_window_start_on_its_first_day(tmp_path):
+    """Review fix: an entry at the close T = start (decided at the close just before a window that starts at a UTC day
+    boundary) was first marked at a day end before the window's first day; that mark (the entry costs) fell into a
+    dropped slot, so the daily equity no longer summed to the trades' R. It is booked on the first day now."""
+    n = 24 * 10
+    c = np.round(100 + np.sin(np.arange(n) / 5.0), 4)
+    db = make_db(tmp_path / "u.db", {"AUSDT": {"start": T0, "c": c}})
+    start = T0 + 2 * D
+    r = Hr.evaluate(Plan(plan=((start, 1, 90.0, None, 30),)), start, T0 + 8 * D - 1, db, symbols=["AUSDT"])
+    assert [t["entry_time"] for t in r.trades] == [start]
+    assert sum(r.daily_r.values()) == pytest.approx(r.trades[0]["r_multiple"], abs=1e-12)
+    assert r.daily_r[start // D] != 0.0 and min(r.daily_r) == start // D
+    assert r.daily_series()[-1][2] == pytest.approx(r.trades[0]["r_multiple"], abs=1e-6)
+
+
+def test_a_delisting_before_the_window_start_leaves_no_trades(tmp_path):
+    """Review fix: BUSDT's last trade is on day 10 and the archive's flat zero-volume files follow. A window starting
+    after that (a member month can follow the last traded hour, or a window starts mid-month) used to trade those flat
+    bars; the delisting before the window now ends the symbol's data there too."""
+    qv = np.full(24 * 40, 1e6)
+    qv[24 * 10:] = 0.0
+    c = np.round(50 + np.sin(np.arange(24 * 40) / 3.0), 4)
+    c[24 * 10:] = c[24 * 10 - 1]
+    db = make_db(tmp_path / "u.db", {"AUSDT": {"start": T0, "c": _flat(24 * 90)},
+                                     "BUSDT": {"start": T0, "c": c, "qv": qv}})
+
+    class Daily(Hr.HourlyAlpha):
+        name, family, max_hold_hours, warmup_hours = "daily_b", "test_hourly", 12, 48
+
+        def decide(self, h):
+            if ((int(h.close_time[-1]) // H) % 24 != 1) or not h.stored[-1]:
+                return None
+            return Hr.Entry(1, float(h.close[-1]) * 0.99, None, 12)
+
+    assert Hr.evaluate(Daily(), T0 + 20 * D, T0 + 30 * D - 1, db, symbols=["BUSDT"]).trades == []
+    # inside the trading days the same alpha trades (the fix only removes the hours after the last trade)
+    assert len(Hr.evaluate(Daily(), T0 + 3 * D, T0 + 9 * D - 1, db, symbols=["BUSDT"]).trades) == 6
+
+
 def test_statistics_are_the_labs(tmp_path):
     n = 24 * 40
     rng = np.random.default_rng(5)
