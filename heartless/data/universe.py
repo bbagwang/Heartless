@@ -430,22 +430,25 @@ def member_trades(trades: list[dict], windows: dict[str, list[tuple[int, int]]])
 def member_windows_for(universe_db, symbols: list[str], start: int, end: int, top: int) -> dict:
     """Membership of a FIXED symbol list over another window by the same monthly rule: {"windows": spans of each of
     `symbols` that is top-`top` in a month of [start, end] (the others get no span), "delisted": their delisting
-    closes in it}. discover uses it for VALID: the symbol list is frozen at the end of TRAIN (no VALID-period
-    liquidity chooses symbols), and each frozen symbol counts only in the VALID months it is a member (each month
-    ranked on the month before it, so this is point-in-time)."""
+    closes in it, and before it for a symbol that still has a span}. discover uses it for VALID: the symbol list is
+    frozen at the end of TRAIN (no VALID-period liquidity chooses symbols), and each frozen symbol counts only in the
+    VALID months it is a member (each month ranked on the month before it, so this is point-in-time)."""
     from heartless.core.store import Store
 
     store = Store(universe_db)
     try:
         res = research_universe(store, start, end, top)
-        delisted = delisting_closes(store, list(symbols), start, end)
+        delisted = delisting_closes(store, list(symbols), None, end)
     finally:
         store.close()
     if res["unranked"]:
         raise ValueError(f"months {', '.join(res['unranked'])} cannot be ranked from {universe_db} (their previous "
                          f"month's 1h data is not built): run `heartless universe build` over the window")
     members = {s: res["members"].get(s, []) for s in symbols}
-    return {"windows": membership_windows(members, start, end), "delisted": delisted}
+    windows = membership_windows(members, start, end)
+    # a delisting before the window matters only for a symbol that is still a member in it (month m ranks on m-1, so a
+    # symbol delisted late in m-1 can rank): its spans must not trade the flat files published after the last trade
+    return {"windows": windows, "delisted": {s: v for s, v in delisted.items() if v >= start or windows.get(s)}}
 
 
 def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> dict:
@@ -474,7 +477,9 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> d
     skipped = sorted(s for s in res["symbols"] if s not in have)
     store = Store(universe_db)
     try:
-        delisted = delisting_closes(store, res["symbols"], start, end)
+        # every member's delisting up to the window end, also one before the window start (a member month can follow
+        # the last traded hour: month m ranks on m-1's volume): the lab runs no job after it (lab.evaluate)
+        delisted = delisting_closes(store, res["symbols"], None, end)
     finally:
         store.close()
     months = member_months(windows)
@@ -484,7 +489,7 @@ def resolve_for_run(universe_db, candle_db, start: int, end: int, top: int) -> d
             "skipped": skipped, "unranked": res["unranked"],
             "members": res["members"], "windows": windows,
             # member-months of the evaluated symbols and of the skipped ones (no 1m candles in the window), and the
-            # members whose trading ended (delisting close, docs/ROADMAP.md 7.4) after the window start
+            # members whose trading ended by the window end (delisting close, docs/ROADMAP.md 7.4)
             "member_months": months, "member_months_total": sum(months.values()),
             "skipped_member_months": sum(skipped_months.values()), "delisted": delisted,
             "member_share": round(sum(b - a + 1 for w in windows.values() for a, b in w)

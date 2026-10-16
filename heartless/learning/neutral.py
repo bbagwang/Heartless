@@ -23,7 +23,8 @@ Account (one pool of cash C, spot and futures wallets together; transfers are fr
 * funding on every perp leg at its stored settlements by the time convention: a settlement s (on the open of bar k)
   is charged when entry close <= s < exit close, at the close before s (PaperAccount.apply_funding).
 * delisting: an instrument's data ends at its last traded hour; positions with a leg on it are closed at that close,
-  that leg with 5x the slippage. Positions still open at the end of the window are closed at its last close.
+  that leg with 5x the slippage. Positions still open at the end of the window are closed at its last close, and so
+  are positions with a leg whose stored data stops earlier without a delisting ("data_end", nominal costs).
 * entries only in the months the symbols are members of the topN research universe (or the given symbols); open
   positions keep their exit rules after membership ends. Decisions see only bars that closed by the decision.
 
@@ -409,6 +410,9 @@ class NeutralResult:
         return {"days": n, "mean_daily_pct": round(mean, 6), "t": round(mean / (sd / math.sqrt(n)), 3) if sd > 0 else 0.0,
                 "annualized_pct": round(mean * 365, 4), "total_pct": round(float(v.sum()), 4),
                 "max_drawdown_pct": round(dd, 4), "weekly_t": self.weekly_t(), "liquidations": len(self.liquidations),
+                # positions closed early because a leg's stored data stopped (not a delisting): a lagging market build
+                # shows up here instead of as a silently flat tail
+                "data_end_closes": sum(1 for p in self.positions if p.get("reason") == "data_end"),
                 "positions": len(self.positions), "fees_pct": round(self.fees / self.capital * 100, 4),
                 "funding_pct": round(self.funding / self.capital * 100, 4),
                 "min_cash_pct": round(self.min_cash / self.capital * 100, 4), "seconds": round(self.seconds, 1)}
@@ -453,6 +457,7 @@ class NeutralResult:
                  f"{' STRESS' if self.stress else ''}  days={s['days']} mean={s['mean_daily_pct']:+.5f}%/day "
                  f"t={s['t']:+.2f} ann={s['annualized_pct']:+.2f}% maxDD={s['max_drawdown_pct']:.2f}% "
                  f"weekly t={s['weekly_t']:+.2f} positions={s['positions']} liquidations={s['liquidations']} "
+                 + (f"data_end={s['data_end_closes']} " if s["data_end_closes"] else "") +
                  f"fees={s['fees_pct']:.3f}% funding={s['funding_pct']:+.3f}% ({s['seconds']:.1f}s)"]
         lines += [f"  year    {k} {v:+.4f}%" for k, v in self.by_year().items()]
         lines += [f"  quarter {k} {v:+.4f}%" for k, v in self.by_quarter().items()]
@@ -607,7 +612,10 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
             if hit is not None and pos.key in book.open:
                 if strategy.on_liquidation(ctx, T, pos, hit) == "close":
                     finish(pos, T, "liquidation")
-        # 3) delistings and the window end: positions on an instrument at its last bar close there
+        # 3) delistings and the window end: positions on an instrument at its last bar close there. An instrument whose
+        #    stored data stops before the window end without being a delisting (a market built to an earlier end, a
+        #    delisting inside the inventory's 3-day slack) also closes the position at its last bar ("data_end"):
+        #    held on, its leg would keep a frozen price while the other leg moves, an unhedged PnL that never existed
         for pos in list(book.open.values()):
             ends = [(l.symbol, l.market) for l in pos.legs if l.alive
                     and ctx.idx(l.symbol, l.market, T) is not None
@@ -617,6 +625,8 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
                 finish(pos, T, "delisting", dl)
             elif T == last_T:
                 finish(pos, T, "end")
+            elif ends:
+                finish(pos, T, "data_end")
         # 4) the strategy at the close: exits (decision times), rebalances (every close), entries (decision times)
         decide = T < last_T and strategy.is_decision(ctx, T)
         if decide:
@@ -682,7 +692,8 @@ def record(result: NeutralResult, family: str | None = None, extra: dict | None 
     return trials.record("neutral", fam, result.config, (result.start, result.end), n=s["positions"], avg_r=None,
                          t_day=s["t"], extra={"stress": result.stress, "evaluator": "neutral",
                                               "neutral": {k: s[k] for k in ("days", "annualized_pct", "max_drawdown_pct",
-                                                                            "weekly_t", "liquidations")},
+                                                                            "weekly_t", "liquidations",
+                                                                            "data_end_closes")},
                                               **(extra or {})}, ledger=ledger)
 
 
