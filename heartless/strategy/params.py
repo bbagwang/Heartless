@@ -84,6 +84,23 @@ def _enforce_order(alpha: str, vals: dict[str, float]) -> dict[str, float]:
     return vals
 
 
+def exec_mapping(value) -> dict[str, str]:
+    """A parameter set's `exec` as {alpha: mode} (None / empty -> {}). ValueError for an unknown mode or a value that is
+    not a mapping: a typo must neither trade taker silently nor record a new trial."""
+    from heartless.config import EXEC_MODES
+
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"params exec must be {{alpha: mode}}, got {value!r}")
+    out = {}
+    for a, m in value.items():
+        if m not in EXEC_MODES:
+            raise ValueError(f"unknown execution mode {m!r} for {a} in params exec (one of {', '.join(EXEC_MODES)})")
+        out[str(a)] = str(m)
+    return out
+
+
 @dataclass
 class StrategyParams:
     version: str
@@ -92,6 +109,11 @@ class StrategyParams:
     enabled: dict[str, bool] = field(default_factory=dict)
     created: int = 0
     note: str = ""
+    # F-pre-B (ROADMAP 7.7.2, the registration's "engine params['exec'][alpha]"): {alpha: execution mode} the engine
+    # trades with (taker | maker_m1 | maker_m2), ahead of the EXEC_MODE setting. Not an alpha ParamSpec (that would
+    # change every parameter-schema fingerprint); serialised only when non-empty, so every stored or hashed parameter
+    # set without it is unchanged, and the trial ledger hashes it (trials.lab_config reads params["exec"]).
+    exec: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def default(cls) -> "StrategyParams":
@@ -101,8 +123,11 @@ class StrategyParams:
                    enabled={a: _enabled_by_default(a) for a in ALPHA_SPECS}, created=now_ms(), note="factory defaults")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"version": self.version, "alphas": self.alphas, "ensemble": self.ensemble, "enabled": self.enabled,
-                "created": self.created, "note": self.note, "schema": schema_fingerprints()}
+        d = {"version": self.version, "alphas": self.alphas, "ensemble": self.ensemble, "enabled": self.enabled,
+             "created": self.created, "note": self.note, "schema": schema_fingerprints()}
+        if self.exec:
+            d["exec"] = dict(self.exec)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "StrategyParams":
@@ -120,6 +145,7 @@ class StrategyParams:
             p.ensemble[k] = v
         for a, v in (d.get("enabled") or {}).items():
             p.enabled[a] = bool(v)
+        p.exec = exec_mapping(d.get("exec"))
         return p
 
     @classmethod

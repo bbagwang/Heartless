@@ -4,7 +4,10 @@ Simulates Binance USDⓈ-M futures execution with realistic frictions:
   * taker/maker fees, slippage proportional to order size, post-only rejection when crossing,
   * conditional (algo) orders triggered on mark price, pessimistic intrabar ordering in backtests
     (the extreme adverse to the open position is visited first; conventional O-L-H-C / O-H-L-C when flat),
-  * resting limit orders fill only when the opposite side of the book trades through them,
+  * resting limit orders fill only when the opposite side of the book trades through them; maker-mode entries
+    (F-pre-B, ROADMAP 7.7.2, `limit_order(fill_rule="maker")`) also never fill in the 1m bar they were placed in nor
+    in a bar whose quote volume is under MAKER_MIN_VOLUME_MULT x their notional, and must be traded through by
+    MAKER_THROUGH_SPREAD of the synthetic spread (bar mode inside on_bar, tick mode at on_bar_close),
   * funding payments at every settlement (bar mode: driven by the backtester; tick mode: on the
     next_funding_time rollover of the markPrice stream), isolated-margin style equity accounting.
 The same class powers live paper trading (tick-driven) and the backtester (bar-driven).
@@ -20,6 +23,7 @@ from heartless.exchange.base import Account, OrderResult, PositionSnapshot
 from heartless.util.timeutil import now_ms
 
 log = logging.getLogger(__name__)
+MS_MINUTE = 60_000
 
 
 @dataclass(slots=True)
@@ -47,6 +51,18 @@ class PaperOrder:
     filled_qty: float = 0.0
     avg_price: float = 0.0
     created: int = 0
+    # F-pre-B conservative maker fill model (fill_rule="maker"): open time of the first 1m bar that may fill it, and
+    # the quote volume a bar needs for a fill (MAKER_MIN_VOLUME_MULT x the order notional)
+    maker: bool = False
+    eligible_from: int = 0
+    min_quote_volume: float = 0.0
+
+
+def maker_eligible_from(created: int) -> int:
+    """Open time of the first 1m bar after the bar a maker order was placed in. An order sent at a bar's close
+    (close_time = open + 59,999) reaches the book in the next bar, so that next bar is the placement bar: the bar after
+    it is the first that may fill (backtest and live alike, ROADMAP 7.7.2)."""
+    return ((int(created) + 1) // MS_MINUTE + 1) * MS_MINUTE
 
 
 @dataclass(slots=True)
@@ -65,11 +81,19 @@ class PaperAlgo:
 
 class PaperAccount(Account):
     is_paper = True
+    maker_fill_rule = True  # limit_order accepts fill_rule="maker" (TradingEngine sends it for maker execution modes)
 
     def __init__(self, name: str = "paper", initial_balance: float = 10_000.0, taker_fee: float = 0.0005,
                  maker_fee: float = 0.0002, slippage_bps: float = 1.5, impact_bps_per_10k: float = 0.3,
-                 clock=None, spread_bps: float = 1.0):
+                 clock=None, spread_bps: float = 1.0, maker_through: float = 0.5, maker_volume_mult: float = 20.0):
         super().__init__()
+        # F-pre-B maker fills: trade-through as a fraction of the synthetic spread (0.5 nominal, 1.0 stress) and the
+        # bar quote volume a fill needs as a multiple of the order notional
+        self.maker_through = float(maker_through)
+        self.maker_volume_mult = float(maker_volume_mult)
+        # slippage multiplier per symbol for the next market orders (the backtester's delisting close: 5x)
+        self.slip_mult: dict[str, float] = {}
+        self._bar: Candle | None = None  # bar mode: the 1m bar being processed (maker eligibility / volume)
         self.name = name
         self.initial_balance = initial_balance
         self.wallet = initial_balance
@@ -113,6 +137,12 @@ class PaperAccount(Account):
         self._funding_settled.clear()
 
     def _slip(self, symbol: str, notional: float) -> float:
+        if self.slip_mult:
+            m = self.slip_mult.get(symbol)
+            if m is not None:
+                # a delisting close: the usual fill plus (m - 1) x the slippage, the total lab.delisting_close charges
+                usual = min(self.slippage_bps + self.impact_bps_per_10k * (notional / 10_000.0), 25.0)
+                return (usual + (m - 1.0) * self.slippage_bps) / 1e4
         bps = self.slippage_bps + self.impact_bps_per_10k * (notional / 10_000.0)
         return min(bps, 25.0) / 1e4
 
@@ -231,7 +261,8 @@ class PaperAccount(Account):
         return OrderResult(oid, client_id, "FILLED", qty, fill.price, raw={})
 
     async def limit_order(self, symbol: str, side: str, qty: float, price: float, post_only: bool = True,
-                          reduce_only: bool = False, client_id: str = "") -> OrderResult:
+                          reduce_only: bool = False, client_id: str = "", fill_rule: str = "") -> OrderResult:
+        """`fill_rule="maker"`: the conservative maker fill model of ROADMAP 7.7.2 (module docstring)."""
         oid = str(next(self._ids))
         t = self.tickers.get(symbol)
         if t and post_only:
@@ -239,6 +270,10 @@ class PaperAccount(Account):
                 # GTX order that would cross is rejected/expired by Binance
                 return OrderResult(oid, client_id, "EXPIRED", raw={"msg": "post-only would cross"})
         o = PaperOrder(oid, client_id, symbol, side, qty, price, reduce_only, post_only, created=self.now())
+        if fill_rule == "maker":
+            o.maker = True
+            o.eligible_from = maker_eligible_from(o.created)
+            o.min_quote_volume = self.maker_volume_mult * qty * price
         self.orders[oid] = o
         if not post_only and t:  # a crossing GTC limit fills immediately as taker
             if (side == "BUY" and t.ask and price >= t.ask) or (side == "SELL" and t.bid and price <= t.bid):
@@ -349,6 +384,13 @@ class PaperAccount(Account):
         set_px(c.open)
         t.ts = c.open_time
         self.tickers[symbol] = t
+        self._bar = c
+        try:
+            await self._bar_path(symbol, c, t, set_px)
+        finally:
+            self._bar = None
+
+    async def _bar_path(self, symbol: str, c: Candle, t: Ticker, set_px) -> None:
         await self._check_triggers(symbol, c.open, t.bid, t.ask, c.open_time)
         # 2) intrabar: adverse extreme first for an open position (pessimistic: stop before target);
         #    flat -> conventional path (bullish O-L-H-C, bearish O-H-L-C)
@@ -445,12 +487,44 @@ class PaperAccount(Account):
         for o in list(self.orders.values()):
             if o.symbol != symbol or o.status not in ("NEW", "PARTIALLY_FILLED") or o.price is None:
                 continue
-            if o.side == "BUY":
+            if o.maker:
+                # F-pre-B: only inside a bar (tick mode settles these at on_bar_close), from the bar after the
+                # placement bar, with enough volume, traded through by maker_through of the spread
+                c = self._bar
+                if c is None or c.open_time < o.eligible_from or not c.quote_volume >= o.min_quote_volume:
+                    continue
+                hit = self._maker_through(o, mark)
+            elif o.side == "BUY":
                 hit = ask <= o.price if ask else mark < o.price
             else:
                 hit = bid >= o.price if bid else mark > o.price
             if hit:
                 await self._fill_order(o, o.price, maker=True, ts=ts)
+
+    def _maker_through(self, o: PaperOrder, px: float) -> bool:
+        """A maker limit is traded through at price point `px`: the synthetic book's opposite side, maker_through of
+        the spread away from px, is at or beyond the limit (0.5: the PaperAccount rule for every limit)."""
+        off = self.maker_through * self.spread_bps / 1e4
+        return px * (1 + off) <= o.price if o.side == "BUY" else px * (1 - off) >= o.price
+
+    async def on_bar_close(self, symbol: str, c: Candle) -> int:
+        """Tick mode (live paper, replays): settle the resting maker orders of `symbol` against its closed 1m bar `c`
+        under the rule bar mode applies inside on_bar (eligible from the bar after the placement bar, quote volume >=
+        MAKER_MIN_VOLUME_MULT x notional, the bar's adverse extreme through the limit by maker_through of the spread);
+        a fill is booked at the limit, maker fee, at the bar's close time. The app calls it for every closed 1m bar of
+        a paper account (F6 wiring, docs/EXECUTION.md). Returns the number of fills."""
+        n = 0
+        for o in list(self.orders.values()):
+            if o.symbol != symbol or not o.maker or o.status not in ("NEW", "PARTIALLY_FILLED") or o.price is None:
+                continue
+            if c.open_time < o.eligible_from or not c.quote_volume >= o.min_quote_volume:
+                continue
+            if self._maker_through(o, c.low if o.side == "BUY" else c.high):
+                await self._fill_order(o, o.price, maker=True, ts=c.close_time)
+                n += 1
+        if n:
+            self._prune()
+        return n
 
     async def _fill_order(self, o: PaperOrder, px: float, maker: bool, ts: int | None = None) -> None:
         qty = o.qty - o.filled_qty

@@ -106,6 +106,41 @@ class FeatureFrame:
         return ct
 
 
+def session_volume_bars(open_time: np.ndarray, volume: np.ndarray, session_ms: int = 86_400_000) -> np.ndarray:
+    """Per bar, how many bars with volume its UTC session holds up to and including it: the observations behind
+    indicators.session_vwap's running sums at that bar (open_time ascending)."""
+    ot = np.asarray(open_time, dtype=np.int64)
+    if not len(ot):
+        return np.zeros(0, dtype=np.int64)
+    sess = ot // int(session_ms)
+    c = np.cumsum(np.asarray(volume, dtype=float) > 0)
+    first = np.searchsorted(sess, sess, side="left")  # first bar of each bar's session
+    return c - np.where(first > 0, c[np.maximum(first - 1, 0)], 0)
+
+
+def vwap_z(frame: "FeatureFrame", idx=None) -> np.ndarray:
+    """(close - session VWAP) / session sd at the bars `idx` of a frame (-1: no bar -> NaN; None: every bar).
+
+    F-pre-B fix of the F0 finding (docs/UNIVERSE.md 5): NaN wherever the z is not defined - no VWAP or sd, an sd of 0,
+    and every bar whose session holds a single bar with volume so far. There the true sd is 0 and session_vwap's
+    sqrt(E[p^2 v] / E[v] - vwap^2) is rounding noise, so the old expression gave +-1e5 or NaN depending on the price
+    level (the first bar of every UTC day, and every 1d bar). Everywhere else it is the old expression bit for bit.
+    The frame's columns are not touched (vwap_sd stays as the batch and incremental frames compute it)."""
+    n = int(frame.n)
+    sel = np.arange(n) if idx is None else np.asarray(idx, dtype=np.int64)
+    out = np.full(len(sel), np.nan)
+    if not n or not len(sel):
+        return out
+    f = frame.f
+    cnt = session_volume_bars(frame.open_time[:n], f["volume"][:n])
+    valid = (sel >= 0) & (sel < n)
+    s = np.where(valid, sel, 0)
+    close, vw, sd = f["close"][s], f["vwap"][s], f["vwap_sd"][s]
+    ok = valid & (cnt[s] >= 2) & np.isfinite(close) & np.isfinite(vw) & np.isfinite(sd) & (sd != 0)
+    out[ok] = (close[ok] - vw[ok]) / sd[ok]
+    return out
+
+
 @dataclass
 class FrameCursor:
     """Read-only accessor for a frame at a particular (completed) bar index."""

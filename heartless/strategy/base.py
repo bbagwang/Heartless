@@ -95,6 +95,9 @@ class Alpha(ABC):
     # lengthens the burn-in and run-off of chunked lab runs, so a multi-week trade is neither cut at a chunk end nor
     # missed by the next chunk's re-creation of the positions held across the cut.
     max_hold_days: float | None = None
+    # F-pre-B (ROADMAP 7.8): True exempts the alpha from the shock layer's entry halt (liq_cascade trades the shock
+    # itself); every other alpha takes no new entry while a halt is on (heartless/strategy/shock.py)
+    shock_exempt: bool = False
 
     @abstractmethod
     def evaluate(self, view: MarketView, ctx: Context, p: dict[str, float]) -> Signal | None: ...

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Callable
 
 from heartless.core.models import Decision, Regime, Side, Signal
 from heartless.data.features import MarketView
@@ -23,6 +24,7 @@ class Ensemble:
         self.alphas = alphas or ALL_ALPHAS
         self.only_alpha = only_alpha
         self.last_signals: dict[str, list[Signal]] = {}
+        self.last_vetoed: list[Signal] = []  # the signals the last decide() dropped through its veto (F-pre-B)
 
     def set_params(self, params: StrategyParams) -> None:
         self.params = params
@@ -76,8 +78,17 @@ class Ensemble:
                 return a.timeframe
         return None
 
-    def decide(self, view: MarketView, ctx: Context) -> Decision | None:
+    def decide(self, view: MarketView, ctx: Context, veto: Callable[[str], bool] | None = None) -> Decision | None:
+        """`veto(alpha)` True drops that alpha's signal before scoring (the shock layer's entry halt). Every alpha is
+        still evaluated, so an alpha that keeps state between bars sees the same bars as without a veto; last_signals
+        holds the signals that remained, last_vetoed the dropped ones."""
         signals = self.evaluate_signals(view, ctx)
+        self.last_vetoed = []
+        if veto is not None and signals:
+            self.last_vetoed = [s for s in signals if veto(s.alpha)]
+            if self.last_vetoed:
+                signals = [s for s in signals if not veto(s.alpha)]
+                self.last_signals[ctx.symbol] = signals
         if not signals:
             return None
         threshold = self.params.ensemble["entry_threshold"]
