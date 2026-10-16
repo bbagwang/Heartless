@@ -207,6 +207,13 @@ python tools/calibrate_promotion.py --out docs/results/e2_promotion_calibration.
 | `CONTEXT_TOP_N` | 0 | 0 = `CONTEXT_UNIVERSE` 전부, N = 그 시각 24시간 거래대금 상위 N종목으로 단면(lab·discover·`heartless context`) |
 | `INCREMENTAL_FEATURES` | true | 운영 피처를 봉마다 이어 계산(일괄 계산과 비트 단위 동일, [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)) |
 | `ORDERBOOK_STREAM` | false | 로컬 호가창(`ctx.book`). 쓰는 알파가 생길 때까지 꺼짐 |
+| **급변 대응·체결 방식·호가 보류 (F-pre-B)** | | |
+| `SHOCK_LAYER` | true | 급변 대응 층(S0 15분, S1~S3 2시간 신규 진입 중단, 킬 스위치 h 6, 리서치 창 45일, [`docs/SHOCK.md`](docs/SHOCK.md)) |
+| `SHOCK_CANDLE_DB` / `SHOCK_SCHEDULE` | (비어 있음) | BTC 를 불러오지 않은 백테스트의 S0 원천 / 미리 만든 충격 일정 파일 |
+| `EXEC_MODE` | taker | 체결 방식 `taker`, `maker_m1`, `maker_m2` 중 하나, 또는 `알파:방식,...`(파라미터 세트의 `exec` 가 우선, [`docs/EXECUTION.md`](docs/EXECUTION.md)) |
+| `MAKER_THROUGH_SPREAD` / `MAKER_MIN_VOLUME_MULT` | 0.5 / 20 | 메이커 체결에 필요한 관통 폭(합성 스프레드 배수, 스트레스 1.0) / 1분봉 거래대금 하한(주문 명목 배수) |
+| `BOOK_GUARD` | true | 호가 이상 시 진입 보류(실시간 호가 또는 1분봉 대용치) |
+| `BOOK_GUARD_SPREAD_MULT` / `BOOK_GUARD_MIN_SPREAD_BPS` / `BOOK_GUARD_DEPTH_FRAC` | 3 / 5 / 0.25 | 스프레드 ≥ 직전 24시간 중앙값의 배수이고 bp 이상 / 깊이 < 직전 24시간 중앙값의 비율 |
 | **포트폴리오·진입 크기 (P3, E1)** | | |
 | `PORTFOLIO_ALLOCATOR` | false | 봉 마감 일괄 결정 + 위험 예산. 꺼짐 = 봉 처리 순서(FIFO) |
 | `MAX_TOTAL_RISK_PCT` / `MAX_SAME_DIRECTION_RISK_PCT` | 2.5 / 1.5 | 총 개방 위험 / BTC 베타 가중 같은 방향 위험 한도(자산 %, 할당기 켰을 때) |

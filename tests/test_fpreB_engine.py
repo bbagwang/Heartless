@@ -12,6 +12,7 @@ from heartless.strategy import shock as SH
 from heartless.strategy.alphas import ALPHA_BY_NAME
 from synth import synth_candles
 from tests.test_fpreB_support import ALPHA, Scripted, backtest
+from tests.test_p0_lab import timer_db  # noqa: F401 (fixture)
 
 MIN, H = 60_000, 3_600_000
 
@@ -167,3 +168,29 @@ def test_a_symbol_still_trading_after_its_listed_delisting_is_not_closed(monkeyp
     ca.volume[k + 1:ca.n] = 0.0
     _, bt2 = backtest(monkeypatch, tmp_path, Scripted([]), {"ETHUSDT": ca}, shock=None, delisted={"ETHUSDT": d})
     assert bt2._delist_bars() == {"ETHUSDT": d}
+
+
+def test_the_lab_and_the_backtester_delisting_closes_agree_and_never_stack(timer_db, monkeypatch):
+    """F-pre-A's lab re-prices the trade its end flatten closed at the delisting; the backtester closes it itself when
+    given `delisted`. Both are the same 5x charge, and a lab whose backtester also gets `delisted` charges it once (the
+    lab only re-prices trades closed by the end flatten): exit time, reason and price agree, the price to rounding of
+    the slippage product (1e-6), far from a second charge (4 x 1.5 bp = 6e-4)."""
+    from tests.test_p0_lab import DAY, INLINE, _ms
+
+    db, params = timer_db
+    a, b = _ms(2023, 12, 29), _ms(2024, 1, 3) - 1
+    gone = _ms(2024, 1, 1) + 12 * H - 1
+    only_lab = lab.evaluate(params, ["BTCUSDT"], a, b, db, pool=INLINE, warmup_ms=DAY, chunk_days=0,
+                            delisted={"BTCUSDT": gone})
+    from heartless.learning import backtester as B
+
+    orig = B.Backtester  # the lab job imports it from the module at run time
+    monkeypatch.setattr(B, "Backtester", lambda *args, **kw: orig(*args, **{**kw, "delisted": {"BTCUSDT": gone}}))
+    both = lab.evaluate(params, ["BTCUSDT"], a, b, db, pool=INLINE, warmup_ms=DAY, chunk_days=0,
+                        delisted={"BTCUSDT": gone})
+    x, y = only_lab.trades[-1], both.trades[-1]
+    assert x["exit_reason"] == y["exit_reason"] == DELIST_REASON == lab.DELIST_REASON
+    assert x["entry_time"] == y["entry_time"] and x["exit_time"] == y["exit_time"] == gone
+    assert "delisting" in x and "delisting" not in y  # the lab did not touch the backtester's close
+    assert y["exit_price"] == pytest.approx(x["exit_price"], rel=1e-6)
+    assert [t["entry_time"] for t in only_lab.trades] == [t["entry_time"] for t in both.trades]

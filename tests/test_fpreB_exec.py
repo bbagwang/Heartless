@@ -124,6 +124,39 @@ def test_exec_mode_setting():
     assert taker == trials.config_hash(trials.lab_config(p, "htf_trend", ["BTCUSDT"], exec="taker")) != maker
 
 
+def test_params_exec_is_the_engine_setting_and_the_ledger_hashes_it():
+    """The registration's `params["exec"][alpha]`: carried by StrategyParams (serialised only when set, so every
+    existing parameter set and hash is unchanged), ahead of EXEC_MODE in the engine, and hashed by the ledger."""
+    from heartless.execution.engine import TradingEngine
+    from heartless.strategy.params import StrategyParams, exec_mapping
+
+    base = StrategyParams.default()
+    assert base.exec == {} and "exec" not in base.to_dict()
+    p = StrategyParams.from_dict({**base.to_dict(), "exec": {"htf_trend": "maker_m2"}})
+    assert p.exec == {"htf_trend": "maker_m2"} and p.to_dict()["exec"] == {"htf_trend": "maker_m2"}
+    assert p.clone().exec == p.exec and StrategyParams.from_stored(p.to_dict())[0].exec == p.exec
+    for bad in ({"htf_trend": "maker"}, "maker_m1"):
+        with pytest.raises(ValueError):
+            exec_mapping(bad)
+    assert exec_mapping(None) == {} == exec_mapping({})
+    # the engine: params first, then EXEC_MODE (per alpha, then its default)
+    s = Settings(_env_file=None, EXEC_MODE="maker_m1,ts_trend_tsmom:taker")
+    acc, _ = _account()
+    eng = TradingEngine("t", acc, p, s, synth_symbols(["XUSDT"]), store=None, bus=None, persist=False)
+    assert [eng.exec_mode(a) for a in ("htf_trend", "ts_trend_tsmom", "trend_pullback")] == ["maker_m2", "taker",
+                                                                                               "maker_m1"]
+    assert s.exec_for(["htf_trend", "ts_trend_tsmom", "trend_pullback"], p.exec) == {
+        "htf_trend": "maker_m2", "ts_trend_tsmom": "taker", "trend_pullback": "maker_m1"}
+    eng.set_params(base)
+    assert eng.exec_mode("htf_trend") == "maker_m1"
+    # the ledger: a parameter set with a maker mode is another configuration; taker (or no exec) hashes as before
+    h = lambda d, **kw: trials.config_hash(trials.lab_config(d, "htf_trend", ["BTCUSDT"], **kw))
+    assert h(p.to_dict()) != h(base.to_dict())
+    assert h(StrategyParams.from_dict({**base.to_dict(), "exec": {"htf_trend": "taker"}}).to_dict()) == h(base.to_dict())
+    assert h(base.to_dict(), exec=Settings(_env_file=None).exec_for(["htf_trend"])) == h(base.to_dict())
+    assert h(base.to_dict(), exec=s.exec_for(["htf_trend"])) == h(p.to_dict(), exec={"htf_trend": "maker_m1"})
+
+
 def _limit_calls(monkeypatch):
     calls = []
     orig = PaperAccount.limit_order

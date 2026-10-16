@@ -188,6 +188,35 @@ def test_offline_schedule_equals_the_online_detector(tmp_path):
     assert full.s0 == [x for x in det.s0 if x >= T0 + 8 * D]
 
 
+def test_a_primed_detector_continues_as_the_offline_schedule(tmp_path):
+    """The app's start-up: ShockDetector.prime reads universe.db up to `until` (no 1m bars), then live hours follow;
+    the firings equal the offline schedule's, and so does the S3 statistic of every live hour."""
+    ct, c = _btc_minutes()
+    udb, syms = _universe(tmp_path, ct, c)
+    start, end = T0 + 32 * D, int(ct[-1])
+    off = SH.build_schedule(start, end, btc_1m=(ct, c), universe_db=udb)
+    mid = T0 + 33 * D
+    det = SH.ShockDetector()
+    assert SH.ShockDetector().prime(tmp_path / "none.db", mid) == 0
+    n = det.prime(udb, until=mid, since=start - SH.WARMUP_MS)
+    assert n == (mid - (start - SH.WARMUP_MS)) // H + 1 and det.h_last == mid
+    st = Store(udb, readonly=True)
+    live = dict(SH.stored_cross_sections(st, mid + H, end + 1))
+    hours, hc = SH.btc_hourly_from_minutes(ct, c)
+    series = SH.cross_section_series(st, hours, hc)
+    st.close()
+    btc_at = dict(zip(hours.tolist(), hc.tolist()))
+    for h in range(mid + H, end + 2, H):
+        det.observe_hour(h, btc_at[h], live.get(h, {}))
+        k = int((h - hours[0]) // H)
+        assert (math.isnan(series[k]) and math.isnan(det.cms[-1])) or series[k] == det.cms[-1]
+    assert {r: [x for x in det.hourly[r] if x >= start] for r in SH.HOURLY_RULES} == off.hourly
+    assert off.hourly["S1"] and off.hourly["S3"]
+    # the default history keeps 45 days of firings (kill switch 30 days, research window 45 days)
+    again = SH.ShockDetector()
+    assert again.prime(udb, until=end + 1) > 0 and again.last_firing(end + 1) == off.last_firing(end + 1)
+
+
 def test_schedule_from_a_candle_database_and_without_universe(tmp_path):
     ct, c = _btc_minutes()
     db = Store(tmp_path / "c.db")

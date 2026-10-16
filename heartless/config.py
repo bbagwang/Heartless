@@ -275,6 +275,14 @@ class Settings(BaseSettings):
         """EXEC_MODE parsed: (mode of the alphas not named, {alpha: mode})."""
         return parse_exec_modes(self.exec_mode)
 
+    def exec_for(self, alphas, params_exec: dict | None = None) -> dict[str, str]:
+        """{alpha: the execution mode an engine trades it with} for `alphas`: the parameter set's `exec` first (ROADMAP
+        7.7.2 `params["exec"][alpha]`), then EXEC_MODE - the same precedence as TradingEngine.exec_mode. Pass it as
+        trials.lab_config(exec=) so the ledger hashes the mode the run really used (taker entries hash as before)."""
+        default, per = self.exec_modes
+        given = params_exec or {}
+        return {a: given.get(a) or per.get(a, default) for a in alphas}
+
 
 # ROADMAP 7.7.2: the execution modes an engine trades an alpha with (taker = the orders as before F-pre-B)
 EXEC_MODES = ("taker", "maker_m1", "maker_m2")

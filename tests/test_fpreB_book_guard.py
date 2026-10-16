@@ -96,3 +96,25 @@ def test_guard_on_the_proxy_and_in_a_backtest(monkeypatch, tmp_path):
     assert [int(t["entry_time"]) - 1 for t in on.trades] == [times[0]] and on.skipped.get("book guard") == 1
     off, _ = backtest(monkeypatch, tmp_path, Scripted(times, hold=2), {"XUSDT": ca}, shock=None, BOOK_GUARD=False)
     assert sorted(int(t["entry_time"]) - 1 for t in off.trades) == times and not off.skipped.get("book guard")
+
+
+def test_live_incremental_frames_give_the_same_proxy():
+    """The live bot's 1m frame is an IncrementalFrame (F7): the guard reads the same proxy series from it as from the
+    batch frame over the same bars."""
+    from heartless.data.incremental import IncrementalFrame
+
+    ca = synth_candles(1700, seed=8, price=77.7)
+    head = CandleArrays("1m", capacity=ca.n + 16)
+    for i in range(1500):
+        head.append(ca.candle_at(i))
+    inc = IncrementalFrame("1m", head, extra=ca.n)
+    for i in range(1500, ca.n):
+        c = ca.candle_at(i)
+        inc.append(c.open_time, c.open, c.high, c.low, c.close, c.volume, c.quote_volume, c.taker_buy_volume,
+                   c.close_time)
+    batch = FeatureFrame("1m", ca)
+    now = int(batch.close_time[-1])
+    a, b = book_proxy_series(inc, now, 10.0, 0.001, 1441), book_proxy_series(batch, now, 10.0, 0.001, 1441)
+    assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
+    g = BookGuard(Settings(_env_file=None))
+    assert g.figures(_V(inc), _ctx(), now, 0.001)[:2] == g.figures(_V(batch), _ctx(), now, 0.001)[:2]

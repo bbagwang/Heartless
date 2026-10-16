@@ -435,6 +435,42 @@ class ShockDetector(ShockEvents):
         """The last WINDOW_HOURS + 1 values of each hourly statistic (tests, /health)."""
         return {"ret": list(self.rets), "rv": list(self.rvs), "cm": list(self.cms)}
 
+    def prime(self, universe_db: str | os.PathLike, until: int, since: int | None = None, progress=None) -> int:
+        """Warm the detector at start-up from universe.db: BTC's hourly closes and the eligible cross-section of every
+        hour closing in [since, until] fed through observe_hour (the members' own history from KEEP_HOURS before), as
+        the offline schedule computes them, so the next live hour is judged exactly as build_schedule would
+        (tests/test_fpreB_shock.py). `since` defaults to WARMUP_MS + 45 days before `until`: the firings of the last 45
+        days are kept, so a shock while the bot was down still lowers the kill switch line and shortens the research
+        window. Returns the hours observed (0 without the file or BTC's bars; the layer then judges once live hours
+        fill its windows). S0 needs no priming (its halt lasts 15 minutes)."""
+        from heartless.core.store import Store
+
+        if not universe_db or not Path(universe_db).exists():
+            return 0
+        until = instant(until)
+        since = until - (WARMUP_MS + RESEARCH_MS) if since is None else instant(since)
+        st = Store(universe_db, readonly=True)
+        n = 0
+        try:
+            grid = btc_hourly_from_universe(st, since, until)
+            if grid is None:
+                return 0
+            hours, closes = grid
+            h0 = int(hours[0])
+            close_at = dict(zip(hours.tolist(), closes.tolist()))
+            for h, bars in stored_cross_sections(st, h0 - KEEP_HOURS * MS_H, int(hours[-1]), progress):
+                if h < h0:  # history of the members only
+                    for sym, (c, q) in bars.items():
+                        self.xs.push(h, sym, c, q)
+                    if h % MS_D == 0:
+                        self.xs.drop_stale(h)
+                    continue
+                self.observe_hour(h, close_at[h], bars)
+                n += 1
+        finally:
+            st.close()
+        return n
+
 
 # --- offline ---------------------------------------------------------------------------------------------------------
 class ShockSchedule(ShockEvents):
@@ -499,28 +535,40 @@ def cross_section_series(store, hours: np.ndarray, btc_closes: np.ndarray, progr
     """S3's statistic at every hour close of `hours` (a complete grid) from universe.db: every eligible perpetual's
     stored bars (universe.eligible_research: USDT perpetual, not a stablecoin) fed hour by hour to the _CrossSection the
     live detector uses, which picks the context's point-in-time members."""
-    from heartless.data import universe as U
-    from heartless.data.symbols_inventory import FUT_TABLE, decode_month
-
     out = np.full(len(hours), np.nan)
     if not len(hours):
         return out
-    inv = {r["symbol"]: r for r in store.load_symbol_inventory()}
-    ok_inst = {s for s, r in inv.items() if U.eligible_research(r) is None}
-
     h0, h1 = int(hours[0]), int(hours[-1])
     btc_rets = [float("nan")] + [log_return(float(btc_closes[k]), float(btc_closes[k - 1])) for k in range(1, len(hours))]
     xs = _CrossSection()
     pos = {int(h): k for k, h in enumerate(hours)}
-    # months whose bars close inside [h0 - KEEP_HOURS h, h1]: a bar opening at t closes at t + 1 h
-    first_open = h0 - (KEEP_HOURS + 1) * MS_H
+    # the members' own history before the first hour: bars closing from KEEP_HOURS before it
+    for h, bars in stored_cross_sections(store, h0 - KEEP_HOURS * MS_H, h1, progress):
+        for sym, (c, q) in bars.items():  # the order of pushes does not matter
+            xs.push(h, sym, c, q)
+        k = pos.get(h)
+        if k is not None:
+            out[k] = xs.value(h, btc_rets[max(0, k - S3_HOURS + 1):k + 1])
+        if h % MS_D == 0:
+            xs.drop_stale(h)
+    return out
+
+
+def stored_cross_sections(store, h_from: int, h_to: int, progress=None):
+    """(hour close, {symbol: (close, quote volume)}) for every hour close in [h_from, h_to] (an hour without bars gives
+    {}), from universe.db's 1h bars of the eligible perpetuals (universe.eligible_research), a month at a time."""
+    from heartless.data import universe as U
+    from heartless.data.symbols_inventory import FUT_TABLE, decode_month
+
+    inv = {r["symbol"]: r for r in store.load_symbol_inventory()}
+    ok_inst = {s for s, r in inv.items() if U.eligible_research(r) is None}
+    h_from, h_to = int(h_from), int(h_to)
     months = []
-    m = _month_start(first_open)
-    while m <= h1:
+    m = _month_start(h_from - MS_H)  # a bar opening at t closes at t + 1 h
+    while m <= h_to:
         months.append(m)
         m = _next_month(m)
     for mi, m in enumerate(months):
-        # one month of every symbol's bars, as (hour close -> {symbol: (close, qv)})
         per_hour: dict[int, dict[str, tuple[float, float]]] = {}
         for b in store.kline_block_index(FUT_TABLE, month=m):
             sym = b["symbol"]
@@ -533,22 +581,15 @@ def cross_section_series(store, hours: np.ndarray, btc_closes: np.ndarray, progr
             ot, cl, qv = d["open_time"], d["close"], d["quote_volume"]
             for k in range(len(ot)):
                 hc = int(ot[k]) + MS_H
-                if first_open + MS_H <= hc <= h1:
+                if h_from <= hc <= h_to:
                     per_hour.setdefault(hc, {})[sym] = (float(cl[k]), float(qv[k]))
-        h = max(_month_start(m) + MS_H, first_open + MS_H)
-        end_m = min(_next_month(m), h1)
+        h = max(_month_start(m) + MS_H, h_from)
+        end_m = min(_next_month(m), h_to)
         while h <= end_m:
-            for sym, (c, q) in (per_hour.get(h) or {}).items():  # the order of pushes does not matter
-                xs.push(h, sym, c, q)
-            k = pos.get(h)
-            if k is not None:
-                out[k] = xs.value(h, btc_rets[max(0, k - S3_HOURS + 1):k + 1])
-            if h % MS_D == 0:
-                xs.drop_stale(h)
+            yield h, per_hour.get(h) or {}
             h += MS_H
         if progress:
             progress(f"shock S3: {mi + 1}/{len(months)} months")
-    return out
 
 
 def _month_start(t: int) -> int:

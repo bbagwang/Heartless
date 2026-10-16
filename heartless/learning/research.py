@@ -425,6 +425,12 @@ class ResearchManager:
             d["CONTEXT_DB"] = str(ctx)
         return d
 
+    def lookback_days(self, now: int) -> int:
+        """The research cycle's window at `now`: RESEARCH_LOOKBACK_DAYS, shortened to 45 days by the shock layer from
+        the start of a shock state until 45 days after its last firing (ROADMAP 7.8 response 4; the app's ShockDetector
+        `app.shock`, shock.research_lookback_days). No detector, or SHOCK_LAYER off: the setting."""
+        return shock_research_lookback_days(self.app, now, int(self.s.research_lookback_days))
+
     def due(self, now: int) -> bool:
         """RESEARCH_INTERVAL_MINUTES after the last cycle started, and at least twice the last cycle's length (E2): the
         worker spends at most half of its time on research even when the champion enables more alphas than the
@@ -503,7 +509,7 @@ class ResearchManager:
                                                                 + describe_selection(sel) + ")"})
             t_wall = time.monotonic()
             result = await loop.run_in_executor(self.pool, run_research_cycle, str(self.s.db_path), settings_dict,
-                                                self.app.params.to_dict(), symbols_dict, self.s.research_lookback_days,
+                                                self.app.params.to_dict(), symbols_dict, self.lookback_days(now),
                                                 self.s.research_candidates, now % 100_000, sel["alphas"],
                                                 self.store.get("advisor.seeds", {}) or {}, self.s.research_folds,
                                                 seal.live_loop("research_cycle"))  # FORWARD-exempt (ROADMAP 7.9)
@@ -888,6 +894,28 @@ KS_SD_FLOOR = 1.0
 KS_SD_CAP = 2.0
 
 
+def _app_shock(app):
+    """The live shock layer the app runs (`app.shock`, a strategy/shock.ShockDetector wired by the app, docs/SHOCK.md
+    section 5), None without one or with SHOCK_LAYER off."""
+    sh = getattr(app, "shock", None)
+    if sh is None or not getattr(getattr(app, "s", None), "shock_layer", True):
+        return None
+    return sh
+
+
+def shock_kill_switch_h(app, now: int, base: float) -> float:
+    """The kill switch's CUSUM alarm line: KILL_SWITCH_H, lowered to 6 for 30 days after a shock (ROADMAP 7.8 response
+    3; k and the window sum stay)."""
+    sh = _app_shock(app)
+    return float(sh.kill_switch_h(now, base)) if sh is not None else float(base)
+
+
+def shock_research_lookback_days(app, now: int, base: int) -> int:
+    """The research cycle's window in days: `base`, 45 within 45 days of a shock (ROADMAP 7.8 response 4)."""
+    sh = _app_shock(app)
+    return int(sh.research_lookback_days(now, base)) if sh is not None else int(base)
+
+
 class AlphaKillSwitch:
     """Per-alpha guard on live (paper or real) results: switches a losing alpha off at once (ROADMAP P4).
 
@@ -967,13 +995,14 @@ class AlphaKillSwitch:
         cusum, low = cusum_lower(rs, exp, s.kill_switch_k, scale)
         win = rs[-s.kill_switch_window:] if s.kill_switch_window > 0 else rs
         wsum = sum(win)
-        by_cusum = bool(rs) and cusum <= -s.kill_switch_h
+        h = shock_kill_switch_h(self.app, now_ms(), float(s.kill_switch_h))  # 8 -> 6 after a shock (ROADMAP 7.8)
+        by_cusum = bool(rs) and cusum <= -h
         by_window = bool(rs) and wsum < s.kill_switch_window_r
-        rule = " + ".join(x for x, hit in ((f"CUSUM <= -{s.kill_switch_h:g}sd", by_cusum),
+        rule = " + ".join(x for x, hit in ((f"CUSUM <= -{h:g}sd", by_cusum),
                                            (f"last {len(win)} sum < {s.kill_switch_window_r:g}R", by_window)) if hit)
         st = {"engine": engine, "alpha": alpha, "since": int(since), "n": len(rs), "sum_r": sum(rs),
               "avg_r": sum(rs) / len(rs) if rs else 0.0, "expected": exp, "verdict": evidence.verdict(alpha),
-              "sd": sd, "scale": scale, "cusum": cusum, "cusum_low": low, "k": s.kill_switch_k, "h": s.kill_switch_h,
+              "sd": sd, "scale": scale, "cusum": cusum, "cusum_low": low, "k": s.kill_switch_k, "h": h,
               "window": s.kill_switch_window, "window_n": len(win), "window_sum": wsum, "window_r": s.kill_switch_window_r,
               "tripped": by_cusum or by_window, "rule": rule, "at": now_ms()}
         self.state[(engine, alpha)] = st

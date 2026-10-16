@@ -260,8 +260,10 @@ class TradingEngine:
 
     # --- F-pre-B: execution mode and shock layer -------------------------------------------------------------------
     def exec_mode(self, alpha: str) -> str:
-        """The execution mode the engine trades `alpha` with (EXEC_MODE: taker | maker_m1 | maker_m2)."""
-        return self._exec.get(alpha, self._exec_default)
+        """The execution mode the engine trades `alpha` with (taker | maker_m1 | maker_m2): the parameter set's
+        `exec[alpha]` (ROADMAP 7.7.2), else the EXEC_MODE setting (Settings.exec_for)."""
+        mode = (getattr(self.params, "exec", None) or {}).get(alpha)
+        return mode or self._exec.get(alpha, self._exec_default)
 
     def _shock_exempt(self, alpha: str) -> bool:
         ex = self._exempt.get(alpha)
