@@ -431,8 +431,10 @@ print(res.report()); hourly.record(res, "liq_cascade")
 - `ctx.members(T)`: 그 달 구성원. `ctx.close(...)`: 그 마감가.
 
 **통계** (`NeutralResult.stats()`, 7.4절)
-- 일별 순손익 % (거래 없는 날 0 포함), t = 평균 / (표준편차 / √일수), 연환산 = 일평균 × 365, 일별 자산 곡선의 최대낙폭, 달력 연도·분기 합계, 7일 블록 t(정보용), 강제 청산 수, 데이터 끝 청산 수(`data_end_closes`), 포지션 수, 수수료·펀딩 합계, 최소 현금(음수면 현금이 모자란 규칙)
-- `neutral.record(result, family)`, 또는 CLI `--tag`가 원장에 `tool = "neutral"` 한 줄을 남깁니다. `t_day` 자리에 일별 t, 줄 안에 `neutral`(일수, 연환산, 최대낙폭, 주 블록 t, 강제 청산, 데이터 끝 청산)이 들어갑니다.
+- 일별 순손익 % (거래 없는 날 0 포함), **관문 t = 일별 순손익의 뉴이-웨스트 HAC t**(Bartlett, 고정 lag 14일, `t`·`t_hac`; ROADMAP 6절 2026-10-16), 정보용 일별 단순 t(`t_daily` = 평균 / (표준편차 / √일수))와 7일 블록 t(`weekly_t`), 연환산 = 일평균 × 365, 일별 자산 곡선의 최대낙폭, 달력 연도·분기 합계, 강제 청산 수, 데이터 끝 청산 수(`data_end_closes`), 포지션 수, 수수료·펀딩 합계, 최소 현금(음수면 현금이 모자란 규칙)
+  - 이유: 캐리 손익은 며칠씩 이어지므로 단순 t가 증거를 부풀립니다. 합성 AR(1)(ρ 0.7, 엣지 0, 1,460일)에서 단순 t ≥ 3이 HAC t ≥ 3보다 몇 배 자주 나옵니다. lag 0의 HAC t는 단순 t와 같습니다(`tests/test_rt_neutral_hac.py`).
+- `neutral.record(result, family)`, 또는 CLI `--tag`가 원장에 `tool = "neutral"` 한 줄을 남깁니다. `t_day` 자리에 HAC t, 줄 안에 `neutral`(일수, HAC t와 lag, 일별 단순 t, 주 블록 t, 연환산, 최대낙폭, 강제 청산, 데이터 끝 청산)이 들어갑니다.
+- **관문 계산**: `neutral.train_gate(결과, N, stress=스트레스 결과)`와 `neutral.confirmation_gate(결과, "valid" | "forward")`가 등록 JSON(`docs/results/wave_f_registration.json` "gates")의 기준으로 조건마다 참·거짓과 값을 돌려줍니다. 스트레스 결과가 없으면 TRAIN 관문의 스트레스 조건은 실패입니다. 관문 담당이 결과 파일로 다시 계산할 때 이 함수를 씁니다.
 
 **합성 데이터로 확인한 것** (`tests/test_fpreA_neutral.py`)
 - 펀딩 시각 규약(진입 마감의 정산은 내고, 청산 마감의 정산은 안 냄, 직전 종가로 계산)

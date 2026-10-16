@@ -199,7 +199,9 @@ def test_daily_equity_is_continuous_and_marks_both_legs():
     v = np.array([r.daily[d] for d in days]) / 10_000 * 100
     assert st["days"] == 3 and st["mean_daily_pct"] == pytest.approx(v.mean(), abs=1e-6)
     assert st["annualized_pct"] == pytest.approx(v.mean() * 365, abs=1e-3)
-    assert st["t"] == pytest.approx(v.mean() / (v.std(ddof=1) / math.sqrt(3)), abs=1e-3)
+    # the plain daily t is informational; the gating "t" is the HAC t (ROADMAP section 6, 2026-10-16)
+    assert st["t_daily"] == pytest.approx(v.mean() / (v.std(ddof=1) / math.sqrt(3)), abs=1e-3)
+    assert st["t"] == st["t_hac"] and st["hac_lag_days"] == 14
 
 
 def test_statistics_years_quarters_drawdown_and_weekly_t():
@@ -304,6 +306,7 @@ def test_ledger_line_and_reruns_do_not_raise_n(monkeypatch):
     e = N.record(r)
     assert e["tool"] == "neutral" and e["family"] == "carry_neutral" and e["wave_f"] == "TRAIN-B"
     assert e["exec"] == "taker" and e["neutral"]["liquidations"] == 0 and e["n"] == 1
+    assert e["t_day"] == round(r.stats()["t_hac"], 3) and {"t_hac", "t_daily", "weekly_t"} <= set(e["neutral"])
     assert "window" not in e["config"] and e["config"]["leverage"] == 2.0
     rs = _run(Scripted(enter=_close(2), leave=_close(10)), _ctx(), stress=True)
     N.record(rs)

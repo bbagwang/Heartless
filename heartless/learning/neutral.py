@@ -29,9 +29,12 @@ Account (one pool of cash C, spot and futures wallets together; transfers are fr
   positions keep their exit rules after membership ends. Decisions see only bars that closed by the decision.
 
 Statistics (7.4): daily net PnL in % of C from the equity marked at every UTC day end (days without trades are 0),
-t = mean / (sd / sqrt(days)), annualized = daily mean x 365, max drawdown on the daily equity curve, calendar years
-and quarters, the weekly-block t for information, liquidations. record() writes the run to the trial ledger (tool
-"neutral"; the window and costs stay out of the configuration).
+the gating t = the Newey-West HAC t of that daily series (Bartlett kernel, fixed lag HAC_LAG_DAYS = 14; ROADMAP
+section 6, 2026-10-16: carry PnL runs for days, so the plain daily t overstates the evidence), the plain daily t
+mean / (sd / sqrt(days)) and the weekly-block t for information, annualized = daily mean x 365, max drawdown on the
+daily equity curve, calendar years and quarters, liquidations. record() writes the run to the trial ledger (tool
+"neutral", t_day = the HAC t; the window and costs stay out of the configuration); train_gate() and
+confirmation_gate() apply the registered gates (docs/results/wave_f_registration.json "gates") to results.
 """
 from __future__ import annotations
 
@@ -44,12 +47,15 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from heartless.execution.stats import hac_t
 from heartless.learning import seal
 from heartless.learning.hourly import (COST_TABLE, DELIST_SLIP_MULT, HALF_SPREAD_BPS, MS_D, MS_H, STRESS, HourlyBars,
                                        ReadOnlyStore, alpha_code_hash, load_bars)
 
 MAINTENANCE = 0.015  # ROADMAP 7.7.1: maintenance margin rate, fixed
 LEVERAGE = 2.0  # ROADMAP 7.13: carry / neutral classes at 2x or less
+# ROADMAP section 6 (2026-10-16): the neutral gates use the Newey-West t of the daily net PnL with this fixed lag (days)
+HAC_LAG_DAYS = 14
 
 
 def _iso(ms: int) -> str:
@@ -398,7 +404,9 @@ class NeutralResult:
         return np.array([self.daily[d] for d in sorted(self.daily)], dtype=float) / self.capital * 100.0
 
     def stats(self) -> dict:
-        """ROADMAP 7.4 neutral statistics (percent of C)."""
+        """ROADMAP 7.4 neutral statistics (percent of C). "t" is the gating t: the Newey-West HAC t of the daily net
+        PnL (Bartlett, lag HAC_LAG_DAYS; also "t_hac"); "t_daily" (the plain t of the mean) and "weekly_t" are for
+        information only (ROADMAP section 6, 2026-10-16)."""
         v = self.daily_pct()
         days = sorted(self.daily)
         n = len(v)
@@ -407,7 +415,9 @@ class NeutralResult:
         eq = np.array([self.equity[d] for d in days], dtype=float)
         peak = np.maximum.accumulate(np.concatenate(([self.capital], eq)))[1:] if n else np.zeros(0)
         dd = float(np.max((peak - eq) / peak)) * 100.0 if n else 0.0
-        return {"days": n, "mean_daily_pct": round(mean, 6), "t": round(mean / (sd / math.sqrt(n)), 3) if sd > 0 else 0.0,
+        t_hac = round(hac_t([float(x) for x in v], HAC_LAG_DAYS), 3)
+        return {"days": n, "mean_daily_pct": round(mean, 6), "t": t_hac, "t_hac": t_hac, "hac_lag_days": HAC_LAG_DAYS,
+                "t_daily": round(mean / (sd / math.sqrt(n)), 3) if sd > 0 else 0.0,
                 "annualized_pct": round(mean * 365, 4), "total_pct": round(float(v.sum()), 4),
                 "max_drawdown_pct": round(dd, 4), "weekly_t": self.weekly_t(), "liquidations": len(self.liquidations),
                 # positions closed early because a leg's stored data stopped (not a delisting): a lagging market build
@@ -455,8 +465,9 @@ class NeutralResult:
         s = self.stats()
         lines = [f"[{self.strategy}] neutral {_iso(self.start)[:10]} -> {_iso(self.end)[:10]}"
                  f"{' STRESS' if self.stress else ''}  days={s['days']} mean={s['mean_daily_pct']:+.5f}%/day "
-                 f"t={s['t']:+.2f} ann={s['annualized_pct']:+.2f}% maxDD={s['max_drawdown_pct']:.2f}% "
-                 f"weekly t={s['weekly_t']:+.2f} positions={s['positions']} liquidations={s['liquidations']} "
+                 f"HAC{s['hac_lag_days']} t={s['t']:+.2f} (daily t={s['t_daily']:+.2f} weekly t={s['weekly_t']:+.2f}) "
+                 f"ann={s['annualized_pct']:+.2f}% maxDD={s['max_drawdown_pct']:.2f}% "
+                 f"positions={s['positions']} liquidations={s['liquidations']} "
                  + (f"data_end={s['data_end_closes']} " if s["data_end_closes"] else "") +
                  f"fees={s['fees_pct']:.3f}% funding={s['funding_pct']:+.3f}% ({s['seconds']:.1f}s)"]
         lines += [f"  year    {k} {v:+.4f}%" for k, v in self.by_year().items()]
@@ -682,19 +693,105 @@ def evaluate(strategy: NeutralStrategy, start: int, end: int, universe_db=None, 
 
 
 def record(result: NeutralResult, family: str | None = None, extra: dict | None = None, ledger=None) -> dict:
-    """Append the run to the trial ledger as tool "neutral" (n = closed positions, t_day = the daily t of 7.4, the
-    other neutral statistics in the line); the configuration excludes the window and costs, so a stress, VALID or
-    FORWARD rerun keeps N."""
+    """Append the run to the trial ledger as tool "neutral" (n = closed positions, t_day = the gating HAC t of the
+    daily net PnL, ROADMAP section 6 2026-10-16; the plain daily t, the weekly-block t and the other neutral statistics
+    in the line); the configuration excludes the window and costs, so a stress, VALID or FORWARD rerun keeps N."""
     from heartless.learning import trials
 
     fam = (family or result.family or "").strip()
     s = result.stats()
     return trials.record("neutral", fam, result.config, (result.start, result.end), n=s["positions"], avg_r=None,
-                         t_day=s["t"], extra={"stress": result.stress, "evaluator": "neutral",
-                                              "neutral": {k: s[k] for k in ("days", "annualized_pct", "max_drawdown_pct",
-                                                                            "weekly_t", "liquidations",
-                                                                            "data_end_closes")},
+                         t_day=s["t_hac"], extra={"stress": result.stress, "evaluator": "neutral",
+                                                  "neutral": {k: s[k] for k in ("days", "t_hac", "hac_lag_days",
+                                                                                "t_daily", "weekly_t", "annualized_pct",
+                                                                                "max_drawdown_pct", "liquidations",
+                                                                                "data_end_closes")},
                                               **(extra or {})}, ledger=ledger)
+
+
+# --- registered gates (docs/results/wave_f_registration.json "gates", ROADMAP 7.6) -----------------------------------
+PREREG = seal.REPO_ROOT / "docs" / "results" / "wave_f_registration.json"
+# the registered gates as of 2026-10-16, used when the registration file is not readable (an installed package)
+DEFAULT_GATES = {
+    "train_neutral": {"annualized_net_return_gt": 0.02, "max_drawdown_lt": 0.03, "every_year_net_positive": True,
+                      "stress_annualized_net_return_gt": 0.0, "forced_liquidations": 0,
+                      "t_hac14_daily_net_ge": "max(3, sqrt(2 ln N_family))"},
+    "valid_neutral": {"every_quarter_net_positive": True, "t_hac14_daily_net_ge": 1.0,
+                      "quarters": [["2026-01-13", "2026-03-31"], ["2026-04-01", "2026-06-30"],
+                                   ["2026-07-01", "2026-09-30"]]},
+    "forward_neutral": {"span_net_positive": True, "span_blocks": 3, "t_hac14_daily_net_ge": 1.0},
+}
+
+
+def registered_gate(name: str) -> dict:
+    """One neutral gate of the Wave F registration (train_neutral, valid_neutral, forward_neutral)."""
+    import json
+
+    try:
+        gates = json.loads(PREREG.read_text(encoding="utf-8")).get("gates") or {}
+    except (OSError, ValueError):
+        gates = {}
+    g = gates.get(name)
+    if not isinstance(g, dict):
+        g = DEFAULT_GATES[name]
+    if "t_hac14_daily_net_ge" not in g:  # a gate without the amended statistic would silently gate on nothing
+        raise ValueError(f"registered gate {name} has no t_hac14_daily_net_ge (ROADMAP section 6, 2026-10-16)")
+    return g
+
+
+def _day_ms(text: str) -> int:
+    return int(datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _verdict(checks: dict[str, bool], values: dict) -> dict:
+    return {"passed": bool(checks) and all(checks.values()), "checks": checks, "values": values}
+
+
+def train_gate(result: NeutralResult, n_family: int, stress: NeutralResult | None = None) -> dict:
+    """The registered TRAIN gate of a neutral candidate (7.6 train_neutral): HAC t of the daily net PnL >=
+    max(3, sqrt(2 ln N)), annualized net return above 2% and max drawdown under 3% of C, every calendar year net
+    positive, the stressed run's annualized net return above 0 (a missing stress run fails that check) and no forced
+    liquidation. The plain daily t never gates (ROADMAP section 6, 2026-10-16)."""
+    from heartless.learning import trials
+
+    g = registered_gate("train_neutral")
+    s = result.stats()
+    bar = trials.threshold(n_family)
+    years = result.by_year()
+    st = stress.stats() if stress is not None else None
+    checks = {f"HAC t >= {bar:.2f}": s["t_hac"] >= bar,
+              f"annualized > {g['annualized_net_return_gt']:.0%}": s["annualized_pct"] > g["annualized_net_return_gt"] * 100,
+              f"max drawdown < {g['max_drawdown_lt']:.0%}": s["max_drawdown_pct"] < g["max_drawdown_lt"] * 100,
+              "every year net positive": bool(years) and all(v > 0 for v in years.values()),
+              "stress annualized > 0": st is not None and st["annualized_pct"] > g["stress_annualized_net_return_gt"] * 100,
+              "no forced liquidation": s["liquidations"] <= int(g.get("forced_liquidations", 0))
+                                       and (st is None or st["liquidations"] <= int(g.get("forced_liquidations", 0)))}
+    return _verdict(checks, {"t_hac": s["t_hac"], "t_bar": round(bar, 3), "n_family": int(n_family),
+                             "t_daily": s["t_daily"], "weekly_t": s["weekly_t"], "annualized_pct": s["annualized_pct"],
+                             "max_drawdown_pct": s["max_drawdown_pct"], "by_year": years,
+                             "stress_annualized_pct": None if st is None else st["annualized_pct"]})
+
+
+def confirmation_gate(result: NeutralResult, kind: str) -> dict:
+    """The registered confirmation gate (7.6): kind "valid" = every registered VALID-F quarter net positive and HAC t
+    >= 1.0; kind "forward" = the registered span net positive and HAC t >= 1.0. Stress is reported, never gating."""
+    if kind not in ("valid", "forward"):
+        raise ValueError(f"confirmation kind {kind!r}: valid or forward")
+    g = registered_gate(f"{kind}_neutral")
+    s = result.stats()
+    need = float(g["t_hac14_daily_net_ge"])
+    checks = {f"HAC t >= {need:g}": s["t_hac"] >= need}
+    values: dict = {"t_hac": s["t_hac"], "t_daily": s["t_daily"], "weekly_t": s["weekly_t"], "total_pct": s["total_pct"]}
+    if kind == "valid":
+        q = {}
+        for a, b in g["quarters"]:
+            lo, hi = _day_ms(a) // MS_D, _day_ms(b) // MS_D
+            q[f"{a}..{b}"] = round(sum(p for d, p in result.daily.items() if lo <= d <= hi) / result.capital * 100, 6)
+        values["quarters"] = q
+        checks["every quarter net positive"] = all(v > 0 for v in q.values())
+    else:
+        checks["span net positive"] = s["total_pct"] > 0
+    return _verdict(checks, values)
 
 
 def synthetic_context(start: int, series: dict[tuple[str, str], dict], members_by_month: dict | None = None,

@@ -155,7 +155,7 @@ def forward_gates() -> dict[str, dict]:
     gates = _prereg().get("gates") or {}
     out = {k: v for k, v in gates.items() if k.startswith("forward_") and isinstance(v, dict)}
     return out or {"forward_directional": {"avg_r_gt": 0.0, "t_day_ge": 1.0},
-                   "forward_neutral": {"t_daily_net_ge": 1.0, "span_net_positive": True, "span_blocks": 3}}
+                   "forward_neutral": {"t_hac14_daily_net_ge": 1.0, "span_net_positive": True, "span_blocks": 3}}
 
 
 def span_blocks(gate: str, trades_per_30d: float | None = None, min_blocks: int = 1) -> int:
